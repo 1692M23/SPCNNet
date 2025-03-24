@@ -53,22 +53,22 @@ data_config = {
 
 # 模型配置
 model_config = {
-    'input_dim': 7214,  # 光谱维度
-    'num_filters': 32,  # 初始卷积层通道数
-    'num_blocks': 2,    # 每个残差块组的块数
-    'model_dir': 'models'  # 模型保存目录
+    'model_dir': 'models',  # 模型保存目录
+    'input_size': 3907,  # 输入特征维度
+    'output_size': 1,  # 输出维度
+    'hidden_size': 256,  # 隐藏层大小
+    'num_layers': 2,  # 层数
+    'dropout': 0.1  # 降低dropout率
 }
 
 # 训练配置
 training_config = {
-    'device': 'cuda' if torch.cuda.is_available() else 'cpu',
-    'lr': 0.001,
-    'weight_decay': 1e-4,
-    'num_epochs': 100,
+    'batch_size': 32,  # 减小批次大小
+    'lr': 0.0001,  # 降低初始学习率
+    'weight_decay': 0.001,  # 增加权重衰减
+    'epochs': 100,
     'early_stopping_patience': 15,
-    'batch_size': 32,
-    'shuffle': True,
-    'elements': ['Fe', 'Mg', 'Si', 'Ca', 'Ti', 'Ni', 'Cr', 'Mn', 'V', 'Co']  # 要预测的元素列表
+    'device': 'cuda' if torch.cuda.is_available() else 'cpu'
 }
 
 # 超参数调优配置

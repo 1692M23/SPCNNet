@@ -147,60 +147,71 @@ class SpectralResCNN(nn.Module):
     def __init__(self, input_size):
         super(SpectralResCNN, self).__init__()
         
-        # 输入处理层：将原始光谱转换为特征图
+        # 输入处理层：使用更小的卷积核和更少的通道数
         self.input_conv = nn.Sequential(
-            nn.Conv1d(1, 32, kernel_size=7, stride=1, padding=3),  # 1通道输入，32通道输出
-            nn.BatchNorm1d(32),  # 标准化
-            nn.ReLU()  # 激活函数
+            nn.Conv1d(1, 16, kernel_size=5, stride=1, padding=2),  # 减少初始通道数
+            nn.BatchNorm1d(16),
+            nn.LeakyReLU(0.1)  # 使用LeakyReLU替代ReLU
         )
         
         # 残差块组1：提取低级特征
         self.res_block1 = nn.Sequential(
-            ResidualBlock(32, 64, kernel_size=5),  # 第一个残差块
-            ResidualBlock(64, 64, kernel_size=5),  # 第二个残差块
-            nn.MaxPool1d(kernel_size=4, stride=4),  # 降采样
-            nn.Dropout(0.2)  # 防止过拟合
+            ResidualBlock(16, 32, kernel_size=3),  # 减少通道数
+            ResidualBlock(32, 32, kernel_size=3),
+            nn.MaxPool1d(kernel_size=2, stride=2),  # 减小池化步长
+            nn.Dropout(0.1)  # 减少dropout率
         )
         
         # 残差块组2：提取中级特征
         self.res_block2 = nn.Sequential(
-            ResidualBlock(64, 128, kernel_size=3),  # 第一个残差块
-            ResidualBlock(128, 128, kernel_size=3),  # 第二个残差块
-            nn.MaxPool1d(kernel_size=4, stride=4),  # 降采样
-            nn.Dropout(0.2)  # 防止过拟合
+            ResidualBlock(32, 64, kernel_size=3),
+            ResidualBlock(64, 64, kernel_size=3),
+            nn.MaxPool1d(kernel_size=2, stride=2),
+            nn.Dropout(0.1)
         )
         
         # 残差块组3：提取高级特征
         self.res_block3 = nn.Sequential(
-            ResidualBlock(128, 256, kernel_size=3),  # 第一个残差块
-            ResidualBlock(256, 256, kernel_size=3),  # 第二个残差块
-            nn.MaxPool1d(kernel_size=4, stride=4),  # 降采样
-            nn.Dropout(0.2)  # 防止过拟合
+            ResidualBlock(64, 128, kernel_size=3),
+            ResidualBlock(128, 128, kernel_size=3),
+            nn.MaxPool1d(kernel_size=2, stride=2),
+            nn.Dropout(0.1)
         )
         
-        # 自适应池化层：统一特征维度
+        # 自适应池化层
         self.adaptive_pool = nn.AdaptiveAvgPool1d(1)
         
-        # 全连接层：特征降维和预测
+        # 全连接层：使用更平滑的维度变化
         self.fc = nn.Sequential(
-            # 第一层：256 -> 512
-            nn.Linear(256, 512),
-            nn.ReLU(),
-            nn.Dropout(0.5),
+            nn.Linear(128, 256),
+            nn.LeakyReLU(0.1),
+            nn.Dropout(0.2),
             
-            # 第二层：512 -> 256
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            
-            # 第三层：256 -> 128
             nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Dropout(0.5),
+            nn.LeakyReLU(0.1),
+            nn.Dropout(0.2),
             
-            # 输出层：128 -> 1
-            nn.Linear(128, 1)
+            nn.Linear(128, 64),
+            nn.LeakyReLU(0.1),
+            nn.Dropout(0.2),
+            
+            nn.Linear(64, 1)
         )
+        
+        # 初始化权重
+        self._initialize_weights()
+    
+    def _initialize_weights(self):
+        """使用Kaiming初始化权重"""
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.constant_(m.bias, 0)
     
     def forward(self, x):
         """
@@ -292,18 +303,19 @@ def train_model(model, train_loader, val_loader, element, config):
     模型训练主函数
     """
     criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(  # 使用AdamW优化器
         model.parameters(),
-        lr=config['training']['learning_rate'],
-        weight_decay=config['training']['weight_decay']
+        lr=config['training']['lr'],
+        weight_decay=config['training']['weight_decay'],
+        eps=1e-8  # 增加数值稳定性
     )
     
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    # 使用余弦退火学习率调度器
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer,
-        mode='min',
-        factor=0.5,
-        patience=5,
-        verbose=True
+        T_0=10,  # 第一次重启的epoch数
+        T_mult=2,  # 每次重启后周期的倍数
+        eta_min=1e-6  # 最小学习率
     )
     
     os.makedirs(config['output']['model_dir'], exist_ok=True)
@@ -312,6 +324,7 @@ def train_model(model, train_loader, val_loader, element, config):
     patience_counter = 0
     train_losses = []
     val_losses = []
+    nan_counter = 0  # 记录连续nan的次数
     
     for epoch in range(config['training']['epochs']):
         # 训练和验证
@@ -320,17 +333,25 @@ def train_model(model, train_loader, val_loader, element, config):
         
         # 检查是否有 nan 值
         if torch.isnan(torch.tensor(avg_train_loss)) or torch.isnan(torch.tensor(avg_val_loss)):
+            nan_counter += 1
             logger.warning(f"检测到 nan 值，当前学习率: {optimizer.param_groups[0]['lr']}")
-            # 降低学习率
-            for param_group in optimizer.param_groups:
-                param_group['lr'] *= 0.1
+            
+            # 如果连续出现3次nan，重置模型和学习率
+            if nan_counter >= 3:
+                logger.warning("连续出现nan值，重置模型和学习率")
+                model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = config['training']['lr'] * 0.1
+                nan_counter = 0
             continue
+        else:
+            nan_counter = 0  # 重置nan计数器
         
         train_losses.append(avg_train_loss)
         val_losses.append(avg_val_loss)
         
         # 更新学习率
-        scheduler.step(avg_val_loss)
+        scheduler.step()
         
         # 早停检查
         if avg_val_loss < best_val_loss:
@@ -348,6 +369,10 @@ def train_model(model, train_loader, val_loader, element, config):
                        f'Train Loss: {avg_train_loss:.4f}, '
                        f'Val Loss: {avg_val_loss:.4f}, '
                        f'LR: {optimizer.param_groups[0]["lr"]:.6f}')
+    
+    if not train_losses or not val_losses:
+        logger.error("训练过程中没有有效的损失值")
+        return [], []
     
     return train_losses, val_losses
 
