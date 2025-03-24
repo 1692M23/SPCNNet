@@ -27,6 +27,7 @@ from scipy.stats import spearmanr, pearsonr
 import config
 from model import load_trained_model, predict
 from preprocessdata import LAMOSTPreprocessor
+from utils import CacheManager, ProgressManager, ask_clear_cache
 
 # 配置日志
 logging.basicConfig(
@@ -39,6 +40,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger('evaluation')
 
+# 创建缓存管理器
+cache_manager = CacheManager(cache_dir=os.path.join(config.output_config['cache_dir'], 'evaluation'))
+
 def load_element_results(element):
     """
     加载元素测试结果数据
@@ -49,6 +53,13 @@ def load_element_results(element):
     返回:
         dict: 包含测试结果的字典，如果加载失败则返回None
     """
+    # 检查缓存
+    cache_key = f"results_{element}"
+    cached_results = cache_manager.get_cache(cache_key)
+    if cached_results is not None:
+        logger.info(f"从缓存加载测试结果: {element}")
+        return cached_results['results']
+    
     result_path = os.path.join(config.output_config['results_dir'], f"{element}_test_results.npz")
     if not os.path.exists(result_path):
         logger.error(f"找不到 {element} 的测试结果文件: {result_path}")
@@ -58,6 +69,12 @@ def load_element_results(element):
         data = np.load(result_path)
         results = {key: data[key] for key in data.files}
         logger.info(f"成功加载 {element} 测试结果")
+        
+        # 保存到缓存
+        cache_manager.set_cache(cache_key, {
+            'results': results
+        })
+        
         return results
     except Exception as e:
         logger.error(f"加载 {element} 测试结果失败: {str(e)}")
@@ -73,11 +90,24 @@ def load_csv_metadata(csv_file):
     返回:
         pandas.DataFrame: 包含spec、teff和logg的DataFrame
     """
+    # 检查缓存
+    cache_key = f"metadata_{os.path.basename(csv_file)}"
+    cached_metadata = cache_manager.get_cache(cache_key)
+    if cached_metadata is not None:
+        logger.info(f"从缓存加载元数据: {csv_file}")
+        return cached_metadata['metadata']
+    
     try:
         df = pd.read_csv(csv_file)
         if 'spec' not in df.columns or 'teff' not in df.columns or 'logg' not in df.columns:
             logger.error(f"CSV文件 {csv_file} 缺少必要的列")
             return None
+            
+        # 保存到缓存
+        cache_manager.set_cache(cache_key, {
+            'metadata': df
+        })
+        
         return df
     except Exception as e:
         logger.error(f"加载CSV元数据失败: {str(e)}")
@@ -106,27 +136,32 @@ def load_test_predictions(elements=None, csv_files=None):
     
     results = {}
     
-    for element in elements:
-        element_results = load_element_results(element)
-        if element_results is None:
-            continue
-        
-        # 加载对应的CSV元数据（如果存在）
-        csv_file = csv_files.get(element, '')
-        if csv_file and os.path.exists(csv_file):
-            metadata_df = load_csv_metadata(csv_file)
-            if metadata_df is not None:
-                element_results['metadata'] = metadata_df
-        else:
-            # 如果没有CSV文件，创建一个简单的元数据
-            num_samples = len(element_results['true_values'])
-            element_results['metadata'] = pd.DataFrame({
-                'spec': range(num_samples),
-                'teff': range(num_samples),
-                'logg': range(num_samples)
-            })
-        
-        results[element] = element_results
+    # 使用进度管理器
+    with ProgressManager(len(elements), desc="加载测试预测结果") as progress:
+        for element in elements:
+            element_results = load_element_results(element)
+            if element_results is None:
+                continue
+            
+            # 加载对应的CSV元数据（如果存在）
+            csv_file = csv_files.get(element, '')
+            if csv_file and os.path.exists(csv_file):
+                metadata_df = load_csv_metadata(csv_file)
+                if metadata_df is not None:
+                    element_results['metadata'] = metadata_df
+            else:
+                # 如果没有CSV文件，创建一个简单的元数据
+                num_samples = len(element_results['true_values'])
+                element_results['metadata'] = pd.DataFrame({
+                    'spec': range(num_samples),
+                    'teff': range(num_samples),
+                    'logg': range(num_samples)
+                })
+            
+            results[element] = element_results
+            
+            # 更新进度
+            progress.update(1)
     
     return results
 
@@ -142,6 +177,13 @@ def predict_data(data, element, model=None):
     返回:
         numpy.ndarray: 预测结果
     """
+    # 检查缓存
+    cache_key = f"predict_{element}_{data.shape}"
+    cached_predictions = cache_manager.get_cache(cache_key)
+    if cached_predictions is not None:
+        logger.info(f"从缓存加载预测结果: {element}")
+        return cached_predictions['predictions']
+    
     device = config.training_config['device']
     
     # 如果未提供模型，加载保存的模型
@@ -166,7 +208,14 @@ def predict_data(data, element, model=None):
         data_tensor = data_tensor.to(device)
         predictions = model(data_tensor).cpu().numpy()
     
-    return predictions.flatten() if predictions.shape[0] > 1 else predictions[0]
+    predictions = predictions.flatten() if predictions.shape[0] > 1 else predictions[0]
+    
+    # 保存到缓存
+    cache_manager.set_cache(cache_key, {
+        'predictions': predictions
+    })
+    
+    return predictions
 
 def plot_mist_isochrones(ax, ages=None, colors=None):
     """
@@ -226,84 +275,89 @@ def plot_predictions_vs_true(elements=None, plot_dir=None, figsize=(12, 10)):
         logger.error("没有找到任何测试结果")
         return
     
-    # 为每个元素创建图表
-    for element, data in results.items():
-        if 'true_values' not in data or 'predictions' not in data:
-            logger.warning(f"{element} 数据中缺少真实值或预测值")
-            continue
-        
-        # 创建图表
-        fig, axes = plt.subplots(1, 2, figsize=figsize)
-        plt.subplots_adjust(wspace=0.3)
-        
-        # 真实值散点图
-        ax0 = axes[0]
-        scatter0 = ax0.scatter(
-            data['metadata']['teff'] if 'metadata' in data else np.arange(len(data['true_values'])),
-            data['metadata']['logg'] if 'metadata' in data else np.arange(len(data['true_values'])),
-            c=data['true_values'],
-            cmap='viridis',
-            s=40,
-            alpha=0.7
-        )
-        
-        # 添加MIST等时线
-        plot_mist_isochrones(ax0)
-        
-        # 预测值散点图
-        ax1 = axes[1]
-        scatter1 = ax1.scatter(
-            data['metadata']['teff'] if 'metadata' in data else np.arange(len(data['predictions'])),
-            data['metadata']['logg'] if 'metadata' in data else np.arange(len(data['predictions'])),
-            c=data['predictions'],
-            cmap='viridis',
-            s=40,
-            alpha=0.7
-        )
-        
-        # 添加MIST等时线
-        plot_mist_isochrones(ax1)
-        
-        # 设置颜色条比例一致
-        vmin = min(data['true_values'].min(), data['predictions'].min())
-        vmax = max(data['true_values'].max(), data['predictions'].max())
-        norm = Normalize(vmin=vmin, vmax=vmax)
-        scatter0.set_norm(norm)
-        scatter1.set_norm(norm)
-        
-        # 添加颜色条
-        cbar = fig.colorbar(ScalarMappable(norm=norm, cmap='viridis'), ax=axes, shrink=0.8)
-        cbar.set_label(element)
-        
-        # 设置标题和标签
-        ax0.set_title(f'{element} 真实值')
-        ax1.set_title(f'{element} 预测值')
-        
-        for ax in axes:
-            ax.set_xlabel('有效温度 (K)')
-            ax.set_ylabel('表面重力 log g')
-            ax.invert_xaxis()  # 天文学习惯，温度轴反向
-            ax.grid(True, alpha=0.3)
-        
-        # 添加评估指标文本
-        metrics_text = (
-            f"MAE: {data['mae']:.4f}\n"
-            f"RMSE: {data['rmse']:.4f}\n"
-            f"R²: {data['r2']:.4f}\n"
-            f"STD: {data['std']:.4f}"
-        )
-        ax1.text(
-            0.05, 0.95, metrics_text,
-            transform=ax1.transAxes,
-            verticalalignment='top',
-            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8)
-        )
-        
-        # 保存图表
-        os.makedirs(plot_dir, exist_ok=True)
-        plt.savefig(os.path.join(plot_dir, f'{element}_predictions_comparison.png'), dpi=300, bbox_inches='tight')
-        logger.info(f"已保存 {element} 预测对比图")
-        plt.close()
+    # 使用进度管理器
+    with ProgressManager(len(elements), desc="生成预测对比图") as progress:
+        # 为每个元素创建图表
+        for element, data in results.items():
+            if 'true_values' not in data or 'predictions' not in data:
+                logger.warning(f"{element} 数据中缺少真实值或预测值")
+                continue
+            
+            # 创建图表
+            fig, axes = plt.subplots(1, 2, figsize=figsize)
+            plt.subplots_adjust(wspace=0.3)
+            
+            # 真实值散点图
+            ax0 = axes[0]
+            scatter0 = ax0.scatter(
+                data['metadata']['teff'] if 'metadata' in data else np.arange(len(data['true_values'])),
+                data['metadata']['logg'] if 'metadata' in data else np.arange(len(data['true_values'])),
+                c=data['true_values'],
+                cmap='viridis',
+                s=40,
+                alpha=0.7
+            )
+            
+            # 添加MIST等时线
+            plot_mist_isochrones(ax0)
+            
+            # 预测值散点图
+            ax1 = axes[1]
+            scatter1 = ax1.scatter(
+                data['metadata']['teff'] if 'metadata' in data else np.arange(len(data['predictions'])),
+                data['metadata']['logg'] if 'metadata' in data else np.arange(len(data['predictions'])),
+                c=data['predictions'],
+                cmap='viridis',
+                s=40,
+                alpha=0.7
+            )
+            
+            # 添加MIST等时线
+            plot_mist_isochrones(ax1)
+            
+            # 设置颜色条比例一致
+            vmin = min(data['true_values'].min(), data['predictions'].min())
+            vmax = max(data['true_values'].max(), data['predictions'].max())
+            norm = Normalize(vmin=vmin, vmax=vmax)
+            scatter0.set_norm(norm)
+            scatter1.set_norm(norm)
+            
+            # 添加颜色条
+            cbar = fig.colorbar(ScalarMappable(norm=norm, cmap='viridis'), ax=axes, shrink=0.8)
+            cbar.set_label(element)
+            
+            # 设置标题和标签
+            ax0.set_title(f'{element} 真实值')
+            ax1.set_title(f'{element} 预测值')
+            
+            for ax in axes:
+                ax.set_xlabel('有效温度 (K)')
+                ax.set_ylabel('表面重力 log g')
+                ax.invert_xaxis()  # 天文学习惯，温度轴反向
+                ax.grid(True, alpha=0.3)
+            
+            # 添加评估指标文本
+            metrics_text = (
+                f"MAE: {data['mae']:.4f}\n"
+                f"RMSE: {data['rmse']:.4f}\n"
+                f"R²: {data['r2']:.4f}\n"
+                f"STD: {data['std']:.4f}"
+            )
+            ax1.text(
+                0.05, 0.95, metrics_text,
+                transform=ax1.transAxes,
+                verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8)
+            )
+            
+            # 保存图表
+            os.makedirs(plot_dir, exist_ok=True)
+            plt.savefig(os.path.join(plot_dir, f'{element}_predictions_comparison.png'), dpi=300, bbox_inches='tight')
+            logger.info(f"已保存 {element} 预测对比图")
+            plt.close()
+            
+            # 更新进度
+            progress.update(1)
 
 def plot_metrics_comparison(elements=None, plot_dir=None, figsize=(10, 8)):
     """
@@ -322,10 +376,16 @@ def plot_metrics_comparison(elements=None, plot_dir=None, figsize=(10, 8)):
     
     # 加载所有元素的测试结果
     results = {}
-    for element in elements:
-        element_result = load_element_results(element)
-        if element_result:
-            results[element] = element_result
+    
+    # 使用进度管理器
+    with ProgressManager(len(elements), desc="加载评估结果") as progress:
+        for element in elements:
+            element_result = load_element_results(element)
+            if element_result:
+                results[element] = element_result
+            
+            # 更新进度
+            progress.update(1)
     
     if not results:
         logger.error("没有找到任何测试结果")
@@ -406,65 +466,70 @@ def evaluate_all_elements(elements=None, save_dir=None):
     # 评估结果
     all_results = {}
     
-    for element in elements:
-        logger.info(f"评估 {element} 模型...")
-        
-        # 加载模型
-        model_path = os.path.join(config.model_config['model_dir'], f"{element}_model.pth")
-        if not os.path.exists(model_path):
-            logger.error(f"找不到 {element} 的模型文件")
-            continue
-        
-        device = config.training_config['device']
-        model = load_trained_model(element, model_path, device)
-        
-        # 预测测试数据
-        spectra = test_data['spectra']
-        true_values = test_data[element]
-        
-        try:
-            # 转换数据格式并预测
-            spectra_tensor = torch.FloatTensor(spectra).unsqueeze(1).to(device)
-            model.eval()
-            with torch.no_grad():
-                predictions = model(spectra_tensor).cpu().numpy().flatten()
+    # 使用进度管理器
+    with ProgressManager(len(elements), desc="评估元素模型") as progress:
+        for element in elements:
+            logger.info(f"评估 {element} 模型...")
             
-            # 计算评估指标
-            mae = mean_absolute_error(true_values, predictions)
-            mse = mean_squared_error(true_values, predictions)
-            rmse = np.sqrt(mse)
-            r2 = r2_score(true_values, predictions)
-            std = np.std(predictions - true_values)
+            # 加载模型
+            model_path = os.path.join(config.model_config['model_dir'], f"{element}_model.pth")
+            if not os.path.exists(model_path):
+                logger.error(f"找不到 {element} 的模型文件")
+                continue
             
-            # 保存结果
-            results = {
-                'element': element,
-                'true_values': true_values,
-                'predictions': predictions,
-                'mae': mae,
-        'mse': mse,
-        'rmse': rmse,
-        'r2': r2,
-                'std': std
-            }
+            device = config.training_config['device']
+            model = load_trained_model(element, model_path, device)
             
-            # 保存到文件
-            results_path = os.path.join(save_dir, f"{element}_test_results.npz")
-            np.savez(results_path, **results)
+            # 预测测试数据
+            spectra = test_data['spectra']
+            true_values = test_data[element]
             
-            # 添加到总结果
-            all_results[element] = results
+            try:
+                # 转换数据格式并预测
+                spectra_tensor = torch.FloatTensor(spectra).unsqueeze(1).to(device)
+                model.eval()
+                with torch.no_grad():
+                    predictions = model(spectra_tensor).cpu().numpy().flatten()
+                
+                # 计算评估指标
+                mae = mean_absolute_error(true_values, predictions)
+                mse = mean_squared_error(true_values, predictions)
+                rmse = np.sqrt(mse)
+                r2 = r2_score(true_values, predictions)
+                std = np.std(predictions - true_values)
+                
+                # 保存结果
+                results = {
+                    'element': element,
+                    'true_values': true_values,
+                    'predictions': predictions,
+                    'mae': mae,
+                    'mse': mse,
+                    'rmse': rmse,
+                    'r2': r2,
+                    'std': std
+                }
+                
+                # 保存到文件
+                results_path = os.path.join(save_dir, f"{element}_test_results.npz")
+                np.savez(results_path, **results)
+                
+                # 添加到总结果
+                all_results[element] = results
+                
+                # 输出评估指标
+                logger.info(f"{element} 评估结果:")
+                logger.info(f"  MAE:  {mae:.6f}")
+                logger.info(f"  MSE:  {mse:.6f}")
+                logger.info(f"  RMSE: {rmse:.6f}")
+                logger.info(f"  R²:   {r2:.6f}")
+                logger.info(f"  STD:  {std:.6f}")
+                
+            except Exception as e:
+                logger.error(f"{element} 评估失败: {str(e)}")
             
-            # 输出评估指标
-            logger.info(f"{element} 评估结果:")
-            logger.info(f"  MAE:  {mae:.6f}")
-            logger.info(f"  MSE:  {mse:.6f}")
-            logger.info(f"  RMSE: {rmse:.6f}")
-            logger.info(f"  R²:   {r2:.6f}")
-            logger.info(f"  STD:  {std:.6f}")
-            
-        except Exception as e:
-            logger.error(f"{element} 评估失败: {str(e)}")
+            # 更新进度
+            progress.update(1)
     
     return all_results
 
@@ -479,6 +544,13 @@ def load_catalog_data(catalog_file, element_name):
     返回:
         pd.DataFrame: 包含光谱文件名和真实元素丰度的数据框
     """
+    # 检查缓存
+    cache_key = f"catalog_{os.path.basename(catalog_file)}_{element_name}"
+    cached_data = cache_manager.get_cache(cache_key)
+    if cached_data is not None:
+        logger.info(f"从缓存加载星表数据: {catalog_file}")
+        return cached_data['data']
+    
     try:
         logger.info(f"正在加载星表数据: {catalog_file}")
         df = pd.read_csv(catalog_file)
@@ -497,6 +569,12 @@ def load_catalog_data(catalog_file, element_name):
         result_df.rename(columns={abundance_col: 'true_abundance'}, inplace=True)
         
         logger.info(f"已加载 {len(result_df)} 个样本")
+        
+        # 保存到缓存
+        cache_manager.set_cache(cache_key, {
+            'data': result_df
+        })
+        
         return result_df
     except Exception as e:
         logger.error(f"加载星表数据出错: {e}")
@@ -526,61 +604,63 @@ def predict_catalog_spectra(spectra_df, element, fits_dir='preFits', model=None)
     # 初始化结果列表
     results = []
     
-    for idx, row in spectra_df.iterrows():
-        try:
-            spec_name = row['spec']
-            fits_file = os.path.join(fits_dir, f"{spec_name}.fits.gz")
-            
-            if not os.path.exists(fits_file):
-                # 尝试其他可能的后缀
-                alt_fits_file = os.path.join(fits_dir, f"{spec_name}.fits")
-                if os.path.exists(alt_fits_file):
-                    fits_file = alt_fits_file
-                else:
-                    logger.warning(f"找不到FITS文件: {fits_file}")
+    # 使用进度管理器
+    with ProgressManager(len(spectra_df), desc=f"预测 {element} 元素丰度") as progress:
+        for idx, row in spectra_df.iterrows():
+            try:
+                spec_name = row['spec']
+                fits_file = os.path.join(fits_dir, f"{spec_name}.fits.gz")
+                
+                if not os.path.exists(fits_file):
+                    # 尝试其他可能的后缀
+                    alt_fits_file = os.path.join(fits_dir, f"{spec_name}.fits")
+                    if os.path.exists(alt_fits_file):
+                        fits_file = alt_fits_file
+                    else:
+                        logger.warning(f"找不到FITS文件: {fits_file}")
+                        continue
+                
+                # 读取并预处理光谱
+                wavelength, flux = preprocessor.read_fits_file(fits_file)
+                if wavelength is None or flux is None:
+                    logger.warning(f"无法读取光谱: {fits_file}")
                     continue
-            
-            # 读取并预处理光谱
-            wavelength, flux = preprocessor.read_fits_file(fits_file)
-            if wavelength is None or flux is None:
-                logger.warning(f"无法读取光谱: {fits_file}")
-                continue
+                    
+                # 预处理光谱
+                # 去噪
+                flux = preprocessor.denoise_spectrum(wavelength, flux)
+                flux = preprocessor.denoise_spectrum_second(wavelength, flux)
                 
-            # 预处理光谱
-            # 去噪
-            flux = preprocessor.denoise_spectrum(wavelength, flux)
-            flux = preprocessor.denoise_spectrum_second(wavelength, flux)
-            
-            # 重采样
-            resampled_flux = preprocessor.resample_spectrum(wavelength, flux)
-            if resampled_flux is None:
-                logger.warning(f"无法重采样光谱: {fits_file}")
-                continue
+                # 重采样
+                resampled_flux = preprocessor.resample_spectrum(wavelength, flux)
+                if resampled_flux is None:
+                    logger.warning(f"无法重采样光谱: {fits_file}")
+                    continue
+                    
+                # 归一化
+                normalized_flux = preprocessor.normalize_spectrum(resampled_flux)
+                if normalized_flux is None:
+                    logger.warning(f"无法归一化光谱: {fits_file}")
+                    continue
                 
-            # 归一化
-            normalized_flux = preprocessor.normalize_spectrum(resampled_flux)
-            if normalized_flux is None:
-                logger.warning(f"无法归一化光谱: {fits_file}")
-                continue
-            
-            # 转换为张量并预测
-            input_tensor = torch.tensor(normalized_flux, dtype=torch.float32).unsqueeze(0)
-            abundance_pred = predict(model, input_tensor, config.training_config['device'])
-            
-            # 保存结果
-            results.append({
-                'spec_name': spec_name,
-                'true_abundance': row['true_abundance'],
-                'predicted_abundance': float(abundance_pred)
-            })
-            
-            if (idx + 1) % 100 == 0:
-                logger.info(f"已处理 {idx + 1}/{len(spectra_df)} 个光谱")
+                # 转换为张量并预测
+                input_tensor = torch.tensor(normalized_flux, dtype=torch.float32).unsqueeze(0)
+                abundance_pred = predict(model, input_tensor, config.training_config['device'])
                 
-        except Exception as e:
-            logger.error(f"处理光谱 {row['spec']} 时出错: {e}")
-            import traceback
-            traceback.print_exc()
+                # 保存结果
+                results.append({
+                    'spec_name': spec_name,
+                    'true_abundance': row['true_abundance'],
+                    'predicted_abundance': float(abundance_pred)
+                })
+                
+                # 更新进度
+                progress.update(1)
+                    
+            except Exception as e:
+                logger.error(f"处理光谱 {row['spec']} 时出错: {e}")
+                import traceback
+                traceback.print_exc()
     
     # 转换为DataFrame
     results_df = pd.DataFrame(results)
@@ -922,11 +1002,19 @@ def main():
     parser.add_argument('--catalog_eval', action='store_true', help='执行星表评估')
     parser.add_argument('--catalogs', nargs='+', default=['galah', 'lasp'], help='要评估的星表类型列表')
     parser.add_argument('--no_plots', action='store_true', help='不生成图像')
+    parser.add_argument('--clear_cache', action='store_true', help='清除所有缓存')
     args = parser.parse_args()
     
     # 确保输出目录存在
     os.makedirs(config.output_config['results_dir'], exist_ok=True)
     os.makedirs(config.output_config['plots_dir'], exist_ok=True)
+    
+    # 处理缓存
+    if args.clear_cache:
+        cache_manager.clear_cache()
+        logger.info("已清除所有缓存")
+    else:
+        ask_clear_cache(cache_manager)
     
     logger.info("开始元素丰度评估")
     

@@ -19,6 +19,7 @@ from sklearn.model_selection import ParameterGrid
 import config
 from model import SpectralResCNN, train_model, evaluate_model, load_trained_model
 from evaluation import evaluate_all_elements, plot_predictions_vs_true, plot_metrics_comparison
+from utils import CacheManager, ProgressManager, ask_clear_cache
 
 # 配置日志
 logging.basicConfig(
@@ -31,6 +32,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger('main')
 
+# 创建缓存管理器
+cache_manager = CacheManager(cache_dir=os.path.join(config.output_config['cache_dir'], 'main'))
+
 def load_dataset(data_path, element):
     """
     加载数据集
@@ -42,6 +46,13 @@ def load_dataset(data_path, element):
     返回:
         tuple: (spectra, labels) 光谱数据和标签
     """
+    # 检查缓存
+    cache_key = f"dataset_{os.path.basename(data_path)}_{element}"
+    cached_data = cache_manager.get_cache(cache_key)
+    if cached_data is not None:
+        logger.info(f"从缓存加载数据集: {data_path}")
+        return cached_data['spectra'], cached_data['labels']
+    
     try:
         data = np.load(data_path)
         
@@ -72,6 +83,13 @@ def load_dataset(data_path, element):
                 logger.info(f"找到元素 {element} 的数据")
         
         logger.info(f"已加载数据集: {data_path}, 光谱数量: {len(spectra)}")
+        
+        # 保存到缓存
+        cache_manager.set_cache(cache_key, {
+            'spectra': spectra,
+            'labels': labels
+        })
+        
         return spectra, labels
         
     except Exception as e:
@@ -144,6 +162,7 @@ def setup_training_directories():
     os.makedirs(config.output_config['results_dir'], exist_ok=True)
     os.makedirs(config.output_config['plots_dir'], exist_ok=True)
     os.makedirs(config.output_config['predictions_dir'], exist_ok=True)
+    os.makedirs(config.output_config['cache_dir'], exist_ok=True)
     
     logger.info(f"已创建输出目录")
 
@@ -220,35 +239,40 @@ def hyperparameter_tuning(element, train_loader, val_loader, grid=None, device=N
     best_val_loss = float('inf')
     best_params = None
     
-    # 遍历所有参数组合
-    for i, params in enumerate(param_combinations):
-        logger.info(f"参数组合 {i+1}/{len(param_combinations)}: {params}")
-        
-        # 为当前超参数添加固定参数
-        current_params = {
-            **params,
-            'num_epochs': min(config.training_config['num_epochs'], 50),  # 调优时使用较少的时代数
-            'patience': config.training_config['early_stopping_patience']
-        }
-        
-        # 训练模型
-        try:
-            _, val_loss, _ = train_and_evaluate_model(
-                f"{element}_tune_{i}",
-                train_loader,
-                val_loader,
-                hyperparams=current_params,
-                device=device
-            )
+    # 使用进度管理器
+    with ProgressManager(len(param_combinations), desc=f"{element} 超参数调优") as progress:
+        # 遍历所有参数组合
+        for i, params in enumerate(param_combinations):
+            logger.info(f"参数组合 {i+1}/{len(param_combinations)}: {params}")
             
-            # 更新最佳参数
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                best_params = current_params
-                logger.info(f"找到新的最佳参数，验证损失: {best_val_loss:.6f}")
+            # 为当前超参数添加固定参数
+            current_params = {
+                **params,
+                'num_epochs': min(config.training_config['num_epochs'], 50),  # 调优时使用较少的时代数
+                'patience': config.training_config['early_stopping_patience']
+            }
+            
+            # 训练模型
+            try:
+                _, val_loss, _ = train_and_evaluate_model(
+                    f"{element}_tune_{i}",
+                    train_loader,
+                    val_loader,
+                    hyperparams=current_params,
+                    device=device
+                )
                 
-        except Exception as e:
-            logger.error(f"参数组合 {params} 训练失败: {str(e)}")
+                # 更新最佳参数
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_params = current_params
+                    logger.info(f"找到新的最佳参数，验证损失: {best_val_loss:.6f}")
+                    
+            except Exception as e:
+                logger.error(f"参数组合 {params} 训练失败: {str(e)}")
+            
+            # 更新进度
+            progress.update(1)
     
     logger.info(f"超参数调优完成")
     logger.info(f"最佳参数: {best_params}")
@@ -318,6 +342,13 @@ def process_element(element, train_data_path, val_data_path, test_data_path=None
     返回:
         tuple: (model, test_metrics) 模型和测试指标
     """
+    # 检查缓存
+    cache_key = f"model_{element}"
+    cached_model = cache_manager.get_cache(cache_key)
+    if cached_model is not None:
+        logger.info(f"从缓存加载模型: {element}")
+        return cached_model['model'], cached_model['metrics']
+    
     # 加载训练数据
     train_spectra, train_labels = load_dataset(train_data_path, element)
     if train_spectra is None or train_labels is None:
@@ -357,6 +388,13 @@ def process_element(element, train_data_path, val_data_path, test_data_path=None
         config=config
     )
     
+    # 保存到缓存
+    if model is not None and test_metrics is not None:
+        cache_manager.set_cache(cache_key, {
+            'model': model,
+            'metrics': test_metrics
+        })
+    
     return model, test_metrics
 
 def main():
@@ -374,6 +412,8 @@ def main():
                         help='是否生成可视化')
     parser.add_argument('--cpu', action='store_true',
                         help='强制使用CPU进行计算')
+    parser.add_argument('--clear_cache', action='store_true',
+                        help='清除所有缓存')
     
     args = parser.parse_args()
     
@@ -391,29 +431,41 @@ def main():
     # 创建必要的目录
     setup_training_directories()
     
+    # 处理缓存
+    if args.clear_cache:
+        cache_manager.clear_cache()
+        logger.info("已清除所有缓存")
+    else:
+        ask_clear_cache(cache_manager)
+    
     # 获取数据路径
     train_data_path = config.data_paths['train_data']
     val_data_path = config.data_paths['val_data']
     test_data_path = None if args.no_test else config.data_paths['test_data']
     
-    # 处理每个元素
-    for element in elements:
-        logger.info(f"开始处理元素: {element}")
-        
-        # 运行完整处理流程
-        model, metrics = process_element(
-            element=element,
-            train_data_path=train_data_path,
-            val_data_path=val_data_path,
-            test_data_path=test_data_path,
-            tune_hyperparams=args.tune,
-            batch_size=args.batch_size,
-            device=device
-        )
-        
-        if model is None:
-            logger.error(f"处理 {element} 失败，跳过")
-            continue
+    # 使用进度管理器处理每个元素
+    with ProgressManager(len(elements), desc="处理元素") as progress:
+        # 处理每个元素
+        for element in elements:
+            logger.info(f"开始处理元素: {element}")
+            
+            # 运行完整处理流程
+            model, metrics = process_element(
+                element=element,
+                train_data_path=train_data_path,
+                val_data_path=val_data_path,
+                test_data_path=test_data_path,
+                tune_hyperparams=args.tune,
+                batch_size=args.batch_size,
+                device=device
+            )
+            
+            if model is None:
+                logger.error(f"处理 {element} 失败，跳过")
+                continue
+            
+            # 更新进度
+            progress.update(1)
     
     # 如果需要进行可视化评估
     if args.visualize and not args.no_test:

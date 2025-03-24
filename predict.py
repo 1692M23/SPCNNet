@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-预测模块：使用训练好的模型预测新的恒星光谱元素丰度
+预测模块：使用训练好的模型预测恒星光谱元素丰度
 """
 
 import os
@@ -10,13 +10,14 @@ import sys
 import argparse
 import logging
 import numpy as np
-import torch
 import pandas as pd
-from tqdm import tqdm
+import torch
+from torch.utils.data import TensorDataset, DataLoader
 
 # 导入自定义模块
 import config
-from model import load_trained_model
+from model import load_trained_model, predict
+from utils import CacheManager, ProgressManager, ask_clear_cache
 
 # 配置日志
 logging.basicConfig(
@@ -29,6 +30,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger('predict')
 
+# 创建缓存管理器
+cache_manager = CacheManager(cache_dir=os.path.join(config.output_config['cache_dir'], 'predict'))
+
 def load_data(data_path):
     """
     加载待预测的光谱数据
@@ -40,6 +44,13 @@ def load_data(data_path):
         numpy.ndarray: 光谱数据
         pandas.DataFrame: 元数据（如果有）
     """
+    # 检查缓存
+    cache_key = f"data_{os.path.basename(data_path)}"
+    cached_data = cache_manager.get_cache(cache_key)
+    if cached_data is not None:
+        logger.info(f"从缓存加载数据: {data_path}")
+        return cached_data['spectra'], cached_data['metadata']
+    
     try:
         if not os.path.exists(data_path):
             logger.error(f"数据文件不存在: {data_path}")
@@ -65,6 +76,13 @@ def load_data(data_path):
                 return None, None
                 
             logger.info(f"成功从NPZ文件加载光谱数据，形状: {spectra.shape}")
+            
+            # 保存到缓存
+            cache_manager.set_cache(cache_key, {
+                'spectra': spectra,
+                'metadata': None
+            })
+            
             return spectra, None
             
         elif data_path.endswith('.csv'):
@@ -98,6 +116,13 @@ def load_data(data_path):
             
             # 获取元数据（除spec列外的所有列）
             metadata = df.drop('spec', axis=1) if len(df.columns) > 1 else None
+            
+            # 保存到缓存
+            cache_manager.set_cache(cache_key, {
+                'spectra': spectra,
+                'metadata': metadata
+            })
+            
             return spectra, metadata
             
         else:
@@ -122,6 +147,13 @@ def predict_element(spectra, element, batch_size=32, device=None):
     返回:
         numpy.ndarray: 预测结果
     """
+    # 检查缓存
+    cache_key = f"predictions_{element}_{spectra.shape}"
+    cached_predictions = cache_manager.get_cache(cache_key)
+    if cached_predictions is not None:
+        logger.info(f"从缓存加载预测结果: {element}")
+        return cached_predictions['predictions']
+    
     if device is None:
         device = config.training_config['device']
     
@@ -145,7 +177,14 @@ def predict_element(spectra, element, batch_size=32, device=None):
             batch_predictions = model(batch_tensor).cpu().numpy().flatten()
             predictions.extend(batch_predictions)
     
-    return np.array(predictions)
+    predictions = np.array(predictions)
+    
+    # 保存到缓存
+    cache_manager.set_cache(cache_key, {
+        'predictions': predictions
+    })
+    
+    return predictions
 
 def predict_all_elements(spectra, elements=None, batch_size=32):
     """
@@ -164,218 +203,87 @@ def predict_all_elements(spectra, elements=None, batch_size=32):
     
     results = {}
     
-    for element in elements:
-        logger.info(f"预测 {element} 元素丰度...")
-        predictions = predict_element(spectra, element, batch_size)
-        if predictions is not None:
-            results[element] = predictions
-            logger.info(f"完成 {element} 预测: 均值={predictions.mean():.4f}, 标准差={predictions.std():.4f}")
+    # 使用进度管理器
+    with ProgressManager(len(elements), desc="预测元素丰度") as progress:
+        for element in elements:
+            logger.info(f"预测 {element} 元素丰度...")
+            predictions = predict_element(spectra, element, batch_size)
+            if predictions is not None:
+                results[element] = predictions
+                logger.info(f"完成 {element} 预测: 均值={predictions.mean():.4f}, 标准差={predictions.std():.4f}")
+            
+            # 更新进度
+            progress.update(1)
     
     return results
 
-def save_predictions(predictions, metadata=None, output_path=None, format='csv'):
+def save_predictions(predictions, metadata=None, output_dir=None):
     """
     保存预测结果
     
     参数:
-        predictions (dict): 包含各元素预测结果的字典
+        predictions (dict): 预测结果字典
         metadata (pandas.DataFrame): 元数据
-        output_path (str): 输出文件路径
-        format (str): 输出格式，支持'csv'和'npz'
-        
-    返回:
-        bool: 是否成功保存
+        output_dir (str): 输出目录
     """
-    if not predictions:
-        logger.error("没有可保存的预测结果")
-        return False
+    if output_dir is None:
+        output_dir = config.output_config['predictions_dir']
     
-    if output_path is None:
-        timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-        output_path = os.path.join(config.output_config['predictions_dir'], f"predictions_{timestamp}")
+    os.makedirs(output_dir, exist_ok=True)
     
-    # 确保输出目录存在
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    # 创建结果DataFrame
+    results_df = pd.DataFrame(predictions)
     
-    try:
-        if format.lower() == 'csv':
-            # 创建DataFrame
-            result_df = pd.DataFrame()
-            
-            # 添加预测结果
-            for element, preds in predictions.items():
-                result_df[element] = preds
-            
-            # 添加元数据
-            if metadata is not None:
-                for col in metadata.columns:
-                    result_df[col] = metadata[col].values
-            
-            # 保存为CSV
-            if not output_path.endswith('.csv'):
-                output_path += '.csv'
-            
-            result_df.to_csv(output_path, index=False)
-            logger.info(f"预测结果已保存至: {output_path}")
-            
-        elif format.lower() == 'npz':
-            # 准备保存的数据
-            save_data = {element: preds for element, preds in predictions.items()}
-            
-            # 添加元数据
-            if metadata is not None:
-                for col in metadata.columns:
-                    save_data[col] = metadata[col].values
-            
-            # 保存为NPZ
-            if not output_path.endswith('.npz'):
-                output_path += '.npz'
-            
-            np.savez(output_path, **save_data)
-            logger.info(f"预测结果已保存至: {output_path}")
-            
-        else:
-            logger.error(f"不支持的输出格式: {format}")
-            return False
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"保存预测结果失败: {str(e)}")
-        return False
+    # 如果有元数据，合并到结果中
+    if metadata is not None:
+        results_df = pd.concat([metadata, results_df], axis=1)
+    
+    # 保存结果
+    output_file = os.path.join(output_dir, 'predictions.csv')
+    results_df.to_csv(output_file, index=False)
+    logger.info(f"已保存预测结果到: {output_file}")
+    
+    return output_file
 
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='恒星光谱元素丰度预测')
-    parser.add_argument('--input', type=str, required=True,
-                        help='输入数据文件路径，支持.npz和.csv格式')
-    parser.add_argument('--output', type=str, default=None,
-                        help='输出结果文件路径')
+    parser.add_argument('--data_path', type=str, required=True,
+                        help='输入数据文件路径')
     parser.add_argument('--elements', nargs='+', default=None,
                         help='要预测的元素列表，默认为所有配置的元素')
     parser.add_argument('--batch_size', type=int, default=32,
                         help='批次大小')
-    parser.add_argument('--format', type=str, choices=['csv', 'npz'], default='csv',
-                        help='输出格式')
+    parser.add_argument('--output_dir', type=str, default=None,
+                        help='输出目录')
+    parser.add_argument('--clear_cache', action='store_true',
+                        help='清除所有缓存')
     
     args = parser.parse_args()
     
-    # 加载数据
-    logger.info(f"加载数据: {args.input}")
-    spectra, metadata = load_data(args.input)
+    # 处理缓存
+    if args.clear_cache:
+        cache_manager.clear_cache()
+        logger.info("已清除所有缓存")
+    else:
+        ask_clear_cache(cache_manager)
     
+    # 加载数据
+    logger.info(f"加载数据: {args.data_path}")
+    spectra, metadata = load_data(args.data_path)
     if spectra is None:
         logger.error("加载数据失败，退出程序")
         return
     
-    # 预测所有元素
-    logger.info("开始预测...")
+    # 预测元素丰度
     predictions = predict_all_elements(spectra, args.elements, args.batch_size)
     
-    if not predictions:
-        logger.error("预测失败，退出程序")
-        return
-    
     # 保存结果
-    logger.info("保存预测结果...")
-    save_predictions(predictions, metadata, args.output, args.format)
-    
-    logger.info("预测完成")
-
-def batch_predict_directory(input_dir, output_dir=None, elements=None, batch_size=32, format='csv'):
-    """
-    批量预测目录中的所有数据文件
-    
-    参数:
-        input_dir (str): 输入目录路径
-        output_dir (str): 输出目录路径
-        elements (list): 要预测的元素列表
-        batch_size (int): 批次大小
-        format (str): 输出格式
-    """
-    if not os.path.exists(input_dir) or not os.path.isdir(input_dir):
-        logger.error(f"输入目录不存在: {input_dir}")
-        return
-    
-    if output_dir is None:
-        output_dir = os.path.join(config.output_config['predictions_dir'], 'batch_predictions')
-    
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # 获取目录中的所有.npz和.csv文件
-    data_files = []
-    for file in os.listdir(input_dir):
-        if file.endswith('.npz') or file.endswith('.csv'):
-            data_files.append(os.path.join(input_dir, file))
-    
-    if not data_files:
-        logger.warning(f"目录中没有找到.npz或.csv文件: {input_dir}")
-        return
-    
-    # 批量预测
-    successful = 0
-    failed = 0
-    
-    for data_file in tqdm(data_files, desc="批量预测进度"):
-        try:
-            # 加载数据
-            spectra, metadata = load_data(data_file)
-            
-            if spectra is None:
-                logger.error(f"加载数据失败: {data_file}")
-                failed += 1
-                continue
-            
-            # 预测
-            predictions = predict_all_elements(spectra, elements, batch_size)
-            
-            if not predictions:
-                logger.error(f"预测失败: {data_file}")
-                failed += 1
-                continue
-            
-            # 生成输出文件名
-            base_name = os.path.basename(data_file)
-            output_name = os.path.splitext(base_name)[0] + f"_predictions.{format}"
-            output_path = os.path.join(output_dir, output_name)
-            
-            # 保存结果
-            success = save_predictions(predictions, metadata, output_path, format)
-            
-            if success:
-                successful += 1
-            else:
-                failed += 1
-                
-        except Exception as e:
-            logger.error(f"处理文件 {data_file} 时出错: {str(e)}")
-            failed += 1
-    
-    logger.info(f"批量预测完成: 成功 {successful} 个文件, 失败 {failed} 个文件")
+    if predictions:
+        output_file = save_predictions(predictions, metadata, args.output_dir)
+        logger.info(f"预测完成，结果已保存到: {output_file}")
+    else:
+        logger.error("预测失败，没有生成任何结果")
 
 if __name__ == '__main__':
-    # 检查是否使用批量预测模式
-    if len(sys.argv) > 1 and sys.argv[1] == '--batch_dir':
-        parser = argparse.ArgumentParser(description='批量预测恒星光谱元素丰度')
-        parser.add_argument('--batch_dir', type=str, required=True,
-                            help='输入数据目录，将处理目录中的所有.npz和.csv文件')
-        parser.add_argument('--output_dir', type=str, default=None,
-                            help='输出结果目录')
-        parser.add_argument('--elements', nargs='+', default=None,
-                            help='要预测的元素列表，默认为所有配置的元素')
-        parser.add_argument('--batch_size', type=int, default=32,
-                            help='批次大小')
-        parser.add_argument('--format', type=str, choices=['csv', 'npz'], default='csv',
-                            help='输出格式')
-        
-        args = parser.parse_args()
-        
-        batch_predict_directory(
-            args.batch_dir,
-            args.output_dir,
-            args.elements,
-            args.batch_size,
-            args.format
-        )
-    else:
-        main() 
+    main() 
