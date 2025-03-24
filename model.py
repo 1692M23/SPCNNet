@@ -3,6 +3,7 @@ import torch.nn as nn
 import config
 import os
 import numpy as np
+import logging
 
 """
 模型文件结构：
@@ -228,7 +229,14 @@ def _train_epoch(model, train_loader, criterion, optimizer, device):
         outputs = model(spectra)
         loss = criterion(outputs.squeeze(), abundances)
         
+        # 检查损失值是否为 nan
+        if torch.isnan(loss):
+            logger.warning("检测到 nan 损失值，跳过当前批次")
+            continue
+        
         loss.backward()
+        
+        # 梯度裁剪
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         
         optimizer.step()
@@ -264,12 +272,12 @@ def _save_checkpoint(model, optimizer, scheduler, epoch, loss, element, config):
         'loss': loss,
     }, model_path)
 
-def train_model(model, train_loader, val_loader, element, config=config.CONFIG):
+def train_model(model, train_loader, val_loader, element, config):
     """
     模型训练主函数
     """
     criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(#Adam优化器
+    optimizer = torch.optim.Adam(
         model.parameters(),
         lr=config['training']['learning_rate'],
         weight_decay=config['training']['weight_decay']
@@ -295,6 +303,14 @@ def train_model(model, train_loader, val_loader, element, config=config.CONFIG):
         avg_train_loss = _train_epoch(model, train_loader, criterion, optimizer, config['training']['device'])
         avg_val_loss = _validate(model, val_loader, criterion, config['training']['device'])
         
+        # 检查是否有 nan 值
+        if torch.isnan(torch.tensor(avg_train_loss)) or torch.isnan(torch.tensor(avg_val_loss)):
+            logger.warning(f"检测到 nan 值，当前学习率: {optimizer.param_groups[0]['lr']}")
+            # 降低学习率
+            for param_group in optimizer.param_groups:
+                param_group['lr'] *= 0.1
+            continue
+        
         train_losses.append(avg_train_loss)
         val_losses.append(avg_val_loss)
         
@@ -309,36 +325,37 @@ def train_model(model, train_loader, val_loader, element, config=config.CONFIG):
         else:
             patience_counter += 1
             if patience_counter >= config['training']['early_stopping_patience']:
-                print(f'Early stopping triggered after {epoch + 1} epochs')
+                logger.info(f'Early stopping triggered after {epoch + 1} epochs')
                 break
         
         if (epoch + 1) % 10 == 0:
-            print(f'Epoch [{epoch+1}/{config["training"]["epochs"]}], '
-                  f'Train Loss: {avg_train_loss:.4f}, '
-                  f'Val Loss: {avg_val_loss:.4f}, '
-                  f'LR: {optimizer.param_groups[0]["lr"]:.6f}')
+            logger.info(f'Epoch [{epoch+1}/{config["training"]["epochs"]}], '
+                       f'Train Loss: {avg_train_loss:.4f}, '
+                       f'Val Loss: {avg_val_loss:.4f}, '
+                       f'LR: {optimizer.param_groups[0]["lr"]:.6f}')
     
     return train_losses, val_losses
 
 # =============== 3. 评估相关 ===============
-def evaluate_model(model, test_loader, criterion, device=None):
+def evaluate_model(model, test_loader, device=None):
     """
     在测试集上评估模型
     Args:
         model: 训练好的模型
         test_loader: 测试数据加载器
-        criterion: 损失函数
         device: 计算设备
     Returns:
         评估结果字典
     """
     if device is None:
-        device = config.CONFIG['training']['device']
+        device = config.training_config['device']
         
     model.eval()
     test_loss = 0
     predictions = []
     targets = []
+    
+    criterion = nn.MSELoss()
     
     with torch.no_grad():
         for spectra, abundances in test_loader:
