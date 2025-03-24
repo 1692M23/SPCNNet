@@ -62,7 +62,7 @@ model_config = {
 # 训练配置
 training_config = {
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
-    'learning_rate': 0.001,
+    'lr': 0.001,
     'weight_decay': 1e-4,
     'num_epochs': 100,
     'early_stopping_patience': 15,

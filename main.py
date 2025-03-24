@@ -150,9 +150,9 @@ def train_and_evaluate_model(element, train_loader, val_loader, test_loader=None
     # 如果没有提供超参数，使用默认配置
     if hyperparams is None:
         hyperparams = {
-            'learning_rate': config.training_config['learning_rate'],
+            'lr': config.training_config['lr'],
             'weight_decay': config.training_config['weight_decay'],
-            'num_epochs': config.training_config['num_epochs'],
+            'epochs': config.training_config['num_epochs'],
             'patience': config.training_config['early_stopping_patience']
         }
     
@@ -171,9 +171,9 @@ def train_and_evaluate_model(element, train_loader, val_loader, test_loader=None
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
-        learning_rate=hyperparams['learning_rate'],
+        lr=hyperparams['lr'],
         weight_decay=hyperparams['weight_decay'],
-        num_epochs=hyperparams['num_epochs'],
+        epochs=hyperparams['epochs'],
         patience=hyperparams['patience'],
         device=device,
         model_name=element
@@ -214,7 +214,7 @@ def hyperparameter_tuning(element, train_loader, val_loader, grid=None, device=N
     # 如果没有提供网格参数，使用默认值
     if grid is None:
         grid = {
-            'learning_rate': [0.001, 0.0005, 0.0001],
+            'lr': [0.001, 0.0005, 0.0001],
             'weight_decay': [1e-4, 1e-5, 1e-6],
             'num_blocks': [2, 3, 4],
             'num_filters': [32, 64]
