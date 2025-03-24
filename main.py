@@ -147,43 +147,20 @@ def setup_training_directories():
     
     logger.info(f"已创建输出目录")
 
-def train_and_evaluate_model(element, train_loader, val_loader, test_loader=None, 
-                         hyperparams=None, device=None):
+def train_and_evaluate_model(train_loader, val_loader, test_loader, element, config):
     """
-    训练并评估模型
-    
-    参数:
-        element (str): 元素名称
-        train_loader (DataLoader): 训练数据加载器
-        val_loader (DataLoader): 验证数据加载器
-        test_loader (DataLoader): 测试数据加载器
-        hyperparams (dict): 超参数
-        device (str): 计算设备
-        
-    返回:
-        tuple: (model, best_val_loss, test_metrics) 模型，最佳验证损失和测试指标
+    训练和评估模型的主函数
     """
-    if device is None:
-        device = config.training_config['device']
-    
-    # 如果没有提供超参数，使用默认配置
-    if hyperparams is None:
-        hyperparams = {
-            'lr': config.training_config['lr'],
-            'weight_decay': config.training_config['weight_decay'],
-            'epochs': config.training_config['num_epochs'],
-            'patience': config.training_config['early_stopping_patience']
-        }
-    
     # 创建模型
-    model = SpectralResCNN(
-        input_size=config.model_config['input_dim']
-    ).to(device)
+    model = SpectralResCNN(config.model_config['input_size']).to(config.training_config['device'])
     
-    # 记录超参数
-    logger.info(f"训练 {element} 模型，超参数:")
-    for param, value in hyperparams.items():
-        logger.info(f"  {param}: {value}")
+    # 设置超参数
+    hyperparams = {
+        'lr': config.training_config['lr'],
+        'weight_decay': config.training_config['weight_decay'],
+        'epochs': config.training_config['epochs'],
+        'patience': config.training_config['early_stopping_patience']
+    }
     
     # 训练模型
     train_losses, val_losses = train_model(
@@ -191,37 +168,19 @@ def train_and_evaluate_model(element, train_loader, val_loader, test_loader=None
         train_loader=train_loader,
         val_loader=val_loader,
         element=element,
-        config={
-            'training': {
-                'learning_rate': hyperparams['lr'],
-                'weight_decay': hyperparams['weight_decay'],
-                'epochs': hyperparams['epochs'],
-                'early_stopping_patience': hyperparams['patience'],
-                'device': device
-            },
-            'output': {
-                'model_dir': config.model_config['model_dir']
-            }
-        }
+        config=config
     )
     
     # 获取最佳验证损失
-    best_val_loss = min(val_losses)
+    best_val_loss = min(val_losses) if val_losses else float('inf')
     
-    # 保存模型
-    model_path = os.path.join(config.model_config['model_dir'], f"{element}_model.pth")
-    torch.save(model.state_dict(), model_path)
-    logger.info(f"模型已保存到: {model_path}")
+    # 加载最佳模型
+    best_model = load_trained_model(config.model_config['input_size'], element, config)
     
-    # 如果提供了测试数据加载器，进行测试评估
-    test_metrics = None
-    if test_loader is not None:
-        test_metrics = evaluate_model(model, test_loader, device)
-        logger.info(f"{element} 测试集评估结果:")
-        for metric, value in test_metrics.items():
-            logger.info(f"  {metric}: {value:.6f}")
+    # 在测试集上评估
+    test_metrics = evaluate_model(best_model, test_loader, config.training_config['device'])
     
-    return model, best_val_loss, test_metrics
+    return best_model, best_val_loss, test_metrics
 
 def hyperparameter_tuning(element, train_loader, val_loader, grid=None, device=None):
     """
@@ -395,8 +354,7 @@ def process_element(element, train_data_path, val_data_path, test_data_path=None
         train_loader=train_loader,
         val_loader=val_loader,
         test_loader=test_loader,
-        hyperparams=hyperparams,
-        device=device
+        config=config
     )
     
     return model, test_metrics
