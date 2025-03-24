@@ -93,16 +93,26 @@ def create_data_loaders(spectra, labels, batch_size=32, shuffle=True):
     返回:
         torch.utils.data.DataLoader: 数据加载器
     """
+    logger.info(f"输入数据形状: {spectra.shape}")
+    
     # 检查数据形状，如果还没有通道维度，则添加
     if len(spectra.shape) == 2:
         # 添加通道维度 [n_samples, 1, n_wavelengths]
         spectra_tensor = torch.FloatTensor(spectra).unsqueeze(1)
+        logger.info(f"2D数据添加通道维度后形状: {spectra_tensor.shape}")
     elif len(spectra.shape) == 4:
         # 如果是4D数据 [n_samples, 1, 1, n_wavelengths]，去掉多余的维度
         spectra_tensor = torch.FloatTensor(spectra).squeeze(2)
+        logger.info(f"4D数据压缩后形状: {spectra_tensor.shape}")
     else:
         # 已经有正确的通道维度，直接转换为张量
         spectra_tensor = torch.FloatTensor(spectra)
+        logger.info(f"保持原有形状: {spectra_tensor.shape}")
+    
+    # 确保数据维度正确 [batch_size, channels, length]
+    if len(spectra_tensor.shape) != 3:
+        logger.error(f"数据维度不正确: {spectra_tensor.shape}")
+        raise ValueError(f"数据维度不正确: {spectra_tensor.shape}")
     
     labels_tensor = torch.FloatTensor(labels)
     
@@ -116,6 +126,12 @@ def create_data_loaders(spectra, labels, batch_size=32, shuffle=True):
         shuffle=shuffle,
         pin_memory=True
     )
+    
+    # 检查第一个批次的数据形状
+    for batch in data_loader:
+        spectra_batch, _ = batch
+        logger.info(f"批次数据形状: {spectra_batch.shape}")
+        break
     
     return data_loader
 
