@@ -305,8 +305,8 @@ def train_model(model, train_loader, val_loader, element, config):
     criterion = nn.MSELoss()
     optimizer = torch.optim.AdamW(  # 使用AdamW优化器
         model.parameters(),
-        lr=config['training']['lr'],
-        weight_decay=config['training']['weight_decay'],
+        lr=config.training_config['lr'],
+        weight_decay=config.training_config['weight_decay'],
         eps=1e-8  # 增加数值稳定性
     )
     
@@ -318,7 +318,7 @@ def train_model(model, train_loader, val_loader, element, config):
         eta_min=1e-6  # 最小学习率
     )
     
-    os.makedirs(config['output']['model_dir'], exist_ok=True)
+    os.makedirs(config.model_config['model_dir'], exist_ok=True)
     
     best_val_loss = float('inf')
     patience_counter = 0
@@ -326,10 +326,10 @@ def train_model(model, train_loader, val_loader, element, config):
     val_losses = []
     nan_counter = 0  # 记录连续nan的次数
     
-    for epoch in range(config['training']['epochs']):
+    for epoch in range(config.training_config['epochs']):
         # 训练和验证
-        avg_train_loss = _train_epoch(model, train_loader, criterion, optimizer, config['training']['device'])
-        avg_val_loss = _validate(model, val_loader, criterion, config['training']['device'])
+        avg_train_loss = _train_epoch(model, train_loader, criterion, optimizer, config.training_config['device'])
+        avg_val_loss = _validate(model, val_loader, criterion, config.training_config['device'])
         
         # 检查是否有 nan 值
         if torch.isnan(torch.tensor(avg_train_loss)) or torch.isnan(torch.tensor(avg_val_loss)):
@@ -341,7 +341,7 @@ def train_model(model, train_loader, val_loader, element, config):
                 logger.warning("连续出现nan值，重置模型和学习率")
                 model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
                 for param_group in optimizer.param_groups:
-                    param_group['lr'] = config['training']['lr'] * 0.1
+                    param_group['lr'] = config.training_config['lr'] * 0.1
                 nan_counter = 0
             continue
         else:
@@ -357,15 +357,17 @@ def train_model(model, train_loader, val_loader, element, config):
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             patience_counter = 0
-            _save_checkpoint(model, optimizer, scheduler, epoch, best_val_loss, element, config)
+            _save_checkpoint(model, optimizer, scheduler, epoch, best_val_loss, element, {
+                'output': {'model_dir': config.model_config['model_dir']}
+            })
         else:
             patience_counter += 1
-            if patience_counter >= config['training']['early_stopping_patience']:
+            if patience_counter >= config.training_config['early_stopping_patience']:
                 logger.info(f'Early stopping triggered after {epoch + 1} epochs')
                 break
         
         if (epoch + 1) % 10 == 0:
-            logger.info(f'Epoch [{epoch+1}/{config["training"]["epochs"]}], '
+            logger.info(f'Epoch [{epoch+1}/{config.training_config["epochs"]}], '
                        f'Train Loss: {avg_train_loss:.4f}, '
                        f'Val Loss: {avg_val_loss:.4f}, '
                        f'LR: {optimizer.param_groups[0]["lr"]:.6f}')
@@ -388,7 +390,7 @@ def evaluate_model(model, test_loader, device=None):
         评估结果字典
     """
     if device is None:
-        device = config.training_config['device']
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
     model.eval()
     test_loss = 0
@@ -441,7 +443,7 @@ def predict(model, spectra, device):
         return outputs.squeeze().cpu().numpy()
 
 # =============== 4. 工具函数 ===============
-def load_trained_model(input_size, element, config=config.CONFIG):
+def load_trained_model(input_size, element, config):
     """
     加载训练好的模型
     Args:
@@ -451,15 +453,15 @@ def load_trained_model(input_size, element, config=config.CONFIG):
     Returns:
         加载好的模型
     """
-    model = SpectralResCNN(input_size).to(config['training']['device'])
-    checkpoint_path = os.path.join(config['output']['model_dir'], f"best_model_{element}.pth")
+    model = SpectralResCNN(input_size).to(config.training_config['device'])
+    checkpoint_path = os.path.join(config.model_config['model_dir'], f"best_model_{element}.pth")
     
     if os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path)
         model.load_state_dict(checkpoint['model_state_dict'])
-        print(f"已加载 {element} 的最佳模型，验证损失: {checkpoint['loss']:.4f}")
+        logger.info(f"已加载 {element} 的最佳模型，验证损失: {checkpoint['loss']:.4f}")
     else:
-        print(f"警告：未找到 {element} 的模型文件")
+        logger.warning(f"未找到 {element} 的模型文件")
     
     return model
 
