@@ -190,13 +190,10 @@ class SpectralResCNN(nn.Module):
         """
         前向传播
         Args:
-            x: 输入光谱，形状为(batch_size, n_pixels)
+            x: 输入光谱，形状为(batch_size, channels, n_pixels)
         Returns:
             预测的元素丰度值
         """
-        # 调整输入维度为(batch_size, channels, n_pixels)
-        x = x.unsqueeze(1)
-        
         # 输入处理
         x = self.input_conv(x)
         
