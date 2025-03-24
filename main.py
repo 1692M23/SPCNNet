@@ -73,7 +73,13 @@ def load_dataset(data_path, element):
             # 查找元素索引
             try:
                 element_idx = element_names.index(element)
-                labels = data['y'][:, element_idx]
+                # 检查 'y' 的维度
+                if len(data['y'].shape) == 1:
+                    # 如果是一维数组，假设只有一个元素
+                    labels = data['y']
+                else:
+                    # 如果是二维数组，按索引获取对应元素的数据
+                    labels = data['y'][:, element_idx]
                 logger.info(f"在'y'字段中找到元素{element}的丰度数据，索引为{element_idx}")
             except ValueError:
                 logger.error(f"在元素列表中找不到{element}")
