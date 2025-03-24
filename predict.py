@@ -41,20 +41,42 @@ def load_data(data_path):
         pandas.DataFrame: 元数据（如果有）
     """
     try:
+        if not os.path.exists(data_path):
+            logger.error(f"数据文件不存在: {data_path}")
+            return None, None
+            
         if data_path.endswith('.npz'):
             data = np.load(data_path)
-            spectra = data['spectra'] if 'spectra' in data.files else None
+            logger.info(f"NPZ文件包含以下键: {data.files}")
             
-            if spectra is None and 'data' in data.files:
+            # 尝试不同的键名
+            if 'X' in data.files:
+                spectra = data['X']
+            elif 'spectra' in data.files:
+                spectra = data['spectra']
+            elif 'data' in data.files:
                 spectra = data['data']
+            else:
+                logger.error(f"NPZ文件中未找到光谱数据，可用的键: {data.files}")
+                return None, None
             
-            metadata = None
+            if spectra is None:
+                logger.error("无法从NPZ文件中提取光谱数据")
+                return None, None
+                
+            logger.info(f"成功从NPZ文件加载光谱数据，形状: {spectra.shape}")
             
-            logger.info(f"成功从NPZ文件加载 {spectra.shape[0]} 条光谱")
-            return spectra, metadata
+            # 如果有其他数据，也加载它们
+            metadata = {}
+            for key in data.files:
+                if key not in ['X', 'spectra', 'data']:
+                    metadata[key] = data[key]
+            
+            return spectra, pd.DataFrame(metadata) if metadata else None
             
         elif data_path.endswith('.csv'):
             df = pd.read_csv(data_path)
+            logger.info(f"CSV文件包含以下列: {df.columns.tolist()}")
             
             # 假设CSV文件中包含spec列和其他元数据列
             if 'spec' not in df.columns:
@@ -79,11 +101,10 @@ def load_data(data_path):
                         return None, None
             
             spectra = np.array(spectra)
+            logger.info(f"成功从CSV文件加载光谱数据，形状: {spectra.shape}")
             
             # 获取元数据（除spec列外的所有列）
             metadata = df.drop('spec', axis=1) if len(df.columns) > 1 else None
-            
-            logger.info(f"成功从CSV文件加载 {len(spectra)} 条光谱")
             return spectra, metadata
             
         else:
@@ -92,6 +113,7 @@ def load_data(data_path):
             
     except Exception as e:
         logger.error(f"加载数据失败: {str(e)}")
+        logger.exception("详细错误信息:")
         return None, None
 
 def predict_element(spectra, element, batch_size=32, device=None):
