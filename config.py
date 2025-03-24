@@ -8,6 +8,14 @@
 import os
 import torch
 import numpy as np
+import logging
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger('config')
 
 # 数据路径配置
 data_paths = {
