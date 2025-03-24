@@ -167,17 +167,16 @@ def train_and_evaluate_model(element, train_loader, val_loader, test_loader=None
         logger.info(f"  {param}: {value}")
     
     # 训练模型
-    model, best_val_loss = train_model(
+    train_losses, val_losses = train_model(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
-        lr=hyperparams['lr'],
-        weight_decay=hyperparams['weight_decay'],
-        epochs=hyperparams['epochs'],
-        patience=hyperparams['patience'],
-        device=device,
-        model_name=element
+        element=element,
+        config=config.CONFIG
     )
+    
+    # 获取最佳验证损失
+    best_val_loss = min(val_losses)
     
     # 保存模型
     model_path = os.path.join(config.model_config['model_dir'], f"{element}_model.pth")
