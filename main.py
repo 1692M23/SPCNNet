@@ -53,43 +53,25 @@ def load_dataset(data_path, element):
         # 获取光谱数据
         spectra = data['X']
         
-        # 检查元素丰度数据
-        # 首先尝试直接查找元素字段
-        if element in data:
-            labels = data[element]
-            logger.info(f"找到元素字段 {element}")
-        # 其次尝试在'y'字段中查找对应的元素丰度
-        elif 'y' in data and 'elements' in data:
-            # 确定元素对应的索引
-            element_names = data['elements']
-            element_idx = None
-            
-            # 将元素名称转换为字符串列表以便查找
-            if isinstance(element_names[0], np.ndarray):
-                element_names = [str(name.item()) for name in element_names]
-            else:
-                element_names = [str(name) for name in element_names]
-                
-            # 查找元素索引
-            try:
-                element_idx = element_names.index(element)
-                # 检查 'y' 的维度
-                if len(data['y'].shape) == 1:
-                    # 如果是一维数组，假设只有一个元素
-                    labels = data['y']
-                else:
-                    # 如果是二维数组，按索引获取对应元素的数据
-                    labels = data['y'][:, element_idx]
-                logger.info(f"在'y'字段中找到元素{element}的丰度数据，索引为{element_idx}")
-            except ValueError:
-                logger.error(f"在元素列表中找不到{element}")
-                return None, None
-        else:
-            logger.error(f"数据文件缺少'{element}'字段或'y'和'elements'字段")
+        # 检查'y'字段是否存在
+        if 'y' not in data:
+            logger.error(f"数据文件缺少'y'字段")
             return None, None
+            
+        # 获取标签数据
+        labels = data['y']
+        
+        # 检查元素是否匹配
+        if 'elements' in data:
+            # 获取第一个元素名称（因为所有元素名称都是相同的）
+            dataset_element = str(data['elements'][0])
+            if dataset_element != element:
+                logger.error(f"数据集元素 {dataset_element} 与请求元素 {element} 不匹配")
+                return None, None
+            else:
+                logger.info(f"找到元素 {element} 的数据")
         
         logger.info(f"已加载数据集: {data_path}, 光谱数量: {len(spectra)}")
-        
         return spectra, labels
         
     except Exception as e:

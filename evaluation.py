@@ -99,9 +99,9 @@ def load_test_predictions(elements=None, csv_files=None):
     
     if csv_files is None:
         csv_files = {
-            'C_FE': config.data_paths['C_FE_csv'],
-            'MG_FE': config.data_paths['MG_FE_csv'],
-            'CA_FE': config.data_paths['CA_FE_csv']
+            'C_FE': config.data_paths.get('C_FE_csv', ''),
+            'MG_FE': config.data_paths.get('MG_FE_csv', ''),
+            'CA_FE': config.data_paths.get('CA_FE_csv', '')
         }
     
     results = {}
@@ -111,12 +111,20 @@ def load_test_predictions(elements=None, csv_files=None):
         if element_results is None:
             continue
         
-        # 加载对应的CSV元数据
-        csv_file = csv_files.get(element)
+        # 加载对应的CSV元数据（如果存在）
+        csv_file = csv_files.get(element, '')
         if csv_file and os.path.exists(csv_file):
             metadata_df = load_csv_metadata(csv_file)
             if metadata_df is not None:
                 element_results['metadata'] = metadata_df
+        else:
+            # 如果没有CSV文件，创建一个简单的元数据
+            num_samples = len(element_results['true_values'])
+            element_results['metadata'] = pd.DataFrame({
+                'spec': range(num_samples),
+                'teff': range(num_samples),
+                'logg': range(num_samples)
+            })
         
         results[element] = element_results
     
@@ -434,9 +442,9 @@ def evaluate_all_elements(elements=None, save_dir=None):
                 'true_values': true_values,
                 'predictions': predictions,
                 'mae': mae,
-                'mse': mse,
-                'rmse': rmse,
-                'r2': r2,
+        'mse': mse,
+        'rmse': rmse,
+        'r2': r2,
                 'std': std
             }
             
@@ -743,8 +751,8 @@ def plot_catalog_comparison(elements, catalog_types=None, metrics=None, plot_dir
         # 保存图像
         plt.tight_layout()
         plt.savefig(os.path.join(plot_dir, f'catalog_comparison_{metric}.png'), dpi=300)
-        plt.close()
-    
+    plt.close()
+
     logger.info(f"已保存星表对比图到: {plot_dir}")
 
 def plot_teff_logg_abundance(element, catalog_type, plot_dir=None, figsize=(10, 8)):

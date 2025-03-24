@@ -14,7 +14,10 @@ data_paths = {
     'train_data': 'data/processed/train_dataset.npz',
     'val_data': 'data/processed/val_dataset.npz',
     'test_data': 'data/processed/test_dataset.npz',
-    'raw_data': 'data/raw/spectra.npz'
+    'raw_data': 'data/raw/spectra.npz',
+    'C_FE_csv': 'data/processed/C_FE_metadata.csv',
+    'MG_FE_csv': 'data/processed/MG_FE_metadata.csv',
+    'CA_FE_csv': 'data/processed/CA_FE_metadata.csv'
 }
 
 # 数据处理配置
