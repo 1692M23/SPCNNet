@@ -172,7 +172,18 @@ def train_and_evaluate_model(element, train_loader, val_loader, test_loader=None
         train_loader=train_loader,
         val_loader=val_loader,
         element=element,
-        config=config.CONFIG
+        config={
+            'training': {
+                'learning_rate': hyperparams['lr'],
+                'weight_decay': hyperparams['weight_decay'],
+                'epochs': hyperparams['epochs'],
+                'early_stopping_patience': hyperparams['patience'],
+                'device': device
+            },
+            'output': {
+                'model_dir': config.model_config['model_dir']
+            }
+        }
     )
     
     # 获取最佳验证损失
