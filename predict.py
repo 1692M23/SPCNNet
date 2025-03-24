@@ -50,12 +50,12 @@ def load_data(data_path):
             logger.info(f"NPZ文件包含以下键: {data.files}")
             
             # 尝试不同的键名
-            if 'X' in data.files:
-                spectra = data['X']
-            elif 'spectra' in data.files:
+            if 'spectra' in data.files:
                 spectra = data['spectra']
             elif 'data' in data.files:
                 spectra = data['data']
+            elif 'X' in data.files:
+                spectra = data['X']
             else:
                 logger.error(f"NPZ文件中未找到光谱数据，可用的键: {data.files}")
                 return None, None
@@ -65,14 +65,7 @@ def load_data(data_path):
                 return None, None
                 
             logger.info(f"成功从NPZ文件加载光谱数据，形状: {spectra.shape}")
-            
-            # 如果有其他数据，也加载它们
-            metadata = {}
-            for key in data.files:
-                if key not in ['X', 'spectra', 'data']:
-                    metadata[key] = data[key]
-            
-            return spectra, pd.DataFrame(metadata) if metadata else None
+            return spectra, None
             
         elif data_path.endswith('.csv'):
             df = pd.read_csv(data_path)
