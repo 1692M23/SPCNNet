@@ -150,9 +150,9 @@ def train_and_evaluate_model(element, train_loader, val_loader, test_loader=None
     # 如果没有提供超参数，使用默认配置
     if hyperparams is None:
         hyperparams = {
-            'lr': config.training_config['learning_rate'],
+            'learning_rate': config.training_config['learning_rate'],
             'weight_decay': config.training_config['weight_decay'],
-            'epochs': config.training_config['num_epochs'],
+            'num_epochs': config.training_config['num_epochs'],
             'patience': config.training_config['early_stopping_patience']
         }
     
@@ -171,9 +171,9 @@ def train_and_evaluate_model(element, train_loader, val_loader, test_loader=None
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
-        lr=hyperparams['lr'],
+        learning_rate=hyperparams['learning_rate'],
         weight_decay=hyperparams['weight_decay'],
-        epochs=hyperparams['epochs'],
+        num_epochs=hyperparams['num_epochs'],
         patience=hyperparams['patience'],
         device=device,
         model_name=element
