@@ -504,9 +504,9 @@ def evaluate_all_elements(elements=None, save_dir=None):
                     'true_values': true_values,
                     'predictions': predictions,
                     'mae': mae,
-                    'mse': mse,
-                    'rmse': rmse,
-                    'r2': r2,
+        'mse': mse,
+        'rmse': rmse,
+        'r2': r2,
                     'std': std
                 }
                 

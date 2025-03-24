@@ -84,10 +84,11 @@ tuning_config = {
 
 # 输出配置
 output_config = {
-    'log_dir': 'logs',
-    'results_dir': 'results',
-    'plots_dir': 'plots',
-    'predictions_dir': 'predictions'
+    'log_dir': 'logs',  # 日志目录
+    'results_dir': 'results',  # 结果目录
+    'plots_dir': 'plots',  # 图表目录
+    'predictions_dir': 'predictions',  # 预测结果目录
+    'cache_dir': 'cache'  # 缓存目录
 }
 
 # MIST等时线配置
@@ -152,6 +153,11 @@ evaluation_config = {
     'plot_types': ['predictions', 'residuals', 'error_distribution'],  # 可视化类型
     'save_predictions': True  # 是否保存预测结果
 }
+
+# 创建必要的目录
+for dir_name in output_config.values():
+    os.makedirs(dir_name, exist_ok=True)
+    logger.info(f"已创建目录: {dir_name}")
 
 # 将所有配置合并到一个字典中
 CONFIG = {
