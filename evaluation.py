@@ -294,9 +294,8 @@ def plot_predictions_vs_true(elements=None, plot_dir=None, figsize=(12, 10)):
         # 保存图表
         os.makedirs(plot_dir, exist_ok=True)
         plt.savefig(os.path.join(plot_dir, f'{element}_predictions_comparison.png'), dpi=300, bbox_inches='tight')
-    plt.close()
-
         logger.info(f"已保存 {element} 预测对比图")
+        plt.close()
 
 def plot_metrics_comparison(elements=None, plot_dir=None, figsize=(10, 8)):
     """
