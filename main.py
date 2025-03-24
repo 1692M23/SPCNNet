@@ -160,9 +160,7 @@ def train_and_evaluate_model(element, train_loader, val_loader, test_loader=None
     
     # 创建模型
     model = SpectralResCNN(
-        input_dim=config.model_config['input_dim'],
-        num_filters=hyperparams['num_filters'],
-        num_blocks=hyperparams['num_blocks']
+        input_size=config.model_config['input_dim']
     ).to(device)
     
     # 记录超参数
