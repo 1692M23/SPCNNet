@@ -313,7 +313,10 @@ def train_model(model, train_loader, val_loader, element, config):
     返回:
         tuple: (train_losses, val_losses) 训练和验证损失列表
     """
-    # 设置优化器
+    device = config.training_config['device']
+    model = model.to(device)
+    
+    # 使用AdamW优化器，添加梯度裁剪
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.training_config['lr'],
@@ -321,12 +324,12 @@ def train_model(model, train_loader, val_loader, element, config):
         eps=1e-8  # 增加数值稳定性
     )
     
-    # 设置学习率调度器
+    # 使用余弦退火学习率调度器
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer,
-        T_0=10,  # 第一次重启的epoch数
+        T_0=config.training_config['epochs'] // 3,  # 第一次重启的epoch数
         T_mult=2,  # 每次重启后周期的倍数
-        eta_min=1e-6  # 最小学习率
+        eta_min=config.training_config['lr'] * 0.01  # 最小学习率
     )
     
     # 创建模型目录
@@ -337,90 +340,107 @@ def train_model(model, train_loader, val_loader, element, config):
     patience_counter = 0
     train_losses = []
     val_losses = []
-    nan_counter = 0  # 记录连续出现nan的次数
-    max_nan_attempts = 3  # 最大允许的连续nan次数
+    nan_counter = 0
+    max_nan_attempts = 3
+    max_patience = config.training_config['early_stopping_patience']
     
     # 训练循环
     for epoch in range(config.training_config['epochs']):
         model.train()
-        total_train_loss = 0
+        epoch_loss = 0
         valid_batches = 0
         
-        # 训练一个epoch
+        # 训练阶段
         for batch_idx, (data, target) in enumerate(train_loader):
-            data, target = data.to(config.training_config['device']), target.to(config.training_config['device'])
+            data, target = data.to(device), target.to(device)
             
-            optimizer.zero_grad()
-            output = model(data)
-            loss = F.mse_loss(output, target)
-            
-            # 检查损失值是否为nan
-            if torch.isnan(loss):
-                logger.warning(f"检测到 nan 损失值，跳过当前批次")
-                nan_counter += 1
-                if nan_counter >= max_nan_attempts:
-                    logger.warning(f"连续 {max_nan_attempts} 次出现 nan 值，重置模型和学习率")
-                    # 重置模型参数
-                    model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
-                    # 降低学习率
-                    for param_group in optimizer.param_groups:
-                        param_group['lr'] *= 0.1
-                    nan_counter = 0
+            # 检查输入数据是否包含nan
+            if torch.isnan(data).any():
+                logger.warning(f"检测到输入数据包含nan值，跳过当前批次")
                 continue
+                
+            optimizer.zero_grad()
             
-            # 反向传播
-            loss.backward()
-            
-            # 梯度裁剪
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
-            optimizer.step()
-            
-            total_train_loss += loss.item()
-            valid_batches += 1
+            try:
+                output = model(data)
+                loss = F.mse_loss(output, target)
+                
+                # 检查损失值是否为nan
+                if torch.isnan(loss):
+                    logger.warning(f"检测到nan损失值，跳过当前批次")
+                    nan_counter += 1
+                    if nan_counter >= max_nan_attempts:
+                        logger.warning(f"连续 {max_nan_attempts} 次出现nan值，重置模型和学习率")
+                        # 重置模型参数
+                        model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
+                        # 降低学习率
+                        for param_group in optimizer.param_groups:
+                            param_group['lr'] *= 0.1
+                        nan_counter = 0
+                    continue
+                
+                # 梯度裁剪
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
+                loss.backward()
+                optimizer.step()
+                
+                epoch_loss += loss.item()
+                valid_batches += 1
+                nan_counter = 0  # 重置nan计数器
+                
+            except Exception as e:
+                logger.error(f"训练批次时出错: {str(e)}")
+                continue
         
-        # 计算平均训练损失
-        if valid_batches > 0:
-            avg_train_loss = total_train_loss / valid_batches
-        else:
+        # 检查是否有有效的损失值
+        if valid_batches == 0:
             logger.error("训练过程中没有有效的损失值")
             return [], []
         
-        # 验证
+        # 计算平均训练损失
+        avg_train_loss = epoch_loss / valid_batches
+        train_losses.append(avg_train_loss)
+        
+        # 验证阶段
         model.eval()
-        total_val_loss = 0
+        val_loss = 0
         valid_val_batches = 0
         
         with torch.no_grad():
             for data, target in val_loader:
-                data, target = data.to(config.training_config['device']), target.to(config.training_config['device'])
-                output = model(data)
-                loss = F.mse_loss(output, target)
+                data, target = data.to(device), target.to(device)
                 
-                if not torch.isnan(loss):
-                    total_val_loss += loss.item()
+                # 检查输入数据是否包含nan
+                if torch.isnan(data).any():
+                    continue
+                    
+                try:
+                    output = model(data)
+                    loss = F.mse_loss(output, target)
+                    
+                    # 检查损失值是否为nan
+                    if torch.isnan(loss):
+                        continue
+                        
+                    val_loss += loss.item()
                     valid_val_batches += 1
+                    
+                except Exception as e:
+                    logger.error(f"验证批次时出错: {str(e)}")
+                    continue
         
-        # 计算平均验证损失
-        if valid_val_batches > 0:
-            avg_val_loss = total_val_loss / valid_val_batches
-        else:
+        # 检查是否有有效的验证损失值
+        if valid_val_batches == 0:
             logger.error("验证过程中没有有效的损失值")
             return [], []
         
-        # 更新学习率
-        scheduler.step()
-        
-        # 记录损失
-        train_losses.append(avg_train_loss)
+        # 计算平均验证损失
+        avg_val_loss = val_loss / valid_val_batches
         val_losses.append(avg_val_loss)
         
-        # 每10个epoch记录一次
-        if (epoch + 1) % 10 == 0:
-            logger.info(f'Epoch [{epoch+1}/{config.training_config["epochs"]}] '
-                       f'Train Loss: {avg_train_loss:.6f} '
-                       f'Val Loss: {avg_val_loss:.6f} '
-                       f'LR: {optimizer.param_groups[0]["lr"]:.2e}')
+        # 更新学习率
+        scheduler.step()
         
         # 早停检查
         if avg_val_loss < best_val_loss:
@@ -432,9 +452,15 @@ def train_model(model, train_loader, val_loader, element, config):
             })
         else:
             patience_counter += 1
-            if patience_counter >= config.training_config['early_stopping_patience']:
-                logger.info(f"早停：验证损失在 {config.training_config['early_stopping_patience']} 个epoch内没有改善")
+            if patience_counter >= max_patience:
+                logger.info(f"早停：{max_patience} 个epoch没有改善")
                 break
+        
+        # 每10个epoch记录一次损失
+        if (epoch + 1) % 10 == 0:
+            logger.info(f'Epoch [{epoch+1}/{config.training_config["epochs"]}] '
+                       f'Train Loss: {avg_train_loss:.6f} '
+                       f'Val Loss: {avg_val_loss:.6f}')
     
     return train_losses, val_losses
 
