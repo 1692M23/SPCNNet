@@ -71,12 +71,13 @@ model_config = {
 
 # 训练配置
 training_config = {
-    'batch_size': 32,  # 减小批次大小
-    'lr': 0.0001,  # 降低初始学习率
-    'weight_decay': 0.001,  # 增加权重衰减
-    'epochs': 100,
-    'early_stopping_patience': 15,
-    'device': 'cuda' if torch.cuda.is_available() else 'cpu'
+    'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+    'batch_size': 32,
+    'num_epochs': 100,
+    'lr': 0.001,
+    'weight_decay': 1e-4,
+    'early_stopping_patience': 10,
+    'elements': ['C_FE', 'MG_FE', 'CA_FE']  # 要预测的元素列表
 }
 
 # 超参数调优配置
