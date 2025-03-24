@@ -97,8 +97,11 @@ def create_data_loaders(spectra, labels, batch_size=32, shuffle=True):
     if len(spectra.shape) == 2:
         # 添加通道维度 [n_samples, 1, n_wavelengths]
         spectra_tensor = torch.FloatTensor(spectra).unsqueeze(1)
+    elif len(spectra.shape) == 4:
+        # 如果是4D数据 [n_samples, 1, 1, n_wavelengths]，去掉多余的维度
+        spectra_tensor = torch.FloatTensor(spectra).squeeze(2)
     else:
-        # 已经有通道维度，直接转换为张量
+        # 已经有正确的通道维度，直接转换为张量
         spectra_tensor = torch.FloatTensor(spectra)
     
     labels_tensor = torch.FloatTensor(labels)
