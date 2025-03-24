@@ -4,6 +4,7 @@ import config
 import os
 import numpy as np
 import logging
+import torch.nn.functional as F
 
 # 配置logger
 logger = logging.getLogger(__name__)
@@ -300,17 +301,27 @@ def _save_checkpoint(model, optimizer, scheduler, epoch, loss, element, config):
 
 def train_model(model, train_loader, val_loader, element, config):
     """
-    模型训练主函数
+    训练模型
+    
+    参数:
+        model (torch.nn.Module): 模型
+        train_loader (DataLoader): 训练数据加载器
+        val_loader (DataLoader): 验证数据加载器
+        element (str): 元素名称
+        config: 配置对象
+        
+    返回:
+        tuple: (train_losses, val_losses) 训练和验证损失列表
     """
-    criterion = nn.MSELoss()
-    optimizer = torch.optim.AdamW(  # 使用AdamW优化器
+    # 设置优化器
+    optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.training_config['lr'],
         weight_decay=config.training_config['weight_decay'],
         eps=1e-8  # 增加数值稳定性
     )
     
-    # 使用余弦退火学习率调度器
+    # 设置学习率调度器
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer,
         T_0=10,  # 第一次重启的epoch数
@@ -318,63 +329,112 @@ def train_model(model, train_loader, val_loader, element, config):
         eta_min=1e-6  # 最小学习率
     )
     
+    # 创建模型目录
     os.makedirs(config.model_config['model_dir'], exist_ok=True)
     
+    # 初始化变量
     best_val_loss = float('inf')
     patience_counter = 0
     train_losses = []
     val_losses = []
-    nan_counter = 0  # 记录连续nan的次数
+    nan_counter = 0  # 记录连续出现nan的次数
+    max_nan_attempts = 3  # 最大允许的连续nan次数
     
+    # 训练循环
     for epoch in range(config.training_config['epochs']):
-        # 训练和验证
-        avg_train_loss = _train_epoch(model, train_loader, criterion, optimizer, config.training_config['device'])
-        avg_val_loss = _validate(model, val_loader, criterion, config.training_config['device'])
+        model.train()
+        total_train_loss = 0
+        valid_batches = 0
         
-        # 检查是否有 nan 值
-        if torch.isnan(torch.tensor(avg_train_loss)) or torch.isnan(torch.tensor(avg_val_loss)):
-            nan_counter += 1
-            logger.warning(f"检测到 nan 值，当前学习率: {optimizer.param_groups[0]['lr']}")
+        # 训练一个epoch
+        for batch_idx, (data, target) in enumerate(train_loader):
+            data, target = data.to(config.training_config['device']), target.to(config.training_config['device'])
             
-            # 如果连续出现3次nan，重置模型和学习率
-            if nan_counter >= 3:
-                logger.warning("连续出现nan值，重置模型和学习率")
-                model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = config.training_config['lr'] * 0.1
-                nan_counter = 0
-            continue
-        else:
-            nan_counter = 0  # 重置nan计数器
+            optimizer.zero_grad()
+            output = model(data)
+            loss = F.mse_loss(output, target)
+            
+            # 检查损失值是否为nan
+            if torch.isnan(loss):
+                logger.warning(f"检测到 nan 损失值，跳过当前批次")
+                nan_counter += 1
+                if nan_counter >= max_nan_attempts:
+                    logger.warning(f"连续 {max_nan_attempts} 次出现 nan 值，重置模型和学习率")
+                    # 重置模型参数
+                    model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
+                    # 降低学习率
+                    for param_group in optimizer.param_groups:
+                        param_group['lr'] *= 0.1
+                    nan_counter = 0
+                continue
+            
+            # 反向传播
+            loss.backward()
+            
+            # 梯度裁剪
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
+            optimizer.step()
+            
+            total_train_loss += loss.item()
+            valid_batches += 1
         
-        train_losses.append(avg_train_loss)
-        val_losses.append(avg_val_loss)
+        # 计算平均训练损失
+        if valid_batches > 0:
+            avg_train_loss = total_train_loss / valid_batches
+        else:
+            logger.error("训练过程中没有有效的损失值")
+            return [], []
+        
+        # 验证
+        model.eval()
+        total_val_loss = 0
+        valid_val_batches = 0
+        
+        with torch.no_grad():
+            for data, target in val_loader:
+                data, target = data.to(config.training_config['device']), target.to(config.training_config['device'])
+                output = model(data)
+                loss = F.mse_loss(output, target)
+                
+                if not torch.isnan(loss):
+                    total_val_loss += loss.item()
+                    valid_val_batches += 1
+        
+        # 计算平均验证损失
+        if valid_val_batches > 0:
+            avg_val_loss = total_val_loss / valid_val_batches
+        else:
+            logger.error("验证过程中没有有效的损失值")
+            return [], []
         
         # 更新学习率
         scheduler.step()
+        
+        # 记录损失
+        train_losses.append(avg_train_loss)
+        val_losses.append(avg_val_loss)
+        
+        # 每10个epoch记录一次
+        if (epoch + 1) % 10 == 0:
+            logger.info(f'Epoch [{epoch+1}/{config.training_config["epochs"]}] '
+                       f'Train Loss: {avg_train_loss:.6f} '
+                       f'Val Loss: {avg_val_loss:.6f} '
+                       f'LR: {optimizer.param_groups[0]["lr"]:.2e}')
         
         # 早停检查
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             patience_counter = 0
+            # 保存最佳模型
             _save_checkpoint(model, optimizer, scheduler, epoch, best_val_loss, element, {
                 'output': {'model_dir': config.model_config['model_dir']}
             })
         else:
             patience_counter += 1
             if patience_counter >= config.training_config['early_stopping_patience']:
-                logger.info(f'Early stopping triggered after {epoch + 1} epochs')
+                logger.info(f"早停：验证损失在 {config.training_config['early_stopping_patience']} 个epoch内没有改善")
                 break
-        
-        if (epoch + 1) % 10 == 0:
-            logger.info(f'Epoch [{epoch+1}/{config.training_config["epochs"]}], '
-                       f'Train Loss: {avg_train_loss:.4f}, '
-                       f'Val Loss: {avg_val_loss:.4f}, '
-                       f'LR: {optimizer.param_groups[0]["lr"]:.6f}')
-    
-    if not train_losses or not val_losses:
-        logger.error("训练过程中没有有效的损失值")
-        return [], []
     
     return train_losses, val_losses
 
@@ -446,24 +506,34 @@ def predict(model, spectra, device):
 def load_trained_model(input_size, element, config):
     """
     加载训练好的模型
-    Args:
-        input_size: 输入特征维度
-        element: 元素名称
-        config: 配置参数
-    Returns:
-        加载好的模型
+    
+    参数:
+        input_size (int): 输入维度
+        element (str): 元素名称
+        config: 配置对象
+        
+    返回:
+        torch.nn.Module: 加载的模型
     """
-    model = SpectralResCNN(input_size).to(config.training_config['device'])
-    checkpoint_path = os.path.join(config.model_config['model_dir'], f"best_model_{element}.pth")
-    
-    if os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        logger.info(f"已加载 {element} 的最佳模型，验证损失: {checkpoint['loss']:.4f}")
-    else:
+    model_path = os.path.join(config.model_config['model_dir'], f"{element}_model.pth")
+    if not os.path.exists(model_path):
         logger.warning(f"未找到 {element} 的模型文件")
+        return None
     
-    return model
+    try:
+        # 创建模型实例
+        model = SpectralResCNN(input_size).to(config.training_config['device'])
+        
+        # 加载模型状态
+        checkpoint = torch.load(model_path, map_location=config.training_config['device'])
+        model.load_state_dict(checkpoint['model_state_dict'])
+        
+        logger.info(f"成功加载 {element} 模型，验证损失: {checkpoint['val_loss']:.6f}")
+        return model
+        
+    except Exception as e:
+        logger.error(f"加载模型失败: {str(e)}")
+        return None
 
 """
 关键超参数调优指南：
