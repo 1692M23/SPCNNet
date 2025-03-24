@@ -11,9 +11,9 @@ import numpy as np
 
 # 数据路径配置
 data_paths = {
-    'train_data': 'data/processed/train_data.npz',
-    'val_data': 'data/processed/val_data.npz',
-    'test_data': 'data/processed/test_data.npz',
+    'train_data': 'data/processed/train_dataset.npz',
+    'val_data': 'data/processed/val_dataset.npz',
+    'test_data': 'data/processed/test_dataset.npz',
     'raw_data': 'data/raw/spectra.npz'
 }
 
