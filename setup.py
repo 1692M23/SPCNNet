@@ -72,23 +72,29 @@ def install_requirements():
     
     return True
 
-def setup_environment(repo_url, branch='main'):
+def setup_environment():
     """设置环境"""
     try:
-        # 创建目录
-        create_directories()
-        
-        # 更新GitHub仓库
-        if not update_github_repo(repo_url, branch):
+        # 克隆仓库
+        logger.info("克隆仓库...")
+        repo_url = "https://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@github.com/1692M23/SPCNNet.git"
+        try:
+            subprocess.run(['git', 'clone', repo_url], check=True)
+            logger.info("仓库克隆成功")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"克隆仓库失败: {e}")
             return False
         
+        # 创建目录
+        create_directories()
+
         # 安装依赖
         if not install_requirements():
             return False
-        
+
         logger.info("环境设置完成")
         return True
-        
+
     except Exception as e:
         logger.error(f"环境设置失败: {e}")
         return False
@@ -99,7 +105,7 @@ def main():
     repo_url = "https://github.com/1692M23/SPCNNet.git"
     
     # 设置环境
-    if setup_environment(repo_url):
+    if setup_environment():
         logger.info("环境设置成功完成")
     else:
         logger.error("环境设置失败")
