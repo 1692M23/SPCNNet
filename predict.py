@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import TensorDataset, DataLoader
+import matplotlib.pyplot as plt
+import time
 
 # 导入自定义模块
 import config
@@ -221,7 +223,7 @@ def predict_element(spectra, element, batch_size=32, device=None):
 
 def predict_all_elements(spectra, elements=None, batch_size=32):
     """
-    预测所有元素的丰度
+    预测所有元素的丰度，并为每批次生成实时结果
     
     参数:
         spectra (numpy.ndarray): 光谱数据
@@ -235,15 +237,173 @@ def predict_all_elements(spectra, elements=None, batch_size=32):
         elements = config.training_config['elements']
     
     results = {}
+    uncertainties = {}
     
     # 使用进度管理器
     with ProgressManager(len(elements), desc="预测元素丰度") as progress:
         for element in elements:
             logger.info(f"预测 {element} 元素丰度...")
-            predictions = predict_element(spectra, element, batch_size)
-            if predictions is not None:
-                results[element] = predictions
-                logger.info(f"完成 {element} 预测: 均值={predictions.mean():.4f}, 标准差={predictions.std():.4f}")
+            
+            # 创建批次结果目录
+            batch_results_dir = os.path.join(config.output_config['results_dir'], f'prediction_{element}_batch_results')
+            os.makedirs(batch_results_dir, exist_ok=True)
+            
+            # 初始化批次追踪文件
+            batch_tracking_path = os.path.join(batch_results_dir, 'batch_tracking.csv')
+            if os.path.exists(batch_tracking_path):
+                batch_df = pd.read_csv(batch_tracking_path)
+            else:
+                batch_df = pd.DataFrame(columns=['batch_id', 'mean', 'std', 'min', 'max', 'timestamp'])
+            
+            # 收集预测结果
+            all_predictions = []
+            
+            # 分批次进行预测并生成结果
+            for batch_id, i in enumerate(range(0, len(spectra), batch_size)):
+                try:
+                    # 获取当前批次数据
+                    batch_data = spectra[i:i+batch_size]
+                    
+                    # 预测当前批次
+                    batch_predictions = predict_element(batch_data, element, batch_size)
+                    if batch_predictions is None:
+                        logger.warning(f"批次 {batch_id+1} 预测失败，跳过")
+                        continue
+                    
+                    # 添加到总预测结果
+                    all_predictions.extend(batch_predictions)
+                    
+                    # 计算当前批次的统计信息
+                    batch_mean = np.mean(batch_predictions)
+                    batch_std = np.std(batch_predictions)
+                    batch_min = np.min(batch_predictions)
+                    batch_max = np.max(batch_predictions)
+                    
+                    # 保存批次评估指标
+                    metrics_path = os.path.join(batch_results_dir, f'batch_{batch_id+1}_metrics.txt')
+                    with open(metrics_path, 'w') as f:
+                        f.write(f"批次 {batch_id+1} 在 {element} 上的预测结果\n")
+                        f.write("=" * 50 + "\n")
+                        f.write(f"样本数: {len(batch_predictions)}\n")
+                        f.write(f"平均值: {batch_mean:.6f}\n")
+                        f.write(f"标准差: {batch_std:.6f}\n")
+                        f.write(f"最小值: {batch_min:.6f}\n")
+                        f.write(f"最大值: {batch_max:.6f}\n")
+                    
+                    # 生成批次预测分布图
+                    plt.figure(figsize=(10, 6))
+                    plt.hist(batch_predictions, bins=30, alpha=0.7)
+                    plt.axvline(x=batch_mean, color='r', linestyle='--', label=f'平均值 = {batch_mean:.4f}')
+                    plt.axvline(x=batch_mean + batch_std, color='g', linestyle='--', label=f'+1σ = {batch_mean + batch_std:.4f}')
+                    plt.axvline(x=batch_mean - batch_std, color='g', linestyle='--', label=f'-1σ = {batch_mean - batch_std:.4f}')
+                    plt.xlabel(f'{element} 预测值')
+                    plt.ylabel('频率')
+                    plt.title(f'批次 {batch_id+1} {element} 预测分布')
+                    plt.legend()
+                    plt.grid(True)
+                    plt.tight_layout()
+                    dist_path = os.path.join(batch_results_dir, f'batch_{batch_id+1}_distribution.png')
+                    plt.savefig(dist_path)
+                    plt.close()
+                    
+                    # 更新批次追踪文件
+                    new_row = pd.DataFrame({
+                        'batch_id': [batch_id+1],
+                        'mean': [batch_mean],
+                        'std': [batch_std],
+                        'min': [batch_min],
+                        'max': [batch_max],
+                        'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
+                    })
+                    
+                    batch_df = pd.concat([batch_df, new_row], ignore_index=True)
+                    batch_df.to_csv(batch_tracking_path, index=False)
+                    
+                    # 生成批次进度趋势图
+                    if len(batch_df) > 1:
+                        plt.figure(figsize=(12, 8))
+                        
+                        plt.subplot(2, 2, 1)
+                        plt.plot(batch_df['batch_id'], batch_df['mean'], 'o-')
+                        plt.xlabel('批次ID')
+                        plt.ylabel('平均值')
+                        plt.title('平均值趋势')
+                        plt.grid(True)
+                        
+                        plt.subplot(2, 2, 2)
+                        plt.plot(batch_df['batch_id'], batch_df['std'], 'o-')
+                        plt.xlabel('批次ID')
+                        plt.ylabel('标准差')
+                        plt.title('标准差趋势')
+                        plt.grid(True)
+                        
+                        plt.subplot(2, 2, 3)
+                        plt.plot(batch_df['batch_id'], batch_df['min'], 'o-')
+                        plt.xlabel('批次ID')
+                        plt.ylabel('最小值')
+                        plt.title('最小值趋势')
+                        plt.grid(True)
+                        
+                        plt.subplot(2, 2, 4)
+                        plt.plot(batch_df['batch_id'], batch_df['max'], 'o-')
+                        plt.xlabel('批次ID')
+                        plt.ylabel('最大值')
+                        plt.title('最大值趋势')
+                        plt.grid(True)
+                        
+                        plt.tight_layout()
+                        trend_path = os.path.join(batch_results_dir, 'batch_trends.png')
+                        plt.savefig(trend_path)
+                        plt.close()
+                    
+                    logger.info(f"成功生成批次 {batch_id+1} 的预测结果和可视化")
+                
+                except Exception as e:
+                    logger.error(f"预测批次 {batch_id+1} 时出错: {str(e)}")
+            
+            # 完成该元素的所有批次预测后，生成总结报告
+            if all_predictions:
+                all_predictions = np.array(all_predictions)
+                results[element] = all_predictions
+                
+                # 计算总体统计信息
+                total_mean = np.mean(all_predictions)
+                total_std = np.std(all_predictions)
+                total_min = np.min(all_predictions)
+                total_max = np.max(all_predictions)
+                
+                # 保存最终预测报告
+                summary_path = os.path.join(batch_results_dir, 'prediction_summary.txt')
+                with open(summary_path, 'w') as f:
+                    f.write(f"{element} 元素预测总结\n")
+                    f.write("=" * 50 + "\n")
+                    f.write(f"总批次数: {len(batch_df)}\n")
+                    f.write(f"总样本数: {len(all_predictions)}\n")
+                    f.write(f"总体平均值: {total_mean:.6f}\n")
+                    f.write(f"总体标准差: {total_std:.6f}\n")
+                    f.write(f"总体最小值: {total_min:.6f}\n")
+                    f.write(f"总体最大值: {total_max:.6f}\n")
+                
+                # 生成总体预测分布图
+                plt.figure(figsize=(10, 6))
+                plt.hist(all_predictions, bins=30, alpha=0.7)
+                plt.axvline(x=total_mean, color='r', linestyle='--', label=f'平均值 = {total_mean:.4f}')
+                plt.axvline(x=total_mean + total_std, color='g', linestyle='--', label=f'+1σ = {total_mean + total_std:.4f}')
+                plt.axvline(x=total_mean - total_std, color='g', linestyle='--', label=f'-1σ = {total_mean - total_std:.4f}')
+                plt.xlabel(f'{element} 预测值')
+                plt.ylabel('频率')
+                plt.title(f'总体 {element} 预测分布')
+                plt.legend()
+                plt.grid(True)
+                plt.tight_layout()
+                total_dist_path = os.path.join(batch_results_dir, 'total_distribution.png')
+                plt.savefig(total_dist_path)
+                plt.close()
+                
+                logger.info(f"已生成预测总结报告: {summary_path}")
+                logger.info(f"{element} 预测完成: 均值={total_mean:.4f}, 标准差={total_std:.4f}")
+            else:
+                logger.error(f"{element} 预测失败，没有生成有效的预测结果")
             
             # 更新进度
             progress.update(1)

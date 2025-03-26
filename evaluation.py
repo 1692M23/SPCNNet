@@ -22,6 +22,8 @@ from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
 from astropy.io import fits
 from scipy.stats import spearmanr, pearsonr
+import time
+import nn
 
 # 导入自定义模块
 import config
@@ -1038,7 +1040,7 @@ def evaluate_element_by_stellar_type(model, test_data, element, logg_threshold=4
     
     # 打印评估结果
     logger.info(f"{element}元素丰度预测评估结果:")
-    logger.info(f"  整体MAE: {metrics['mae']:.4f}, RMSE: {metrics['rmse']:.4f}")
+    logger.info(f"  整体MAE: {metrics['mae']:.6f}, RMSE: {metrics['rmse']:.6f}")
     logger.info(f"  偏差: {metrics['bias']:.4f}, 散度: {metrics['scatter']:.4f}")
     
     if has_logg and 'dwarfs' in metrics:
@@ -1054,6 +1056,513 @@ def evaluate_element_by_stellar_type(model, test_data, element, logg_threshold=4
                    f"散度: {metrics['giants']['scatter']:.4f}")
     
     return metrics
+
+def visualize_hyperopt_results(element, plot_dir=None):
+    """
+    可视化超参数优化过程和结果
+    
+    参数:
+        element (str): 元素名称
+        plot_dir (str): 图表保存目录
+    """
+    import os
+    import pickle
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from hyperopt import space_eval
+    
+    if plot_dir is None:
+        plot_dir = os.path.join(config.output_config['plots_dir'], 'hyperopt')
+    
+    os.makedirs(plot_dir, exist_ok=True)
+    
+    # 加载优化结果 - 先尝试加载批量优化结果
+    results_dir = os.path.join(config.output_config['results_dir'], 'hyperopt')
+    if not os.path.exists(results_dir):
+        logger.warning(f"找不到超参数优化结果目录: {results_dir}")
+        return
+    
+    # 尝试加载批量超参数优化的结果
+    batch_results_path = os.path.join(results_dir, f'{element}_best_params.pkl')
+    
+    # 检查是否有批量优化的结果
+    if os.path.exists(batch_results_path):
+        try:
+            with open(batch_results_path, 'rb') as f:
+                batch_data = pickle.load(f)
+            
+            # 获取两组最佳参数
+            best_params_set1 = batch_data.get('best_params_set1', {})
+            best_params_set2 = batch_data.get('best_params_set2', {})
+            best_loss_set1 = batch_data.get('best_loss_set1', 0)
+            best_loss_set2 = batch_data.get('best_loss_set2', 0)
+            
+            # 生成比较图表
+            plt.figure(figsize=(12, 8))
+            
+            # 按参数类型分组
+            param_groups = {
+                '学习率': ['lr'],
+                '正则化': ['weight_decay'],
+                '网络结构': ['dropout_rate'],
+                '批次大小': ['batch_size']
+            }
+            
+            # 创建子图，用于显示两组参数的对比
+            fig, axes = plt.subplots(len(param_groups), 1, figsize=(10, 14))
+            plt.subplots_adjust(hspace=0.4)
+            
+            # 循环绘制每组参数
+            for i, (group_name, param_names) in enumerate(param_groups.items()):
+                ax = axes[i]
+                ax.set_title(f'{group_name}参数对比', fontsize=14)
+                
+                # 收集参数值
+                param_values_set1 = []
+                param_values_set2 = []
+                param_labels = []
+                
+                for param_name in param_names:
+                    if param_name in best_params_set1 and param_name in best_params_set2:
+                        param_values_set1.append(best_params_set1[param_name])
+                        param_values_set2.append(best_params_set2[param_name])
+                        param_labels.append(param_name)
+                
+                # 设置x位置
+                x = np.arange(len(param_labels))
+                width = 0.35
+                
+                # 绘制条形图
+                ax.bar(x - width/2, param_values_set1, width, label='参数组1')
+                ax.bar(x + width/2, param_values_set2, width, label='参数组2')
+                
+                # 设置标签
+                ax.set_xticks(x)
+                ax.set_xticklabels(param_labels)
+                ax.legend()
+                
+                # 添加数值标签
+                for j, v in enumerate(param_values_set1):
+                    ax.text(j - width/2, v * 1.05, f'{v:.6f}' if v < 0.01 else f'{v:.4f}', 
+                           ha='center', va='bottom', rotation=45 if v < 0.01 else 0)
+                
+                for j, v in enumerate(param_values_set2):
+                    ax.text(j + width/2, v * 1.05, f'{v:.6f}' if v < 0.01 else f'{v:.4f}', 
+                           ha='center', va='bottom', rotation=45 if v < 0.01 else 0)
+            
+            plt.tight_layout()
+            plt.savefig(os.path.join(plot_dir, f'{element}_params_comparison.png'), dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            # 将参数和效果写入文本文件
+            with open(os.path.join(plot_dir, f'{element}_hyperopt_summary.txt'), 'w') as f:
+                f.write(f"===== {element} 超参数优化结果汇总 =====\n\n")
+                
+                f.write("第一组最佳参数:\n")
+                for param, value in best_params_set1.items():
+                    f.write(f"  {param}: {value}\n")
+                f.write(f"验证损失: {best_loss_set1}\n\n")
+                
+                f.write("第二组最佳参数:\n")
+                for param, value in best_params_set2.items():
+                    f.write(f"  {param}: {value}\n")
+                f.write(f"验证损失: {best_loss_set2}\n")
+            
+            logger.info(f"已生成 {element} 的批量超参数优化可视化结果")
+            return True
+            
+        except Exception as e:
+            logger.error(f"处理批量超参数优化结果时出错: {str(e)}")
+            # 继续尝试常规的hyperopt结果
+    
+    # 如果没有批量优化结果，尝试加载传统hyperopt结果
+    final_path = os.path.join(results_dir, f'{element}_hyperopt_final.pkl')
+    if not os.path.exists(final_path):
+        logger.warning(f"找不到 {element} 的最终超参数结果: {final_path}")
+        return
+    
+    try:
+        with open(final_path, 'rb') as f:
+            data = pickle.load(f)
+        
+        best_params_stage1 = data.get('best_params_stage1', {})
+        best_params_final = data.get('best_params_final', {})
+        trials_stage1 = data.get('trials_stage1', None)
+        trials_stage2 = data.get('trials_stage2', None)
+        
+        # 绘制损失趋势图
+        plt.figure(figsize=(12, 6))
+        
+        # 第一阶段损失
+        if trials_stage1:
+            losses_stage1 = [t['result']['loss'] for t in trials_stage1.trials if t['result']['loss'] < float('inf')]
+            xs = np.arange(len(losses_stage1))
+            ys = losses_stage1
+            best_ys = np.minimum.accumulate(ys)
+            
+            plt.subplot(1, 2, 1)
+            plt.plot(xs, ys, 'o--', markersize=4, alpha=0.8, label='第一阶段损失')
+            plt.plot(xs, best_ys, '-', label='第一阶段最佳损失')
+            plt.title(f"{element} 第一阶段超参数优化", fontsize=14)
+            plt.xlabel('评估次数', fontsize=12)
+            plt.ylabel('验证损失', fontsize=12)
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+        
+        # 第二阶段损失
+        if trials_stage2:
+            losses_stage2 = [t['result']['loss'] for t in trials_stage2.trials if t['result']['loss'] < float('inf')]
+            xs = np.arange(len(losses_stage2))
+            ys = losses_stage2
+            best_ys = np.minimum.accumulate(ys)
+            
+            plt.subplot(1, 2, 2)
+            plt.plot(xs, ys, 'o--', markersize=4, alpha=0.8, label='第二阶段损失', color='orange')
+            plt.plot(xs, best_ys, '-', label='第二阶段最佳损失', color='red')
+            plt.title(f"{element} 第二阶段超参数优化", fontsize=14)
+            plt.xlabel('评估次数', fontsize=12)
+            plt.ylabel('验证损失', fontsize=12)
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(plot_dir, f'{element}_hyperopt_loss.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # 绘制超参数分布
+        plt.figure(figsize=(15, 10))
+        param_names = ['lr', 'weight_decay', 'batch_size', 'dropout_rate']
+        
+        for i, param in enumerate(param_names):
+            if param in best_params_stage1 and param in best_params_final:
+                plt.subplot(2, 2, i+1)
+                
+                # 准备第一阶段数据
+                if trials_stage1:
+                    param_values = []
+                    losses = []
+                    
+                    for t in trials_stage1.trials:
+                        if 'loss' in t['result'] and t['result']['loss'] < float('inf'):
+                            if param == 'batch_size':
+                                # batch_size是选择项，需要特殊处理
+                                values = [16, 32, 64, 128]
+                                val = values[t['misc']['vals']['batch_size'][0]] if t['misc']['vals']['batch_size'] else None
+                            elif param == 'lr' or param == 'weight_decay':
+                                # 对数参数需要转换回实数
+                                val = np.exp(t['misc']['vals'][param][0]) if t['misc']['vals'][param] else None
+                            else:
+                                val = t['misc']['vals'][param][0] if t['misc']['vals'][param] else None
+                                
+                            if val is not None:
+                                param_values.append(val)
+                                losses.append(t['result']['loss'])
+                    
+                    if param_values:
+                        sc = plt.scatter(param_values, losses, alpha=0.6, label='第一阶段')
+                        plt.axvline(x=best_params_stage1[param], color='blue', linestyle='--', 
+                                  label=f'第一阶段最佳: {best_params_stage1[param]:.6f}' if param != 'batch_size' else f'第一阶段最佳: {best_params_stage1[param]}')
+                
+                # 准备第二阶段数据
+                if trials_stage2:
+                    param_values = []
+                    losses = []
+                    
+                    for t in trials_stage2.trials:
+                        if 'loss' in t['result'] and t['result']['loss'] < float('inf'):
+                            if param == 'batch_size':
+                                # 第二阶段batch_size通常是固定的
+                                val = best_params_stage1['batch_size']  
+                            elif param == 'lr' or param == 'weight_decay':
+                                # 对数参数需要转换回实数
+                                val = np.exp(t['misc']['vals'][param][0]) if t['misc']['vals'][param] else None
+                            else:
+                                val = t['misc']['vals'][param][0] if t['misc']['vals'][param] else None
+                                
+                            if val is not None:
+                                param_values.append(val)
+                                losses.append(t['result']['loss'])
+                    
+                    if param_values:
+                        sc = plt.scatter(param_values, losses, alpha=0.6, color='orange', label='第二阶段')
+                        plt.axvline(x=best_params_final[param], color='red', linestyle='--', 
+                                  label=f'最终最佳: {best_params_final[param]:.6f}' if param != 'batch_size' else f'最终最佳: {best_params_final[param]}')
+                
+                # 图表标题和标签
+                plt.title(f"{element} - {param} 分布", fontsize=14)
+                plt.xlabel(param, fontsize=12)
+                plt.ylabel('验证损失', fontsize=12)
+                plt.grid(True, alpha=0.3)
+                
+                # 对数尺度(对lr和weight_decay)
+                if param == 'lr' or param == 'weight_decay':
+                    plt.xscale('log')
+                
+                plt.legend()
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(plot_dir, f'{element}_hyperopt_params.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # 将参数和效果写入文本文件
+        with open(os.path.join(plot_dir, f'{element}_hyperopt_summary.txt'), 'w') as f:
+            f.write(f"===== {element} 超参数优化结果汇总 =====\n\n")
+            
+            f.write("第一阶段最佳参数:\n")
+            for param, value in best_params_stage1.items():
+                f.write(f"  {param}: {value}\n")
+            
+            f.write("\n最终最佳参数:\n")
+            for param, value in best_params_final.items():
+                f.write(f"  {param}: {value}\n")
+            
+            # 如果第一阶段有最佳试验
+            if trials_stage1 and trials_stage1.best_trial:
+                best_loss_stage1 = trials_stage1.best_trial['result']['loss']
+                f.write(f"\n第一阶段最佳验证损失: {best_loss_stage1:.6f}\n")
+            
+            # 如果第二阶段有最佳试验
+            if trials_stage2 and trials_stage2.best_trial:
+                best_loss_stage2 = trials_stage2.best_trial['result']['loss']
+                f.write(f"\n最终最佳验证损失: {best_loss_stage2:.6f}\n")
+        
+        logger.info(f"已生成 {element} 的超参数优化可视化结果")
+        return True
+        
+    except Exception as e:
+        logger.error(f"生成 {element} 超参数优化可视化时出错: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def evaluate_model(model, test_loader, device=None):
+    """
+    在测试集上评估模型，并为每个批次生成单独的评估结果
+    Args:
+        model: 训练好的模型
+        test_loader: 测试数据加载器
+        device: 计算设备
+    Returns:
+        评估结果字典
+    """
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+    model.eval()
+    test_loss = 0
+    predictions = []
+    targets = []
+    
+    criterion = nn.MSELoss()
+    
+    # 创建批次结果目录
+    batch_results_dir = os.path.join('results', 'evaluation', f'evaluation_{model.element}_batch_results')
+    os.makedirs(batch_results_dir, exist_ok=True)
+    
+    # 创建批次追踪文件
+    batch_tracking_path = os.path.join(batch_results_dir, 'batch_tracking.csv')
+    if os.path.exists(batch_tracking_path):
+        batch_df = pd.read_csv(batch_tracking_path)
+    else:
+        batch_df = pd.DataFrame(columns=['batch_id', 'mse', 'rmse', 'mae', 'r2', 'scatter', 'timestamp'])
+    
+    # 分批次评估
+    with torch.no_grad():
+        for batch_idx, (spectra, abundances) in enumerate(test_loader):
+            try:
+                spectra = spectra.to(device)
+                abundances = abundances.to(device)
+                
+                outputs = model(spectra)
+                loss = criterion(outputs.squeeze(), abundances)
+                
+                test_loss += loss.item()
+                batch_predictions = outputs.squeeze().cpu().numpy()
+                batch_targets = abundances.cpu().numpy()
+                
+                predictions.extend(batch_predictions)
+                targets.extend(batch_targets)
+                
+                # 为当前批次生成评估结果
+                batch_mse = np.mean((batch_predictions - batch_targets) ** 2)
+                batch_rmse = np.sqrt(batch_mse)
+                batch_mae = np.mean(np.abs(batch_predictions - batch_targets))
+                if np.var(batch_targets) == 0:  # 防止除零错误
+                    batch_r2 = 0
+                else:
+                    batch_r2 = 1 - (np.sum((batch_targets - batch_predictions) ** 2) / np.sum((batch_targets - np.mean(batch_targets)) ** 2))
+                batch_scatter = np.std(batch_predictions - batch_targets)
+                
+                # 保存批次评估指标
+                metrics_path = os.path.join(batch_results_dir, f'batch_{batch_idx+1}_metrics.txt')
+                with open(metrics_path, 'w') as f:
+                    f.write(f"批次 {batch_idx+1} 在 {model.element} 上的评估结果\n")
+                    f.write("=" * 50 + "\n")
+                    f.write(f"样本数: {len(batch_targets)}\n")
+                    f.write(f"MSE: {batch_mse:.6f}\n")
+                    f.write(f"RMSE: {batch_rmse:.6f}\n")
+                    f.write(f"MAE: {batch_mae:.6f}\n")
+                    f.write(f"R²: {batch_r2:.6f}\n")
+                    f.write(f"散度: {batch_scatter:.6f}\n")
+                
+                # 生成批次散点图
+                plt.figure(figsize=(10, 6))
+                plt.scatter(batch_targets, batch_predictions, alpha=0.5)
+                plt.plot([min(batch_targets), max(batch_targets)], [min(batch_targets), max(batch_targets)], 'r--')
+                plt.xlabel('真实值')
+                plt.ylabel('预测值')
+                plt.title(f'批次 {batch_idx+1} 预测 vs 真实值 (RMSE: {batch_rmse:.4f})')
+                plt.grid(True)
+                plt.tight_layout()
+                scatter_path = os.path.join(batch_results_dir, f'batch_{batch_idx+1}_scatter.png')
+                plt.savefig(scatter_path)
+                plt.close()
+                
+                # 生成误差分布图
+                plt.figure(figsize=(10, 6))
+                errors = batch_predictions - batch_targets
+                plt.hist(errors, bins=30, alpha=0.7)
+                plt.axvline(x=0, color='r', linestyle='--')
+                plt.xlabel('预测误差')
+                plt.ylabel('频率')
+                plt.title(f'批次 {batch_idx+1} 预测误差分布 (MAE: {batch_mae:.4f})')
+                plt.grid(True)
+                plt.tight_layout()
+                hist_path = os.path.join(batch_results_dir, f'batch_{batch_idx+1}_error_hist.png')
+                plt.savefig(hist_path)
+                plt.close()
+                
+                # 更新批次追踪文件
+                new_row = pd.DataFrame({
+                    'batch_id': [batch_idx+1],
+                    'mse': [batch_mse],
+                    'rmse': [batch_rmse],
+                    'mae': [batch_mae],
+                    'r2': [batch_r2],
+                    'scatter': [batch_scatter],
+                    'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
+                })
+                
+                batch_df = pd.concat([batch_df, new_row], ignore_index=True)
+                batch_df.to_csv(batch_tracking_path, index=False)
+                
+                # 生成批次进度趋势图
+                if len(batch_df) > 1:
+                    plt.figure(figsize=(12, 8))
+                    
+                    plt.subplot(2, 2, 1)
+                    plt.plot(batch_df['batch_id'], batch_df['rmse'], 'o-')
+                    plt.xlabel('批次ID')
+                    plt.ylabel('RMSE')
+                    plt.title('RMSE趋势')
+                    plt.grid(True)
+                    
+                    plt.subplot(2, 2, 2)
+                    plt.plot(batch_df['batch_id'], batch_df['mae'], 'o-')
+                    plt.xlabel('批次ID')
+                    plt.ylabel('MAE')
+                    plt.title('MAE趋势')
+                    plt.grid(True)
+                    
+                    plt.subplot(2, 2, 3)
+                    plt.plot(batch_df['batch_id'], batch_df['r2'], 'o-')
+                    plt.xlabel('批次ID')
+                    plt.ylabel('R²')
+                    plt.title('R²趋势')
+                    plt.grid(True)
+                    
+                    plt.subplot(2, 2, 4)
+                    plt.plot(batch_df['batch_id'], batch_df['scatter'], 'o-')
+                    plt.xlabel('批次ID')
+                    plt.ylabel('散度')
+                    plt.title('散度趋势')
+                    plt.grid(True)
+                    
+                    plt.tight_layout()
+                    trend_path = os.path.join(batch_results_dir, 'batch_trends.png')
+                    plt.savefig(trend_path)
+                    plt.close()
+                
+                logger.info(f"成功生成批次 {batch_idx+1} 的评估结果和可视化")
+                
+            except Exception as e:
+                logger.error(f"评估批次 {batch_idx+1} 时出错: {str(e)}")
+    
+    # 完成后生成总结报告
+    if len(predictions) > 0 and len(targets) > 0:
+        predictions = np.array(predictions)
+        targets = np.array(targets)
+        
+        # 计算评估指标
+        mae = np.mean(np.abs(predictions - targets))
+        mse = np.mean((predictions - targets) ** 2)
+        rmse = np.sqrt(mse)
+        r2 = 1 - (np.sum((targets - predictions) ** 2) / np.sum((targets - np.mean(targets)) ** 2))
+        std_diff = np.std(predictions - targets)
+        
+        # 保存最终评估报告
+        summary_path = os.path.join(batch_results_dir, 'evaluation_summary.txt')
+        with open(summary_path, 'w') as f:
+            f.write(f"{model.element} 元素评估总结\n")
+            f.write("=" * 50 + "\n")
+            f.write(f"总批次数: {len(batch_df)}\n")
+            f.write(f"总样本数: {len(targets)}\n")
+            f.write(f"平均 MSE: {mse:.6f}\n")
+            f.write(f"平均 RMSE: {rmse:.6f}\n")
+            f.write(f"平均 MAE: {mae:.6f}\n")
+            f.write(f"总体 R²: {r2:.6f}\n")
+            f.write(f"总体散度: {std_diff:.6f}\n")
+            
+            # 找出最佳批次
+            if len(batch_df) > 0:
+                best_batch_id = batch_df.loc[batch_df['rmse'].idxmin(), 'batch_id']
+                best_rmse = batch_df['rmse'].min()
+                f.write(f"\n最佳批次: {best_batch_id} (RMSE: {best_rmse:.6f})\n")
+        
+        # 生成总体散点图
+        plt.figure(figsize=(10, 6))
+        plt.scatter(targets, predictions, alpha=0.5)
+        plt.plot([min(targets), max(targets)], [min(targets), max(targets)], 'r--')
+        plt.xlabel('真实值')
+        plt.ylabel('预测值')
+        plt.title(f'总体预测 vs 真实值 (RMSE: {rmse:.4f})')
+        plt.grid(True)
+        plt.tight_layout()
+        total_scatter_path = os.path.join(batch_results_dir, 'total_scatter.png')
+        plt.savefig(total_scatter_path)
+        plt.close()
+        
+        # 生成总体误差分布图
+        plt.figure(figsize=(10, 6))
+        errors = predictions - targets
+        plt.hist(errors, bins=30, alpha=0.7)
+        plt.axvline(x=0, color='r', linestyle='--')
+        plt.xlabel('预测误差')
+        plt.ylabel('频率')
+        plt.title(f'总体预测误差分布 (MAE: {mae:.4f})')
+        plt.grid(True)
+        plt.tight_layout()
+        total_hist_path = os.path.join(batch_results_dir, 'total_error_hist.png')
+        plt.savefig(total_hist_path)
+        plt.close()
+        
+        logger.info(f"已生成评估总结报告: {summary_path}")
+        
+        return {
+            'test_loss': test_loss / len(test_loader),
+            'mae': mae,
+            'mse': mse,
+            'rmse': rmse,
+            'r2': r2,
+            'dex': std_diff,
+            'predictions': predictions,
+            'targets': targets,
+            'summary_path': summary_path,
+            'batch_results_dir': batch_results_dir
+        }
+    else:
+        logger.error("评估过程中没有收集到有效的预测结果")
+        return None
 
 def main():
     """主函数"""
@@ -1088,7 +1597,7 @@ def main():
             save_plots=not args.no_plots
         )
         logger.info("星表评估完成")
-        else:
+    else:
         # 执行测试集评估
         logger.info("执行测试集评估")
         results = evaluate_all_elements(

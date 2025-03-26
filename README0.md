@@ -12,6 +12,8 @@
 ├── main.py             # 训练和测试主程序
 ├── evaluation.py       # 模型评估和可视化工具
 ├── predict.py          # 预测功能
+├── batch_hyperopt.py   # 批量超参数优化
+├── baseline_models.py  # 基线模型比较
 ├── data_validator.py   # 数据验证工具
 ├── fits/               # 原始光谱FITS文件
 ├── processed_data/     # 处理后的数据
@@ -19,6 +21,7 @@
 │   │   ├── preprocessing/  # 预处理缓存
 │   │   ├── train/     # 训练缓存
 │   │   ├── evaluation/ # 评估缓存
+│   │   ├── hyperopt/  # 超参数优化缓存
 │   │   └── predict/   # 预测缓存
 │   ├── progress/      # 进度保存目录
 │   ├── validation/    # 数据验证结果
@@ -35,7 +38,8 @@
 │   └── validation/   # 验证日志
 ├── results/           # 结果目录
 │   ├── predictions/  # 预测结果
-│   └── evaluation/   # 评估结果
+│   ├── evaluation/   # 评估结果
+│   └── hyperopt/     # 超参数优化结果
 ├── plots/             # 图表目录
 │   ├── preprocessing/ # 预处理过程图表（光谱处理过程可视化、数据分布统计等）
 │   ├── training/     # 训练过程图表（损失曲线、学习率变化、指标趋势等）
@@ -180,13 +184,31 @@ python main.py --mode train \
                --learning_rate 0.001 \
                --epochs 200 \
                --early_stopping 20
+               
+# 使用批量超参数优化
+python main.py --mode tune \
+               --data_path processed_data/reference_dataset.npz \
+               --elements C_FE \
+               --batch_size_hyperopt 1000 \
+               --batches_per_round 2
+               
+# 查看分批处理结果
+python main.py --mode show_results \
+               --elements C_FE \
+               --result_type training
 ```
 
 超参数调优过程：
-1. 使用网格搜索或贝叶斯优化方法
-2. 对每组参数在验证集上评估性能
-3. 选择最佳参数组合
-4. 使用最佳参数重新训练模型
+1. **批量超参数优化**：使用`batch_hyperopt.py`进行批量数据处理
+   - 可设置批量大小（`--batch_size_hyperopt`）和每轮批次数（`--batches_per_round`）
+   - 支持中断和继续，自动保存中间结果
+   - 生成两组最佳参数，用于比较和选择
+
+2. **传统超参数优化**：
+   - 使用网格搜索或贝叶斯优化方法
+   - 对每组参数在验证集上评估性能
+   - 选择最佳参数组合
+   - 使用最佳参数重新训练模型
 
 训练过程中的监控指标：
 - 训练损失
@@ -195,7 +217,39 @@ python main.py --mode train \
 - 学习率变化
 - GPU内存使用情况
 
-所有训练日志将保存在`logs/train`目录下，训练过程的图表将保存在`plots/training`目录下。
+#### 实时批次处理结果
+
+现在，系统在以下过程中生成实时批次处理结果：
+
+1. **训练过程**：
+   - 每个Epoch后生成评估指标和散点图
+   - 实时更新训练趋势图
+   - 保存批次结果到`results/training_{element}_batch_results`目录
+
+2. **评估过程**：
+   - 每个批次后生成评估指标和可视化
+   - 自动生成误差分布图和散点图
+   - 保存批次结果到`results/evaluation_{element}_batch_results`目录
+
+3. **预测过程**：
+   - 每个批次后生成分布图和统计信息
+   - 实时更新预测趋势
+   - 保存批次结果到`results/prediction_{element}_batch_results`目录
+
+使用`--mode show_results`命令查看任何处理阶段的批次结果：
+
+```bash
+# 查看训练批次结果
+python main.py --mode show_results --elements C_FE --result_type training
+
+# 查看评估批次结果
+python main.py --mode show_results --elements C_FE --result_type evaluation
+
+# 查看预测批次结果
+python main.py --mode show_results --elements C_FE --result_type prediction
+```
+
+所有训练日志将保存在`logs/train`目录下，训练过程的图表将保存在相应的批次结果目录中。
 
 ### 3. 模型评估与可视化
 
@@ -230,7 +284,7 @@ python evaluation.py --data_path processed_data/galah_dataset.npz --external_val
 4. HR图：在HR图上展示预测结果
 5. 元素相关性图：不同元素丰度之间的相关性
 
-所有评估结果将保存在`results/evaluation`目录下，图表将保存在`plots/evaluation`目录下。
+所有评估结果将保存在`results/evaluation`目录下，图表将保存在`plots/evaluation`目录下。分批处理的结果将保存在`results/evaluation_{element}_batch_results`目录下。
 
 ### 4. 预测新数据
 
@@ -246,14 +300,63 @@ python predict.py --data_path processed_data/prediction_dataset.npz --plot
 # 指定特定元素进行预测（默认预测所有配置的元素）
 python predict.py --data_path processed_data/prediction_dataset.npz --elements C_FE MG_FE
 
-# 其他可选参数
+# 指定批次大小进行预测
 python predict.py --data_path processed_data/prediction_dataset.npz \
-                 --batch_size 64 \
-                 --device cuda \
-                 --clear_cache
+                 --batch_size 64
 ```
 
-预测结果将自动保存在`results/predictions`目录下，图表将保存在`plots/predictions`目录下。
+预测结果将保存在`results/predictions`目录下，分批处理的结果将保存在`results/prediction_{element}_batch_results`目录下。
+
+### 5. 基线模型比较
+
+使用`baseline_models.py`进行基线模型比较：
+
+```bash
+# 使用XGBoost模型进行基线比较
+python baseline_models.py --element C_FE --model xgboost
+
+# 使用LightGBM模型进行基线比较
+python baseline_models.py --element C_FE --model lightgbm
+
+# 对比两种模型性能
+python baseline_models.py --element C_FE --model both
+
+# 使用批处理提高性能
+python baseline_models.py --element C_FE --model both \
+                         --batch_size 1000 --batches_per_round 2
+
+# 查看分批处理结果
+python baseline_models.py --element C_FE --model both --show_batch_results
+```
+
+基线模型比较结果将保存在`results/baseline`目录下，分批处理的结果将保存在`results/baseline_{element}_{model}_batch_results`目录下。
+
+## 系统特点
+
+1. **分批处理和实时结果生成**：
+   - 所有处理阶段（训练、评估、预测）均支持分批处理
+   - 每个批次处理后立即生成可视化和评估结果
+   - 自动保存中间结果，支持随时中断和继续处理
+
+2. **批量超参数优化**：
+   - 支持大规模数据的超参数优化
+   - 自动缓存和恢复中间状态
+   - 生成两组最佳参数供比较选择
+
+3. **多种可视化和评估工具**：
+   - 训练过程趋势图、散点图
+   - 评估性能指标和误差分布图
+   - 预测结果分布和统计信息
+
+4. **模型比较和集成**：
+   - 基线模型和深度学习模型比较
+   - 模型集成提高预测性能
+   - 批次性能比较和选择
+
+5. **高效的缓存和进度管理**：
+   - 智能缓存机制减少重复计算
+   - 进度跟踪和可视化
+   - 支持低内存环境的处理策略
 
 ## 注意事项
 

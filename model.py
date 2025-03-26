@@ -5,6 +5,9 @@ import os
 import numpy as np
 import logging
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
+import time
+import pandas as pd
 
 # 配置logger
 logger = logging.getLogger(__name__)
@@ -415,6 +418,10 @@ def train_model(model, train_loader, val_loader, element, config):
     # 创建模型目录
     os.makedirs(config.model_config['model_dir'], exist_ok=True)
     
+    # 创建批次结果目录
+    batch_results_dir = os.path.join(config.output_config['results_dir'], f'training_{element}_batch_results')
+    os.makedirs(batch_results_dir, exist_ok=True)
+    
     # 初始化变量
     best_val_loss = float('inf')
     patience_counter = 0
@@ -423,6 +430,10 @@ def train_model(model, train_loader, val_loader, element, config):
     nan_counter = 0
     max_nan_attempts = 3
     max_patience = config.training_config['early_stopping_patience']
+    
+    # 创建批次追踪文件
+    batch_tracking_path = os.path.join(batch_results_dir, 'batch_tracking.csv')
+    batch_df = pd.DataFrame(columns=['epoch', 'train_loss', 'val_loss', 'lr', 'timestamp'])
     
     # 训练循环
     for epoch in range(config.training_config['epochs']):
@@ -487,6 +498,10 @@ def train_model(model, train_loader, val_loader, element, config):
         val_loss = 0
         valid_val_batches = 0
         
+        # 收集验证集上的预测结果和真实值
+        all_outputs = []
+        all_targets = []
+        
         with torch.no_grad():
             for data, target in val_loader:
                 data, target = data.to(device), target.to(device)
@@ -498,6 +513,10 @@ def train_model(model, train_loader, val_loader, element, config):
                 try:
                     output = model(data)
                     loss = F.mse_loss(output, target)
+                    
+                    # 收集预测结果和真实值
+                    all_outputs.append(output.cpu().numpy())
+                    all_targets.append(target.cpu().numpy())
                     
                     # 检查损失值是否为nan
                     if torch.isnan(loss):
@@ -520,7 +539,124 @@ def train_model(model, train_loader, val_loader, element, config):
         val_losses.append(avg_val_loss)
         
         # 更新学习率
+        current_lr = optimizer.param_groups[0]['lr']
         scheduler.step()
+        
+        # 生成当前epoch的评估结果和可视化
+        if len(all_outputs) > 0 and len(all_targets) > 0:
+            try:
+                # 合并所有批次的结果
+                all_outputs = np.concatenate(all_outputs)
+                all_targets = np.concatenate(all_targets)
+                
+                # 计算评估指标
+                mse = np.mean((all_outputs - all_targets) ** 2)
+                rmse = np.sqrt(mse)
+                mae = np.mean(np.abs(all_outputs - all_targets))
+                r2 = 1 - (np.sum((all_targets - all_outputs) ** 2) / np.sum((all_targets - np.mean(all_targets)) ** 2))
+                scatter = np.std(all_outputs - all_targets)
+                
+                # 保存评估指标
+                metrics_path = os.path.join(batch_results_dir, f'epoch_{epoch+1}_metrics.txt')
+                with open(metrics_path, 'w') as f:
+                    f.write(f"Epoch {epoch+1} 在 {element} 上的评估结果\n")
+                    f.write("=" * 50 + "\n")
+                    f.write(f"训练损失: {avg_train_loss:.6f}\n")
+                    f.write(f"验证损失: {avg_val_loss:.6f}\n")
+                    f.write(f"MSE: {mse:.6f}\n")
+                    f.write(f"RMSE: {rmse:.6f}\n")
+                    f.write(f"MAE: {mae:.6f}\n")
+                    f.write(f"R²: {r2:.6f}\n")
+                    f.write(f"散度: {scatter:.6f}\n")
+                    f.write(f"学习率: {current_lr:.8f}\n")
+                
+                # 生成散点图
+                plt.figure(figsize=(10, 6))
+                plt.scatter(all_targets, all_outputs, alpha=0.5)
+                plt.plot([min(all_targets), max(all_targets)], [min(all_targets), max(all_targets)], 'r--')
+                plt.xlabel('真实值')
+                plt.ylabel('预测值')
+                plt.title(f'Epoch {epoch+1} 预测 vs 真实值 (RMSE: {rmse:.4f})')
+                plt.grid(True)
+                plt.tight_layout()
+                scatter_path = os.path.join(batch_results_dir, f'epoch_{epoch+1}_scatter.png')
+                plt.savefig(scatter_path)
+                plt.close()
+                
+                # 更新批次追踪文件
+                new_row = pd.DataFrame({
+                    'epoch': [epoch+1],
+                    'train_loss': [avg_train_loss],
+                    'val_loss': [avg_val_loss],
+                    'lr': [current_lr],
+                    'rmse': [rmse],
+                    'mae': [mae],
+                    'r2': [r2],
+                    'scatter': [scatter],
+                    'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
+                })
+                
+                batch_df = pd.concat([batch_df, new_row], ignore_index=True)
+                batch_df.to_csv(batch_tracking_path, index=False)
+                
+                # 生成训练进度趋势图
+                if len(batch_df) > 1:
+                    plt.figure(figsize=(12, 10))
+                    
+                    plt.subplot(3, 2, 1)
+                    plt.plot(batch_df['epoch'], batch_df['train_loss'], 'b-', label='训练损失')
+                    plt.plot(batch_df['epoch'], batch_df['val_loss'], 'r-', label='验证损失')
+                    plt.xlabel('Epoch')
+                    plt.ylabel('损失')
+                    plt.title('训练/验证损失趋势')
+                    plt.legend()
+                    plt.grid(True)
+                    
+                    plt.subplot(3, 2, 2)
+                    plt.plot(batch_df['epoch'], batch_df['rmse'], 'g-')
+                    plt.xlabel('Epoch')
+                    plt.ylabel('RMSE')
+                    plt.title('RMSE趋势')
+                    plt.grid(True)
+                    
+                    plt.subplot(3, 2, 3)
+                    plt.plot(batch_df['epoch'], batch_df['mae'], 'm-')
+                    plt.xlabel('Epoch')
+                    plt.ylabel('MAE')
+                    plt.title('MAE趋势')
+                    plt.grid(True)
+                    
+                    plt.subplot(3, 2, 4)
+                    plt.plot(batch_df['epoch'], batch_df['r2'], 'c-')
+                    plt.xlabel('Epoch')
+                    plt.ylabel('R²')
+                    plt.title('R²趋势')
+                    plt.grid(True)
+                    
+                    plt.subplot(3, 2, 5)
+                    plt.plot(batch_df['epoch'], batch_df['scatter'], 'y-')
+                    plt.xlabel('Epoch')
+                    plt.ylabel('散度')
+                    plt.title('散度趋势')
+                    plt.grid(True)
+                    
+                    plt.subplot(3, 2, 6)
+                    plt.plot(batch_df['epoch'], batch_df['lr'], 'k-')
+                    plt.xlabel('Epoch')
+                    plt.ylabel('学习率')
+                    plt.title('学习率趋势')
+                    plt.yscale('log')
+                    plt.grid(True)
+                    
+                    plt.tight_layout()
+                    trends_path = os.path.join(batch_results_dir, 'training_trends.png')
+                    plt.savefig(trends_path)
+                    plt.close()
+                
+                logger.info(f"成功生成Epoch {epoch+1}的评估结果和可视化")
+                
+            except Exception as e:
+                logger.error(f"生成Epoch {epoch+1}评估结果时出错: {str(e)}")
         
         # 早停检查
         if avg_val_loss < best_val_loss:
@@ -530,6 +666,14 @@ def train_model(model, train_loader, val_loader, element, config):
             _save_checkpoint(model, optimizer, scheduler, epoch, best_val_loss, element, {
                 'output': {'model_dir': config.model_config['model_dir']}
             })
+            
+            # 标记这是最佳模型
+            best_model_path = os.path.join(batch_results_dir, 'best_model_info.txt')
+            with open(best_model_path, 'w') as f:
+                f.write(f"最佳模型 - Epoch {epoch+1}\n")
+                f.write(f"验证损失: {best_val_loss:.6f}\n")
+                f.write(f"时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                
         else:
             patience_counter += 1
             if patience_counter >= max_patience:
@@ -541,6 +685,36 @@ def train_model(model, train_loader, val_loader, element, config):
             logger.info(f'Epoch [{epoch+1}/{config.training_config["epochs"]}] '
                        f'Train Loss: {avg_train_loss:.6f} '
                        f'Val Loss: {avg_val_loss:.6f}')
+    
+    # 生成训练完成的汇总报告
+    if len(batch_df) > 0:
+        try:
+            # 找出最佳epoch
+            best_epoch = batch_df.loc[batch_df['val_loss'].idxmin(), 'epoch']
+            best_val_loss = batch_df['val_loss'].min()
+            best_rmse = batch_df.loc[batch_df['val_loss'].idxmin(), 'rmse']
+            
+            # 保存最终汇总报告
+            summary_path = os.path.join(batch_results_dir, 'training_summary.txt')
+            with open(summary_path, 'w') as f:
+                f.write(f"{element} 元素训练总结\n")
+                f.write("=" * 50 + "\n")
+                f.write(f"总训练轮次: {len(batch_df)}\n")
+                f.write(f"最佳Epoch: {best_epoch} (验证损失: {best_val_loss:.6f}, RMSE: {best_rmse:.6f})\n")
+                f.write(f"初始学习率: {batch_df['lr'].iloc[0]:.8f}\n")
+                f.write(f"最终学习率: {batch_df['lr'].iloc[-1]:.8f}\n")
+                f.write("\n训练详情:\n")
+                
+                # 添加每10个epoch的详细信息
+                step = 10 if len(batch_df) > 50 else max(1, len(batch_df) // 5)
+                for i in range(0, len(batch_df), step):
+                    epoch_data = batch_df.iloc[i]
+                    f.write(f"Epoch {epoch_data['epoch']}: 训练损失={epoch_data['train_loss']:.6f}, 验证损失={epoch_data['val_loss']:.6f}, RMSE={epoch_data['rmse']:.6f}\n")
+            
+            logger.info(f"已生成训练汇总报告: {summary_path}")
+            
+        except Exception as e:
+            logger.error(f"生成训练汇总报告时出错: {str(e)}")
     
     return train_losses, val_losses
 

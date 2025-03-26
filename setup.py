@@ -73,7 +73,8 @@ def install_requirements():
         'seaborn>=0.11.0',
         'psutil>=5.8.0',
         'tqdm>=4.50.0',
-        'joblib>=1.0.0'
+        'joblib>=1.0.0',
+        'hyperopt>=0.2.5'
     ]
     
     logger.info("检查依赖包...")
