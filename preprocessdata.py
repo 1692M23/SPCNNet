@@ -2025,7 +2025,9 @@ class LAMOSTPreprocessor:
                 if batch_idx % 5 == 0 or batch_idx == total_batches - 1:
                     self.obsid_cache.save_cache()
         
-        logger.info(f"FITS-OBSID映射构建完成，成功映射 {len(self.obsid_cache._cache)} 个文件")
+        # 修改这行代码，使用正确的属性名
+        # logger.info(f"FITS-OBSID映射构建完成，成功映射 {len(self.obsid_cache._cache)} 个文件")
+        logger.info(f"FITS-OBSID映射构建完成，成功映射 {len(self.obsid_cache.mapping)} 个文件")
 
     def process_data(self):
         """执行数据处理"""
