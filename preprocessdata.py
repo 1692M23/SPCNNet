@@ -258,8 +258,13 @@ class LAMOSTPreprocessor:
     def _find_fits_file(self, obsid):
         """根据OBSID查找对应的FITS文件"""
         try:
-            # 将obsid转换为字符串（去掉科学计数法）
-            obsid_str = f"{float(obsid):.0f}"
+            # 确保obsid是数字格式
+            if isinstance(obsid, str):
+                # 如果是科学计数法格式，先转换
+                obsid = float(obsid)
+            
+            # 将obsid转换为整数字符串（去掉科学计数法）
+            obsid_str = f"{obsid:.0f}"
             
             # 首先在主目录查找
             for ext in ['.fits', '.fit', '.fits.gz', '.fit.gz']:
@@ -328,167 +333,75 @@ class LAMOSTPreprocessor:
             return None
     
     def read_fits_file(self, fits_file):
-        """读取FITS文件并返回波长和流量数据"""
-        # 获取正确的文件路径
-        file_path = self._get_file_extension(fits_file)
-        if file_path is None:
-            print(f"无法找到文件: {fits_file}，查找路径: {self.fits_dir}")
-            return None, None, 0
-        
-        print(f"读取文件: {file_path}")
+        """读取FITS文件数据"""
         try:
-            # 使用更多选项打开FITS文件
-            with fits.open(file_path, ignore_missing_end=True, memmap=False) as hdul:
-                # 打印HDU信息以帮助诊断
-                print(f"FITS文件结构: 共{len(hdul)}个HDU")
-                for i, hdu in enumerate(hdul):
-                    print(f"  HDU{i}: 类型={type(hdu).__name__}, 形状={hdu.shape if hasattr(hdu, 'shape') else '无形状'}")
-                
-                # 获取主HDU的头信息
-                header = hdul[0].header
-                
-                # 输出关键头信息帮助诊断
-                print(f"主HDU头信息: NAXIS={header.get('NAXIS')}, NAXIS1={header.get('NAXIS1')}, "
-                      f"BITPIX={header.get('BITPIX')}")
-                
-                # 尝试获取视向速度信息(如果有)
-                v_helio = header.get('V_HELIO', 0)  # 日心视向速度 (km/s)
-                
-                # 优先获取第一个HDU的数据(如果是主要光谱数据)
-                flux = None
-                wavelength = None
-                
-                # 规则1: 如果主HDU是PrimaryHDU且包含数据，直接使用
-                if isinstance(hdul[0], fits.PrimaryHDU) and hdul[0].data is not None:
-                    if len(hdul[0].data.shape) == 1:  # 一维数据
-                        flux = hdul[0].data
-                        # 从头信息创建波长数组
-                        if 'CRVAL1' in header and 'CDELT1' in header and 'NAXIS1' in header:
-                            crval1 = header['CRVAL1']  # 起始波长
-                            cdelt1 = header['CDELT1']  # 波长步长
-                            naxis1 = header['NAXIS1']  # 波长点数
-                            wavelength = np.arange(crval1, crval1 + cdelt1 * naxis1, cdelt1)[:naxis1]
-                        print(f"使用主HDU的一维数据: 点数={len(flux)}")
-                        
-                    elif len(hdul[0].data.shape) == 2:  # 二维数据
-                        # 取第一行或列，取决于哪个更长
-                        if hdul[0].data.shape[0] > hdul[0].data.shape[1]:
-                            flux = hdul[0].data[0]
-                        else:
-                            flux = hdul[0].data[:, 0]
-                        print(f"使用主HDU的二维数据的第一行/列: 点数={len(flux)}")
-                
-                # 规则2: 如果数据在表格HDU中
-                if flux is None and len(hdul) > 1:
-                    for i in range(1, len(hdul)):
-                        if isinstance(hdul[i], fits.BinTableHDU):
-                            table_hdu = hdul[i]
-                            column_names = table_hdu.columns.names
-                            print(f"检查表格HDU{i}, 列名: {column_names}")
-                            
-                            # 查找光谱数据列
-                            flux_col = None
-                            wave_col = None
-                            
-                            # 寻找光谱流量列
-                            for col_name in ['FLUX', 'SPEC', 'DATA', 'INTENSITY', 'COUNTS', 'flux']:
-                                if col_name in column_names:
-                                    flux_col = col_name
-                                    break
-                            
-                            # 寻找波长列
-                            for wave_name in ['WAVE', 'WAVELENGTH', 'LAMBDA', 'wave', 'wavelength']:
-                                if wave_name in column_names:
-                                    wave_col = wave_name
-                                    break
-                            
-                            # 如果找到流量列
-                            if flux_col is not None:
+            with fits.open(fits_file) as hdul:
+                # 首先尝试从第一个HDU读取数据
+                data = None
+                for hdu in hdul[1:]:  # 跳过主HDU（通常是空的）
+                    try:
+                        # 检查是否包含WAVELENGTH和FLUX列
+                        if 'WAVELENGTH' in hdu.columns.names and 'FLUX' in hdu.columns.names:
+                            wavelength = hdu.data['WAVELENGTH']
+                            flux = hdu.data['FLUX']
+                            if len(wavelength) > 0 and len(flux) > 0:
+                                data = {
+                                    'wavelength': wavelength,
+                                    'flux': flux
+                                }
+                                
+                                # 尝试获取红移和视向速度信息
                                 try:
-                                    # 读取流量数据
-                                    flux_data = table_hdu.data[flux_col]
+                                    z = hdu.header.get('Z', 0)
+                                    v_helio = hdu.header.get('V_HELIO', 0)
+                                    data.update({
+                                        'z': z,
+                                        'v_helio': v_helio
+                                    })
+                                except:
+                                    pass
                                     
-                                    # 如果流量是一个二维数组，取第一行
-                                    if hasattr(flux_data, 'shape') and len(flux_data.shape) > 1:
-                                        flux = flux_data[0].astype(np.float64)
-                                    else:
-                                        # 确保flux是一维数组
-                                        flux = np.array(flux_data, dtype=np.float64).flatten()
-                                    
-                                    print(f"从列 '{flux_col}' 提取流量数据, 点数={len(flux)}")
-                                    
-                                    # 如果找到波长列，读取波长数据
-                                    if wave_col is not None:
-                                        wave_data = table_hdu.data[wave_col]
-                                        if hasattr(wave_data, 'shape') and len(wave_data.shape) > 1:
-                                            wavelength = wave_data[0].astype(np.float64)
-                                        else:
-                                            wavelength = np.array(wave_data, dtype=np.float64).flatten()
-                                        print(f"从列 '{wave_col}' 提取波长数据, 点数={len(wavelength)}")
-                                        
-                                        # 确保波长和流量数组长度匹配
-                                        if len(wavelength) != len(flux):
-                                            min_len = min(len(wavelength), len(flux))
-                                            wavelength = wavelength[:min_len]
-                                            flux = flux[:min_len]
-                                            print(f"调整数组长度为匹配长度: {min_len}")
-                                    
-                                    break  # 找到数据后退出循环
-                                except Exception as e:
-                                    print(f"从表格提取数据出错: {e}")
-                                    flux = None  # 重置，尝试其他HDU
+                                break
+                    except Exception as e:
+                        continue
                 
-                # 如果没有找到波长数据，但有流量数据
-                if wavelength is None and flux is not None:
-                    # 尝试从头信息创建波长数组
-                    if 'CRVAL1' in header and 'CDELT1' in header and 'NAXIS1' in header:
-                        crval1 = header['CRVAL1']  # 起始波长
-                        cdelt1 = header['CDELT1']  # 波长步长
-                        naxis1 = header['NAXIS1']  # 波长点数
-                        
-                        # 确保naxis1与flux长度匹配
-                        if naxis1 != len(flux):
-                            naxis1 = len(flux)
-                            print(f"调整NAXIS1值为与流量数组匹配: {naxis1}")
-                        
-                        wavelength = np.arange(crval1, crval1 + cdelt1 * naxis1, cdelt1)[:naxis1]
-                        print(f"从头信息创建波长数组: 范围={wavelength[0]:.2f}~{wavelength[-1]:.2f}")
-                    else:
-                        # 如果没有头信息，使用默认波长范围
-                        print("头信息中没有波长参数，使用默认波长范围")
-                        naxis1 = len(flux)
-                        # LAMOST DR10光谱的典型波长范围约为3700-9000Å
-                        crval1 = 3700.0  # 起始波长
-                        cdelt1 = (9000.0 - 3700.0) / naxis1  # 波长步长
-                        wavelength = np.arange(crval1, crval1 + cdelt1 * naxis1, cdelt1)[:naxis1]
-                        print(f"创建默认波长数组: 范围={wavelength[0]:.2f}~{wavelength[-1]:.2f}")
+                if data is None:
+                    # 如果没有找到标准格式，尝试其他可能的格式
+                    for hdu in hdul[1:]:
+                        try:
+                            # 检查数据是否为表格形式
+                            if isinstance(hdu.data, fits.fitsrec.FITS_rec):
+                                # 尝试不同的列名组合
+                                wave_candidates = ['WAVELENGTH', 'WAVE', 'LAMBDA', 'WAV']
+                                flux_candidates = ['FLUX', 'INTENSITY', 'FLUX_INTENSITY']
+                                
+                                for wave_col in wave_candidates:
+                                    for flux_col in flux_candidates:
+                                        if wave_col in hdu.columns.names and flux_col in hdu.columns.names:
+                                            wavelength = hdu.data[wave_col]
+                                            flux = hdu.data[flux_col]
+                                            if len(wavelength) > 0 and len(flux) > 0:
+                                                data = {
+                                                    'wavelength': wavelength,
+                                                    'flux': flux,
+                                                    'z': 0,
+                                                    'v_helio': 0
+                                                }
+                                                break
+                                    if data is not None:
+                                        break
+                        except:
+                            continue
                 
-                # 进行最后的数据检查
-                if flux is None:
-                    print("无法从FITS文件提取流量数据")
-                    return None, None, 0
+                if data is None:
+                    logger.error(f"无法从FITS文件中提取波长和流量数据: {fits_file}")
+                    return None
                 
-                if wavelength is None:
-                    print("无法生成波长数据")
-                    return None, None, 0
-                
-                # 确保数据类型是浮点数
-                flux = flux.astype(np.float64)
-                wavelength = wavelength.astype(np.float64)
-                
-                # 检查是否有NaN或无限值
-                if np.isnan(flux).any() or np.isinf(flux).any():
-                    print(f"数据中包含NaN或无限值，尝试替换")
-                    flux = np.nan_to_num(flux)
-                
-                print(f"成功提取光谱数据: 点数={len(wavelength)}, 波长范围={wavelength[0]:.2f}~{wavelength[-1]:.2f}")
-                return wavelength, flux, v_helio
+                return data
                 
         except Exception as e:
-            print(f"读取{file_path}出错: {e}")
-            import traceback
-            traceback.print_exc()
-            return None, None, 0
+            logger.error(f"读取FITS文件时出错 ({fits_file}): {e}")
+            return None
     
     def denoise_spectrum(self, wavelength, flux):
         """对光谱进行去噪处理"""
@@ -1403,14 +1316,18 @@ class LAMOSTPreprocessor:
         try:
             # 读取FITS文件
             data = self.read_fits_file(fits_file)
-            
             if data is None:
                 logger.warning(f"无法读取FITS文件: {fits_file}")
                 return None
             
+            # 提取OBSID
+            obsid = self._extract_obsid_from_file(fits_file)
+            if obsid is None:
+                logger.warning(f"无法从文件名提取OBSID: {fits_file}")
+                return None
+            
             # 确保data是字典类型
             if isinstance(data, tuple):
-                # 如果是元组，转换为字典
                 data_dict = {
                     'wavelength': data[0],
                     'flux': data[1],
