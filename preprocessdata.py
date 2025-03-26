@@ -28,6 +28,7 @@ import psutil
 from data_validator import DataValidator
 import math
 import torch
+import argparse
 
 # 配置日志
 logging.basicConfig(
@@ -119,8 +120,13 @@ class OBSIDCache:
         self.mapping[key] = obsid
         self.changed = True
         
-        # 每添加100个映射自动保存一次
-        if len(self.mapping) % 100 == 0:
+        # 更频繁地保存缓存（每20个映射保存一次）
+        if len(self.mapping) % 20 == 0:
+            self.save_cache()
+            
+    def __del__(self):
+        """在对象销毁时保存缓存"""
+        if self.changed:
             self.save_cache()
 
 class ProgressManager:
@@ -150,7 +156,8 @@ class LAMOSTPreprocessor:
                  batch_size=20,  
                  memory_limit=0.7,  
                  low_memory_mode=False,
-                 process_all_fits=False):  # 添加process_all_fits参数
+                 process_all_fits=False,
+                 use_gpu=None):  # 添加GPU选项参数
         
         # 存储初始化参数
         self.csv_files = csv_files
@@ -172,8 +179,25 @@ class LAMOSTPreprocessor:
         self.wavelengths = {}
         self.common_wavelength_range = None
         self.extension_cache = {}
-        self.processed_ranges = {}  # 添加processed_ranges属性
+        self.processed_ranges = {}
         
+        # GPU设置
+        self.use_gpu = use_gpu
+        if self.use_gpu is None:
+            # 自动检测GPU
+            self.use_gpu = hasattr(torch, 'cuda') and torch.cuda.is_available()
+        
+        if self.use_gpu:
+            if hasattr(torch, 'cuda') and torch.cuda.is_available():
+                logger.info("检测到GPU，将使用CUDA加速")
+                # 初始化GPU内存，预热
+                torch.cuda.empty_cache()
+            else:
+                logger.warning("指定使用GPU但未检测到CUDA，将使用CPU运行")
+                self.use_gpu = False
+        else:
+            logger.info("使用CPU运行")
+            
         # 创建缓存目录
         self.cache_dir = os.path.join(output_dir, 'cache', 'preprocessing')
         os.makedirs(self.cache_dir, exist_ok=True)
@@ -2000,10 +2024,16 @@ class LAMOSTPreprocessor:
             # 2. 处理所有元素数据（使用分批处理）
             processed_data = self.process_all_data_in_batches()
             
-            # 3. 返回处理后的数据
+            # 3. 保存所有缓存
+            self.obsid_cache.save_cache()
+            
+            # 4. 返回处理后的数据
             return processed_data
             
         except Exception as e:
+            # 保存缓存，即使发生错误
+            self.obsid_cache.save_cache()
+            
             print(f"数据处理失败: {str(e)}")
             import traceback
             traceback.print_exc()
@@ -2091,8 +2121,16 @@ class LAMOSTPreprocessor:
                     
                     # 每批次处理后清理内存
                     gc.collect()
-                    if hasattr(torch, 'cuda') and torch.cuda.is_available():
+                    if self.use_gpu and hasattr(torch, 'cuda') and torch.cuda.is_available():
                         torch.cuda.empty_cache()
+                        # 输出GPU内存使用情况
+                        if hasattr(torch.cuda, 'memory_allocated'):
+                            allocated = torch.cuda.memory_allocated() / (1024 ** 2)
+                            reserved = torch.cuda.memory_reserved() / (1024 ** 2)
+                            logger.info(f"GPU内存使用: 已分配 {allocated:.2f}MB, 已保留 {reserved:.2f}MB")
+                    
+                    # 保存OBSID缓存
+                    self.obsid_cache.save_cache()
             
             # 处理CSV数据中的每个元素
             processed_elements = {}
@@ -2207,61 +2245,71 @@ class LAMOSTPreprocessor:
 
 def main():
     """主函数"""
-    import argparse
-    
-    # 创建参数解析器
-    parser = argparse.ArgumentParser(description='预处理LAMOST光谱数据')
-    parser.add_argument('--reference_csv', type=str, help='参考数据集CSV文件，例如X_FE.csv')
-    parser.add_argument('--prediction_csv', type=str, help='预测数据集CSV文件，例如galah_X_FE.csv或LASP_X_FE.csv')
-    parser.add_argument('--fits_dir', type=str, default='fits', help='FITS文件目录')
-    parser.add_argument('--output_dir', type=str, default='processed_data', help='输出目录')
-    parser.add_argument('--batch_size', type=int, default=32, help='批处理大小')
-    parser.add_argument('--n_workers', type=int, default=4, help='工作进程数')
-    parser.add_argument('--no_cache', action='store_true', help='不使用缓存')
-    parser.add_argument('--denoise', action='store_true', help='进行去噪处理')
-    parser.add_argument('--normalize', action='store_true', help='进行归一化处理')
-    parser.add_argument('--clear_cache', action='store_true', help='清除缓存并重新处理')
-    
     # 解析命令行参数
+    parser = argparse.ArgumentParser(description='LAMOST光谱数据预处理工具')
+    
+    # 基本参数
+    parser.add_argument('--csv_files', type=str, nargs='+', default=['X_FE.csv'], 
+                        help='CSV文件列表')
+    parser.add_argument('--fits_dir', type=str, default='fits', 
+                        help='FITS文件目录')
+    parser.add_argument('--output_dir', type=str, default='processed_data', 
+                        help='输出目录')
+    
+    # 预处理参数
+    parser.add_argument('--wavelength_range', type=float, nargs=2, default=None,
+                        help='波长范围[min, max]')
+    parser.add_argument('--n_points', type=int, default=None,
+                        help='重采样点数')
+    parser.add_argument('--batch_size', type=int, default=20,
+                        help='批处理大小')
+    parser.add_argument('--max_workers', type=int, default=None,
+                        help='最大工作线程数')
+    parser.add_argument('--memory_limit', type=float, default=0.7,
+                        help='内存使用上限(0-1)')
+    
+    # 选项参数
+    parser.add_argument('--low_memory_mode', action='store_true',
+                        help='低内存模式')
+    parser.add_argument('--clear_cache', action='store_true',
+                        help='清除缓存')
+    parser.add_argument('--process_all_fits', action='store_true',
+                        help='处理所有FITS文件')
+    parser.add_argument('--use_gpu', action='store_true',
+                        help='使用GPU加速')
+    parser.add_argument('--cpu_only', action='store_true',
+                        help='仅使用CPU')
+    
     args = parser.parse_args()
     
-    # 设置CSV文件列表
-    csv_files = []
-    if args.reference_csv:
-        if not args.reference_csv.endswith('X_FE.csv'):
-            print(f"警告：参考数据集文件名应为X_FE.csv格式，当前为{args.reference_csv}")
-        csv_files.append(args.reference_csv)
+    # 确定GPU使用选项
+    use_gpu = None
+    if args.use_gpu:
+        use_gpu = True
+    elif args.cpu_only:
+        use_gpu = False
     
-    if args.prediction_csv:
-        if not any(args.prediction_csv.startswith(prefix) for prefix in ['galah_', 'LASP_']) or \
-           not args.prediction_csv.endswith('X_FE.csv'):
-            print(f"警告：预测数据集文件名应为galah_X_FE.csv或LASP_X_FE.csv格式，当前为{args.prediction_csv}")
-        csv_files.append(args.prediction_csv)
-    
-    if not csv_files:
-        print("错误：至少需要指定一个CSV文件（--reference_csv 或 --prediction_csv）")
-        return
-    
-    print("处理以下CSV文件：")
-    for csv_file in csv_files:
-        print(f"- {csv_file}")
-    
-    # 创建预处理器
+    # 初始化预处理器
     preprocessor = LAMOSTPreprocessor(
-        csv_files=csv_files,
+        csv_files=args.csv_files,
         fits_dir=args.fits_dir,
         output_dir=args.output_dir,
+        wavelength_range=args.wavelength_range,
+        n_points=args.n_points,
         batch_size=args.batch_size,
-        max_workers=args.n_workers,
-        low_memory_mode=args.no_cache
+        max_workers=args.max_workers,
+        memory_limit=args.memory_limit,
+        low_memory_mode=args.low_memory_mode,
+        process_all_fits=args.process_all_fits,
+        use_gpu=use_gpu
     )
     
-    # 如果指定了clear_cache，先清除缓存
+    # 如果需要清除缓存
     if args.clear_cache:
         preprocessor.clean_cache()
     
     # 执行预处理
-    preprocessor.process_all_data()
+    preprocessor.process_data()
 
 if __name__ == "__main__":
     try:
