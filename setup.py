@@ -61,15 +61,33 @@ def install_requirements():
 def setup_environment():
     """设置环境"""
     try:
-        # 克隆仓库
-        logger.info("克隆仓库...")
+        # 克隆或更新仓库
+        logger.info("检查仓库状态...")
         repo_url = "https://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@github.com/1692M23/SPCNNet.git"
-        try:
-            subprocess.run(['git', 'clone', repo_url], check=True)
-            logger.info("仓库克隆成功")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"克隆仓库失败: {e}")
-            return False
+        
+        if os.path.exists('SPCNNet'):
+            logger.info("仓库已存在，尝试更新...")
+            try:
+                # 切换到仓库目录
+                os.chdir('SPCNNet')
+                # 重置所有更改
+                subprocess.run(['git', 'reset', '--hard'], check=True)
+                # 拉取最新代码
+                subprocess.run(['git', 'pull'], check=True)
+                # 切回上级目录
+                os.chdir('..')
+                logger.info("仓库更新成功")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"更新仓库失败: {e}")
+                return False
+        else:
+            logger.info("克隆新仓库...")
+            try:
+                subprocess.run(['git', 'clone', repo_url], check=True)
+                logger.info("仓库克隆成功")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"克隆仓库失败: {e}")
+                return False
         
         # 创建目录
         create_directories()
