@@ -20,10 +20,11 @@ import pandas as pd
 import config
 from model import SpectralResCNN, SpectralResCNNEnsemble, train_model, evaluate_model, load_trained_model
 from evaluation import evaluate_all_elements, plot_predictions_vs_true, plot_metrics_comparison
-from utils import CacheManager, ProgressManager, ask_clear_cache
+from utils import CacheManager, ProgressManager, ask_clear_cache, setup_analysis_directories
 from multi_element_processor import MultiElementProcessor
 from fits_cache import FITSCache
 from hyperparameter_tuning_replacement import hyperparameter_tuning
+from model_analysis import analyze_model_performance
 
 # 配置日志
 logging.basicConfig(
@@ -120,6 +121,11 @@ def setup_training_directories():
     for directory in config.REQUIRED_DIRS:
         os.makedirs(directory, exist_ok=True)
         logger.info(f"已创建目录: {directory}")
+    
+    # 创建分析目录
+    if hasattr(config, 'analysis_config') and config.analysis_config.get('perform_analysis', False):
+        setup_analysis_directories()
+        logger.info("已创建模型分析目录")
 
 def train_and_evaluate_model(train_loader, val_loader, test_loader, element, config):
     """
@@ -153,6 +159,20 @@ def train_and_evaluate_model(train_loader, val_loader, test_loader, element, con
     
     # 在测试集上评估
     test_metrics = evaluate_model(best_model, test_loader, config.training_config['device'])
+    
+    # 分析模型性能（特征重要性和残差）
+    if hasattr(config, 'analysis_config') and config.analysis_config.get('perform_analysis', False):
+        logger.info(f"开始对{element}模型进行性能分析...")
+        analysis_results = analyze_model_performance(
+            best_model,
+            element,
+            train_loader,
+            val_loader,
+            test_loader,
+            config.training_config['device'],
+            config.model_config['input_size']
+        )
+        logger.info(f"{element}模型性能分析完成, 结果保存在results目录")
     
     return best_model, best_val_loss, test_metrics
 
@@ -455,6 +475,20 @@ def process_element(element, config=None):
     if test_loader:
         test_metrics = evaluate_model(model, test_loader, config['training']['device'])
         logger.info(f"{element} 测试集评估结果: {test_metrics}")
+        
+        # 添加模型性能分析
+        if config.get('analysis', {}).get('perform_analysis', False):
+            logger.info(f"开始对{element}模型进行性能分析...")
+            analysis_results = analyze_model_performance(
+                model,
+                element,
+                train_loader,
+                val_loader,
+                test_loader,
+                config['training']['device'],
+                config['model_config']['input_size']
+            )
+            logger.info(f"{element}模型性能分析完成, 结果保存在results目录")
     
     # 保存到缓存
     cache_key = f"model_{element}"
@@ -737,6 +771,8 @@ def main():
                        help='超参数优化每轮处理的批次数')
     parser.add_argument('--result_type', type=str, choices=['training', 'evaluation', 'prediction'], 
                         default='training', help='要显示的结果类型')
+    parser.add_argument('--perform_analysis', action='store_true',
+                       help='是否执行模型性能分析（特征重要性和残差分析）')
     
     args = parser.parse_args()
     
@@ -751,6 +787,11 @@ def main():
         config.training_config['early_stopping_patience'] = args.early_stopping
     if args.device is not None:
         config.training_config['device'] = args.device
+    
+    if args.perform_analysis:
+        if not hasattr(config, 'analysis_config'):
+            config.analysis_config = {}
+        config.analysis_config['perform_analysis'] = True
     
     # 确定要处理的元素
     elements = args.elements if args.elements else config.training_config['elements']

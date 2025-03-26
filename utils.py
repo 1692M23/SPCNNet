@@ -290,4 +290,15 @@ class ProgressManager:
     def set_description(self, desc):
         """设置描述"""
         if self.pbar:
-            self.pbar.set_description(desc) 
+            self.pbar.set_description(desc)
+
+def setup_analysis_directories():
+    """创建模型分析相关的目录"""
+    analysis_dirs = [
+        'results/feature_importance',
+        'results/residual_analysis',
+    ]
+    
+    for directory in analysis_dirs:
+        os.makedirs(directory, exist_ok=True)
+        logging.info(f"已创建分析目录: {directory}") 

@@ -320,6 +320,21 @@ progress_config = {
     }
 }
 
+# 添加模型分析配置
+analysis_config = {
+    'perform_analysis': True,       # 是否执行模型性能分析
+    'feature_importance': {         # 特征重要性分析配置
+        'n_samples': 10,            # 用于计算特征重要性的样本数量
+        'top_n': 30,                # 显示前N个重要特征
+        'min_importance': 0.2       # 最小显示重要性阈值
+    },
+    'residual_analysis': {          # 残差分析配置
+        'save_predictions': True,   # 是否保存预测结果
+        'plot_qq': True,            # 是否绘制QQ图
+        'plot_hist': True           # 是否绘制直方图
+    }
+}
+
 # 将所有配置合并到一个字典中
 CONFIG = {
     'data_paths': DATA_CONFIG,
@@ -335,7 +350,8 @@ CONFIG = {
     'element_config': element_config,
     'preprocessing_config': preprocessing_config,
     'cache_config': cache_config,
-    'progress_config': progress_config
+    'progress_config': progress_config,
+    'analysis_config': analysis_config
 }
 
 class Config:

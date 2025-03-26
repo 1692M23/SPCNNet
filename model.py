@@ -815,6 +815,21 @@ def load_trained_model(input_size, element, config):
         logger.error(f"加载模型失败: {str(e)}")
         return None
 
+# 在模型训练完成后添加
+def analyze_model_performance(self, element, train_loader, val_loader, test_loader):
+    """对训练好的模型进行全面性能分析"""
+    # 创建结果目录
+    os.makedirs("results/feature_importance", exist_ok=True)
+    os.makedirs("results/residual_analysis", exist_ok=True)
+    
+    logger.info(f"开始分析{element}模型的特征重要性...")
+    self.analyze_feature_importance(self.model, val_loader, self.device, element)
+    
+    logger.info(f"开始分析{element}模型的残差...")
+    self.analyze_residuals(self.model, test_loader, self.device, element)
+    
+    logger.info(f"{element}模型分析完成，结果保存在results目录")
+
 """
 关键超参数调优指南：
 
