@@ -73,6 +73,35 @@ class FITSCache:
         with open(cache_file, 'wb') as f:
             pickle.dump(data, f)
 
+class OBSIDCache:
+    def __init__(self, cache_dir):
+        self.cache_dir = cache_dir
+        self.cache_file = os.path.join(cache_dir, 'obsid_mapping.pkl')
+        self.mapping = self._load_cache()
+
+    def _load_cache(self):
+        if os.path.exists(self.cache_file):
+            try:
+                with open(self.cache_file, 'rb') as f:
+                    return pickle.load(f)
+            except Exception as e:
+                logger.warning(f"加载OBSID缓存失败: {e}")
+                return {}
+        return {}
+
+    def save_cache(self):
+        try:
+            with open(self.cache_file, 'wb') as f:
+                pickle.dump(self.mapping, f)
+        except Exception as e:
+            logger.error(f"保存OBSID缓存失败: {e}")
+
+    def get_obsid(self, fits_file):
+        return self.mapping.get(fits_file)
+
+    def set_obsid(self, fits_file, obsid):
+        self.mapping[fits_file] = obsid
+
 class ProgressManager:
     def __init__(self, total, desc):
         self.total = total
@@ -119,16 +148,19 @@ class LAMOSTPreprocessor:
         self.processed_data = {}
         self.wavelengths = {}
         self.common_wavelength_range = None
-        self.extension_cache = {}  # 添加文件扩展名缓存
+        self.extension_cache = {}
+        
+        # 创建缓存目录
+        self.cache_dir = os.path.join(output_dir, 'cache', 'preprocessing')
+        os.makedirs(self.cache_dir, exist_ok=True)
+        
+        # 初始化缓存
+        self.fits_cache = FITSCache(self.cache_dir)
+        self.obsid_cache = OBSIDCache(self.cache_dir)
         
         # 创建必要的目录
         for directory in [output_dir, os.path.join(output_dir, 'progress')]:
             os.makedirs(directory, exist_ok=True)
-            
-        # 初始化FITS缓存
-        self.fits_cache = FITSCache(
-            os.path.join(output_dir, 'fits_cache')
-        )
             
         # 检查fits目录是否存在
         if not os.path.exists(fits_dir):
@@ -1353,15 +1385,27 @@ class LAMOSTPreprocessor:
             return None
     
     def _extract_obsid_from_file(self, fits_file):
-        """从FITS文件名中提取观测ID"""
+        """从FITS文件名中提取OBSID，使用缓存机制"""
+        # 首先检查缓存
+        cached_obsid = self.obsid_cache.get_obsid(fits_file)
+        if cached_obsid is not None:
+            return cached_obsid
+            
+        # 如果缓存中没有，则提取OBSID
         try:
-            # 假设文件名格式为：path/to/spec-OBSID.fits
-            filename = os.path.basename(fits_file)
-            obsid = filename.split('-')[1].split('.')[0]
+            # 获取文件名（不含路径和扩展名）
+            filename = os.path.splitext(os.path.basename(fits_file))[0]
+            # 提取OBSID（文件名中的数字部分）
+            obsid = float(''.join(filter(str.isdigit, filename)))  # 转换为浮点数
+            
+            # 将结果存入缓存
+            self.obsid_cache.set_obsid(fits_file, obsid)
             return obsid
-        except Exception:
-            return os.path.splitext(os.path.basename(fits_file))[0]
-    
+            
+        except Exception as e:
+            logger.error(f"从文件名提取OBSID失败 ({fits_file}): {e}")
+            return None
+
     def save_element_datasets(self, element, data):
         """为每个元素分割并保存数据集"""
         # 转换为NumPy数组
@@ -1904,8 +1948,21 @@ class LAMOSTPreprocessor:
         print("\n=== 检查完成 ===\n")
         
     def clean_cache(self):
-        """清理缓存文件"""
-        self.fits_cache.clean_cache()
+        """清理所有缓存"""
+        try:
+            # 清理FITS缓存
+            if os.path.exists(self.cache_dir):
+                for file in os.listdir(self.cache_dir):
+                    if file.endswith('.pkl'):
+                        os.remove(os.path.join(self.cache_dir, file))
+            
+            # 重置OBSID缓存
+            self.obsid_cache.mapping = {}
+            self.obsid_cache.save_cache()
+            
+            logger.info("缓存清理完成")
+        except Exception as e:
+            logger.error(f"清理缓存时出错: {e}")
 
     def check_and_fix_file_paths(self):
         """检查并修复文件路径问题"""
@@ -2190,6 +2247,50 @@ class LAMOSTPreprocessor:
         except Exception as e:
             logger.error(f"处理元素 {element} 数据时出错: {e}")
             return processed_data
+
+    def process_spectrum(self, data_dict):
+        """处理光谱数据"""
+        try:
+            # 获取波长和流量数据
+            wavelength = data_dict.get('wavelength')
+            flux = data_dict.get('flux')
+            
+            if wavelength is None or flux is None:
+                logger.error("光谱数据缺失波长或流量信息")
+                return None
+            
+            # 1. 去噪
+            flux = self.denoise_spectrum(wavelength, flux)
+            
+            # 2. 波长校正（红移和视向速度）
+            z = data_dict.get('z', 0)
+            v_helio = data_dict.get('v_helio', 0)
+            wavelength = self.correct_wavelength(wavelength, flux)
+            
+            if z != 0:
+                wavelength, flux = self.correct_redshift(wavelength, flux, z)
+            if v_helio != 0:
+                wavelength, flux = self.correct_velocity(wavelength, flux, v_helio)
+            
+            # 3. 更新共同波长范围
+            if self.compute_common_range:
+                self.update_common_wavelength_range(wavelength)
+            
+            # 4. 重采样
+            wavelength, flux = self.resample_spectrum(wavelength, flux)
+            
+            # 5. 连续谱归一化
+            flux = self.normalize_continuum(wavelength, flux)
+            
+            # 6. 二次去噪和最终归一化
+            flux = self.denoise_spectrum_second(wavelength, flux)
+            flux = self.normalize_spectrum(flux)
+            
+            return flux
+            
+        except Exception as e:
+            logger.error(f"处理光谱时出错: {e}")
+            return None
 
 def main():
     """主函数"""
