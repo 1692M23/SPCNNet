@@ -74,33 +74,54 @@ class FITSCache:
             pickle.dump(data, f)
 
 class OBSIDCache:
+    """OBSID缓存类，用于缓存文件名与OBSID的映射关系"""
     def __init__(self, cache_dir):
+        """初始化OBSID缓存"""
         self.cache_dir = cache_dir
         self.cache_file = os.path.join(cache_dir, 'obsid_mapping.pkl')
         self.mapping = self._load_cache()
-
+        self.changed = False
+        
     def _load_cache(self):
+        """加载缓存数据"""
         if os.path.exists(self.cache_file):
             try:
                 with open(self.cache_file, 'rb') as f:
-                    return pickle.load(f)
+                    mapping = pickle.load(f)
+                    logger.info(f"已加载OBSID缓存，包含 {len(mapping)} 条映射")
+                    return mapping
             except Exception as e:
                 logger.warning(f"加载OBSID缓存失败: {e}")
-                return {}
         return {}
-
+    
     def save_cache(self):
+        """保存缓存数据"""
+        if not self.changed:
+            return
+            
         try:
+            os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
             with open(self.cache_file, 'wb') as f:
                 pickle.dump(self.mapping, f)
+            logger.info(f"已保存OBSID缓存，包含 {len(self.mapping)} 条映射")
+            self.changed = False
         except Exception as e:
             logger.error(f"保存OBSID缓存失败: {e}")
-
+    
     def get_obsid(self, fits_file):
-        return self.mapping.get(fits_file)
-
+        """获取文件对应的OBSID"""
+        key = os.path.basename(fits_file)
+        return self.mapping.get(key)
+    
     def set_obsid(self, fits_file, obsid):
-        self.mapping[fits_file] = obsid
+        """设置文件对应的OBSID"""
+        key = os.path.basename(fits_file)
+        self.mapping[key] = obsid
+        self.changed = True
+        
+        # 每添加100个映射自动保存一次
+        if len(self.mapping) % 100 == 0:
+            self.save_cache()
 
 class ProgressManager:
     def __init__(self, total, desc):
@@ -128,7 +149,8 @@ class LAMOSTPreprocessor:
                  max_workers=None,  
                  batch_size=20,  
                  memory_limit=0.7,  
-                 low_memory_mode=False):
+                 low_memory_mode=False,
+                 process_all_fits=False):  # 添加process_all_fits参数
         
         # 存储初始化参数
         self.csv_files = csv_files
@@ -142,6 +164,7 @@ class LAMOSTPreprocessor:
         self.batch_size = batch_size
         self.memory_limit = memory_limit
         self.low_memory_mode = low_memory_mode
+        self.process_all_fits = process_all_fits
         
         # 初始化其他属性
         self.csv_data = {}
@@ -233,39 +256,63 @@ class LAMOSTPreprocessor:
         return dataframes, element_columns
     
     def _find_fits_file(self, obsid):
-        """通过OBSID查找对应的FITS文件"""
-        # 如果映射尚未构建，先构建映射
-        if not hasattr(self, '_fits_obsid_map') or not self._fits_obsid_map:
-            self._build_fits_obsid_mapping()
-        
-        # 将输入转换为字符串，因为科学计数法可能会导致精度问题
-        obsid_str = str(obsid).strip()
-        
-        # 直接查找映射表
-        if obsid_str in self._fits_obsid_map:
-            return self._fits_obsid_map[obsid_str]
-        
-        # 尝试科学计数法转换
+        """根据OBSID查找对应的FITS文件"""
         try:
-            # 处理可能的科学计数法格式
-            if 'E' in obsid_str or 'e' in obsid_str:
-                # 尝试转换为浮点数再转整数
-                obsid_num = int(float(obsid_str))
-                obsid_str_alt = str(obsid_num)
-                if obsid_str_alt in self._fits_obsid_map:
-                    return self._fits_obsid_map[obsid_str_alt]
+            # 将obsid转换为字符串（去掉科学计数法）
+            obsid_str = f"{float(obsid):.0f}"
+            
+            # 首先在主目录查找
+            for ext in ['.fits', '.fit', '.fits.gz', '.fit.gz']:
+                file_path = os.path.join(self.fits_dir, f"{obsid_str}{ext}")
+                if os.path.exists(file_path):
+                    return file_path
+            
+            # 如果在主目录找不到，尝试在子目录中查找
+            for ext in ['.fits', '.fit', '.fits.gz', '.fit.gz']:
+                pattern = os.path.join(self.fits_dir, '**', f"{obsid_str}{ext}")
+                matches = glob.glob(pattern, recursive=True)
+                if matches:
+                    return matches[0]
+            
+            logger.warning(f"未找到OBSID为{obsid}的FITS文件")
+            return None
+            
+        except Exception as e:
+            logger.error(f"查找FITS文件时出错 (OBSID: {obsid}): {e}")
+            return None
+
+    def _extract_obsid_from_file(self, fits_file):
+        """从FITS文件名中提取OBSID，使用缓存机制"""
+        # 首先检查缓存
+        cached_obsid = self.obsid_cache.get_obsid(fits_file)
+        if cached_obsid is not None:
+            return cached_obsid
+            
+        # 如果缓存中没有，则提取OBSID
+        try:
+            # 获取文件名（不含路径和扩展名）
+            filename = os.path.basename(fits_file)
+            filename = os.path.splitext(filename)[0]
+            
+            # 如果文件名以.fits.gz结尾，需要再去除一次扩展名
+            if filename.endswith('.fits') or filename.endswith('.fit'):
+                filename = os.path.splitext(filename)[0]
+            
+            # 提取文件名中的数字部分作为OBSID
+            obsid_str = ''.join(filter(str.isdigit, filename))
+            if obsid_str:
+                obsid = float(obsid_str)  # 转换为浮点数以匹配CSV
+                # 将结果存入缓存
+                self.obsid_cache.set_obsid(fits_file, obsid)
+                return obsid
             else:
-                # 尝试解析为浮点数再转回科学计数法格式
-                obsid_float = float(obsid_str)
-                obsid_sci = f"{obsid_float:.1e}".upper()
-                if obsid_sci in self._fits_obsid_map:
-                    return self._fits_obsid_map[obsid_sci]
-        except:
-            pass
-        
-        print(f"未找到OBSID为{obsid}的FITS文件")
-        return None
-    
+                logger.warning(f"无法从文件名提取OBSID: {fits_file}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"提取OBSID时出错 ({fits_file}): {e}")
+            return None
+
     def _get_file_extension(self, fits_file):
         """获取文件完整路径，使用缓存避免重复查找"""
         if fits_file in self.extension_cache:
@@ -1355,14 +1402,23 @@ class LAMOSTPreprocessor:
         """处理单个FITS文件"""
         try:
             # 读取FITS文件
-            data_dict = self.read_fits_file(fits_file)
+            data = self.read_fits_file(fits_file)
             
-            if data_dict is None:
+            if data is None:
                 logger.warning(f"无法读取FITS文件: {fits_file}")
                 return None
             
-            # 提取观测ID
-            obsid = self._extract_obsid_from_file(fits_file)
+            # 确保data是字典类型
+            if isinstance(data, tuple):
+                # 如果是元组，转换为字典
+                data_dict = {
+                    'wavelength': data[0],
+                    'flux': data[1],
+                    'z': data[2] if len(data) > 2 else 0,
+                    'v_helio': data[3] if len(data) > 3 else 0
+                }
+            else:
+                data_dict = data
             
             # 处理光谱数据
             processed_spectrum = self.process_spectrum(data_dict)
@@ -1382,28 +1438,6 @@ class LAMOSTPreprocessor:
             
         except Exception as e:
             logger.error(f"处理FITS文件时出错 ({fits_file}): {e}")
-            return None
-    
-    def _extract_obsid_from_file(self, fits_file):
-        """从FITS文件名中提取OBSID，使用缓存机制"""
-        # 首先检查缓存
-        cached_obsid = self.obsid_cache.get_obsid(fits_file)
-        if cached_obsid is not None:
-            return cached_obsid
-            
-        # 如果缓存中没有，则提取OBSID
-        try:
-            # 获取文件名（不含路径和扩展名）
-            filename = os.path.splitext(os.path.basename(fits_file))[0]
-            # 提取OBSID（文件名中的数字部分）
-            obsid = float(''.join(filter(str.isdigit, filename)))  # 转换为浮点数
-            
-            # 将结果存入缓存
-            self.obsid_cache.set_obsid(fits_file, obsid)
-            return obsid
-            
-        except Exception as e:
-            logger.error(f"从文件名提取OBSID失败 ({fits_file}): {e}")
             return None
 
     def save_element_datasets(self, element, data):
@@ -1950,7 +1984,7 @@ class LAMOSTPreprocessor:
     def clean_cache(self):
         """清理所有缓存"""
         try:
-            # 清理FITS缓存
+            # 清理FITS缓存文件
             if os.path.exists(self.cache_dir):
                 for file in os.listdir(self.cache_dir):
                     if file.endswith('.pkl'):
@@ -2103,9 +2137,6 @@ class LAMOSTPreprocessor:
             self.check_data_sources()
             self.check_and_fix_file_paths()
             
-            # 建立FITS文件与观测ID的映射
-            self._build_fits_obsid_mapping()
-            
             # 准备FITS文件列表
             fits_files = []
             for element, df in self.csv_data.items():
@@ -2114,10 +2145,9 @@ class LAMOSTPreprocessor:
                     if fits_file and fits_file not in fits_files:
                         fits_files.append(fits_file)
             
-            # 准备FITS文件列表
-            all_fits_files = []
+            # 如果处理所有FITS文件，则获取目录中的所有文件
             if self.process_all_fits:
-                # 如果处理所有FITS文件，则获取目录中的所有文件
+                all_fits_files = []
                 for ext in ['.fits', '.fit', '.fits.gz', '.fit.gz']:
                     all_fits_files.extend(glob.glob(os.path.join(self.fits_dir, f'**/*{ext}'), recursive=True))
                 fits_files = list(set(all_fits_files))
@@ -2127,7 +2157,7 @@ class LAMOSTPreprocessor:
             logger.info(f"找到 {total_files} 个FITS文件需要处理")
             
             # 设置批处理参数
-            batch_size = self.batch_size  # 使用已有的batch_size参数
+            batch_size = self.batch_size
             total_batches = math.ceil(total_files / batch_size)
             
             # 初始化进度显示和处理结果
@@ -2151,14 +2181,14 @@ class LAMOSTPreprocessor:
                         
                         try:
                             # 处理单个FITS文件
-                            data_dict = self.process_fits_file(fits_file)
+                            result = self.process_fits_file(fits_file)
                             
-                            if data_dict is not None:
-                                # 提取观测ID
-                                obsid = self._extract_obsid_from_file(fits_file)
+                            if result is not None:
+                                # 获取观测ID
+                                obsid = result['obsid']
                                 
                                 # 存储结果
-                                batch_results[obsid] = data_dict
+                                batch_results[obsid] = result
                                 success_count += 1
                             else:
                                 error_count += 1
@@ -2183,16 +2213,17 @@ class LAMOSTPreprocessor:
                         torch.cuda.empty_cache()
             
             # 处理CSV数据中的每个元素
+            processed_elements = {}
             for element, df in self.csv_data.items():
                 logger.info(f"处理元素 {element} 的数据")
-                # 使用已处理的FITS数据处理元素数据
                 element_data = self.process_element_data_with_cache(df, element, final_results)
                 
                 # 保存元素数据集
                 if element_data:
                     self.save_element_datasets(element, element_data)
+                    processed_elements[element] = element_data
             
-            return final_results
+            return processed_elements
             
         except Exception as e:
             logger.error(f"批处理数据时出错: {e}")
