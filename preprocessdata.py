@@ -789,7 +789,7 @@ class LAMOSTPreprocessor:
             else:
                 # 常规分段处理
                 num_segments = 7 if has_oi_peak else 5
-            segment_length = len(wavelength_valid) // num_segments
+                segment_length = len(wavelength_valid) // num_segments
                 segment_indices = [(i * segment_length, 
                                (i + 1) * segment_length if i < num_segments - 1 else len(wavelength_valid)) 
                                for i in range(num_segments)]
@@ -1112,7 +1112,7 @@ class LAMOSTPreprocessor:
                 'label': label
             }
             
-            except Exception as e:
+        except Exception as e:
             print(f"处理OBSID {obsid}时出错: {e}")
             import traceback
             traceback.print_exc()
@@ -1794,7 +1794,7 @@ class LAMOSTPreprocessor:
                             f'{range_description}, {step_description}, {z_description}', 
                             ha='center', fontsize=10)
                 else:
-                plt.figtext(0.5, 0.01, 
+                    plt.figtext(0.5, 0.01, 
                           f'{range_description}, {step_description}', 
                           ha='center', fontsize=10)
         
@@ -2051,11 +2051,11 @@ class LAMOSTPreprocessor:
                             print("用户选择停止处理")
                             break
                     else:
-                    print(f"批次 {processed_batches + 1} 处理失败")
+                        print(f"批次 {processed_batches + 1} 处理失败")
                     
             return processed_batches > 0
             
-                    except Exception as e:
+        except Exception as e:
             print(f"数据处理失败: {str(e)}")
             import traceback
             traceback.print_exc()
