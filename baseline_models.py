@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 # 导入自定义模块
 import config
 from utils import CacheManager, ProgressManager, ask_clear_cache
+from config import Config
 
 # 配置日志
 logging.basicConfig(
@@ -108,7 +109,7 @@ class XGBoostModel:
             'validation_score': best_score
         }
     
-    def train_in_batches(self, X, y, batch_size=1000, batches_per_round=5, val_size=0.2, element=None):
+    def train_in_batches(self, X, y, batch_size=Config.BASELINE_BATCH_SIZE, batches_per_round=Config.BASELINE_BATCHES_PER_ROUND, val_size=0.2, element=None):
         """
         分批训练XGBoost模型，每批处理后立即生成完整结果
         
@@ -557,7 +558,7 @@ class LightGBMModel:
             'validation_score': best_score
         }
     
-    def train_in_batches(self, X, y, batch_size=1000, batches_per_round=5, val_size=0.2, element=None):
+    def train_in_batches(self, X, y, batch_size=Config.BASELINE_BATCH_SIZE, batches_per_round=Config.BASELINE_BATCHES_PER_ROUND, val_size=0.2, element=None):
         """
         分批训练LightGBM模型，每批处理后立即生成完整结果
         
@@ -1041,7 +1042,7 @@ def load_processed_data(element, data_type='train'):
         return None, None
 
 def train_and_evaluate_baseline(element, model_type='xgboost', 
-                               batch_size=1000, batches_per_round=5, val_size=0.2,
+                               batch_size=Config.BASELINE_BATCH_SIZE, batches_per_round=Config.BASELINE_BATCHES_PER_ROUND, val_size=0.2,
                                force_retrain=False, evaluate_only=False):
     """
     训练和评估基线模型，每批处理后生成完整结果
@@ -1137,9 +1138,9 @@ def main():
     parser.add_argument('--model', type=str, default='xgboost',
                       choices=['xgboost', 'lightgbm', 'both'],
                       help='模型类型，默认为xgboost')
-    parser.add_argument('--batch_size', type=int, default=1000,
+    parser.add_argument('--batch_size', type=int, default=Config.BASELINE_BATCH_SIZE,
                        help='每批大小，默认为1000')
-    parser.add_argument('--batches_per_round', type=int, default=5,
+    parser.add_argument('--batches_per_round', type=int, default=Config.BASELINE_BATCHES_PER_ROUND,
                        help='每轮处理的批次数，默认为5')
     parser.add_argument('--val_size', type=float, default=0.2,
                        help='验证集比例，默认为0.2')

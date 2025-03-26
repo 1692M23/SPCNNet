@@ -29,6 +29,7 @@ from data_validator import DataValidator
 import math
 import torch
 import argparse
+from config import Config
 
 # 配置日志
 logging.basicConfig(
@@ -153,7 +154,7 @@ class LAMOSTPreprocessor:
                  log_step=0.0001,  
                  compute_common_range=True,  
                  max_workers=None,  
-                 batch_size=20,  
+                 batch_size=Config.PREPROCESSING_BATCH_SIZE,  
                  memory_limit=0.7,  
                  low_memory_mode=False,
                  process_all_fits=False,
@@ -181,23 +182,18 @@ class LAMOSTPreprocessor:
         self.extension_cache = {}
         self.processed_ranges = {}
         
-        # GPU设置
-        self.use_gpu = use_gpu
-        if self.use_gpu is None:
-            # 自动检测GPU
-            self.use_gpu = hasattr(torch, 'cuda') and torch.cuda.is_available()
+        # 确定是否使用GPU
+        if use_gpu is None:
+            # 自动检测GPU可用性
+            self.use_gpu = torch.cuda.is_available() if hasattr(torch, 'cuda') else False
+        else:
+            self.use_gpu = use_gpu and hasattr(torch, 'cuda') and torch.cuda.is_available()
         
         if self.use_gpu:
-            if hasattr(torch, 'cuda') and torch.cuda.is_available():
-                logger.info("检测到GPU，将使用CUDA加速")
-                # 初始化GPU内存，预热
-                torch.cuda.empty_cache()
-            else:
-                logger.warning("指定使用GPU但未检测到CUDA，将使用CPU运行")
-                self.use_gpu = False
+            logger.info("使用GPU加速处理")
         else:
             logger.info("使用CPU运行")
-            
+        
         # 创建缓存目录
         self.cache_dir = os.path.join(output_dir, 'cache', 'preprocessing')
         os.makedirs(self.cache_dir, exist_ok=True)
@@ -280,35 +276,45 @@ class LAMOSTPreprocessor:
         return self.csv_data
     
     def _find_fits_file(self, obsid):
-        """根据OBSID查找对应的FITS文件"""
-        try:
-            # 确保obsid是数字格式
-            if isinstance(obsid, str):
-                # 如果是科学计数法格式，先转换
-                obsid = float(obsid)
-            
-            # 将obsid转换为整数字符串（去掉科学计数法）
-            obsid_str = f"{obsid:.0f}"
-            
-            # 首先在主目录查找
-            for ext in ['.fits', '.fit', '.fits.gz', '.fit.gz']:
-                file_path = os.path.join(self.fits_dir, f"{obsid_str}{ext}")
-                if os.path.exists(file_path):
-                    return file_path
-            
-            # 如果在主目录找不到，尝试在子目录中查找
-            for ext in ['.fits', '.fit', '.fits.gz', '.fit.gz']:
-                pattern = os.path.join(self.fits_dir, '**', f"{obsid_str}{ext}")
-                matches = glob.glob(pattern, recursive=True)
-                if matches:
-                    return matches[0]
-            
-            logger.warning(f"未找到OBSID为{obsid}的FITS文件")
-            return None
-            
-        except Exception as e:
-            logger.error(f"查找FITS文件时出错 (OBSID: {obsid}): {e}")
-            return None
+        """根据OBSID查找对应的FITS文件，优化查找性能"""
+        # 首先从缓存查找
+        cached_file = self.obsid_cache.get_obsid(str(obsid))
+        if cached_file and os.path.exists(cached_file):
+            return cached_file
+        
+        # 如果缓存中没有，尝试直接构建文件名
+        # LAMOST文件命名通常是obsid.fits
+        potential_files = [
+            os.path.join(self.fits_dir, f"{obsid}.fits"),
+            os.path.join(self.fits_dir, f"{obsid}.fit"),
+            os.path.join(self.fits_dir, f"{obsid}.fits.gz"),
+            os.path.join(self.fits_dir, f"{obsid}.fit.gz"),
+            # 添加其他可能的路径模式
+            os.path.join(self.fits_dir, "fits", f"{obsid}.fits"),
+            os.path.join(self.fits_dir, "fits", f"{obsid}.fit"),
+            os.path.join(self.fits_dir, "fits", f"{obsid}.fits.gz"),
+            os.path.join(self.fits_dir, "fits", f"{obsid}.fit.gz")
+        ]
+        
+        for file_path in potential_files:
+            if os.path.exists(file_path):
+                # 找到文件，保存到缓存
+                self.obsid_cache.set_obsid(str(obsid), file_path)
+                return file_path
+        
+        # 如果没有找到，可能需要更复杂的匹配方式
+        # 如果这是第一次查找，尝试构建完整映射
+        if not hasattr(self, '_mapping_built') or not self._mapping_built:
+            logger.info(f"未能直接找到OBSID {obsid}的文件，尝试构建FITS-OBSID映射...")
+            self._build_fits_obsid_mapping()
+            self._mapping_built = True
+            # 再次尝试从缓存查找
+            cached_file = self.obsid_cache.get_obsid(str(obsid))
+            if cached_file and os.path.exists(cached_file):
+                return cached_file
+        
+        logger.warning(f"无法找到OBSID {obsid}对应的FITS文件")
+        return None
 
     def _extract_obsid_from_file(self, fits_file):
         """从FITS文件名中提取OBSID，使用缓存机制"""
@@ -391,12 +397,12 @@ class LAMOSTPreprocessor:
                                 'z': z,
                                 'v_helio': v_helio
                             }
-                            break
+                            return data
                             
             # 如果没有找到标准格式，尝试其他可能的列名
             if data is None:
-                for i in range(1, len(hdul)):
-                    hdu = hdul[i]
+                    for i in range(1, len(hdul)):
+                        hdu = hdul[i]
                     if isinstance(hdu, fits.BinTableHDU):
                         column_names = hdu.columns.names
                         
@@ -410,13 +416,13 @@ class LAMOSTPreprocessor:
                         for wave_col in wave_cols:
                             if wave_col in column_names:
                                 found_wave_col = wave_col
-                                break
-                                
+                            break
+                            
                         for flux_col in flux_cols:
                             if flux_col in column_names:
                                 found_flux_col = flux_col
-                                break
-                                
+                            break
+                            
                         if found_wave_col and found_flux_col:
                             wavelength = hdu.data[found_wave_col]
                             flux = hdu.data[found_flux_col]
@@ -428,7 +434,7 @@ class LAMOSTPreprocessor:
                                     'z': 0,
                                     'v_helio': 0
                                 }
-                                break
+                                return data
             
             hdul.close()
             
@@ -443,37 +449,33 @@ class LAMOSTPreprocessor:
             return None
     
     def denoise_spectrum(self, wavelength, flux):
-        """对光谱进行去噪处理"""
+        """使用自适应方法对LAMOST低分辨率光谱进行去噪"""
+        n_points = len(flux)
+        
+        # 根据数据点数量自适应选择去噪方法
+        if n_points < 5:
+            logger.warning(f"数据点数太少({n_points})，返回原始数据")
+            return wavelength, flux
+        
         try:
-            # 确保数据是numpy数组
-            wavelength = np.array(wavelength)
-            flux = np.array(flux)
+            # 方法一：自适应窗口Savitzky-Golay滤波
+            window_length = min(max(5, n_points // 10 * 2 + 1), 15)
+            window_length = window_length if window_length % 2 == 1 else window_length - 1
+            polyorder = min(2, window_length // 3)
             
-            # 检查数据点数
-            if len(flux) < 5:
-                logger.warning(f"数据点数太少({len(flux)})，无法使用窗口为5的滤波器")
-                return flux  # 如果数据点太少，直接返回原始数据
-            
-            # 使用中值滤波去除尖峰噪声
-            window_size = 5
-            flux_filtered = signal.medfilt(flux, kernel_size=window_size)
-            
-            # 使用Savitzky-Golay滤波平滑光谱（同时保留吸收线特征）
-            if len(flux) >= 51:
-                flux_smoothed = signal.savgol_filter(flux_filtered, window_length=51, polyorder=3)
-            elif len(flux) >= 25:
-                flux_smoothed = signal.savgol_filter(flux_filtered, window_length=25, polyorder=2)
-            elif len(flux) >= 11:
-                flux_smoothed = signal.savgol_filter(flux_filtered, window_length=11, polyorder=1)
+            if n_points >= window_length:
+                smoothed_flux = signal.savgol_filter(flux, window_length, polyorder)
             else:
-                flux_smoothed = flux_filtered  # 如果数据点太少，使用中值滤波结果
+                # 方法二：对于较短光谱使用高斯平滑
+                from scipy.ndimage import gaussian_filter1d
+                sigma = max(0.8, min(1.5, n_points / 30))
+                smoothed_flux = gaussian_filter1d(flux, sigma)
             
-            return flux_smoothed
-            
+            return wavelength, smoothed_flux
         except Exception as e:
-            logger.error(f"去噪过程出错: {e}")
-            return flux  # 出错时返回原始数据
-            
+            logger.warning(f"去噪处理异常: {e}，返回原始数据")
+            return wavelength, flux
+    
     def denoise_spectrum_second(self, wavelength, flux):
         """对光谱进行二次去噪处理"""
         try:
@@ -1067,43 +1069,45 @@ class LAMOSTPreprocessor:
     def process_single_spectrum(self, obsid, label):
         """处理单个光谱，适用于并行处理"""
         try:
-            # 查找对应的FITS文件
+            # 查找FITS文件
             fits_file = self._find_fits_file(obsid)
-            if fits_file is None:
-                return {
-                    'status': 'error',
-                    'message': f'未找到OBSID {obsid}的FITS文件',
-                    'obsid': obsid
-                }
-                
-            # 读取光谱数据
-            wavelength, flux, snr = self.read_fits_file(fits_file)
+            if not fits_file:
+                return None
+            
+            # 读取FITS数据
+            wavelength, flux, v_helio = self.read_fits_file(fits_file)
             if wavelength is None or flux is None:
-                return {
-                    'status': 'error',
-                    'message': f'读取FITS文件失败: {fits_file}',
-                    'obsid': obsid
-                }
-                
-            # 处理光谱数据
-            processed_data = self._process_spectrum(wavelength, flux, snr, obsid)
+                return None
             
-            return {
-                'status': 'success',
-                'data': processed_data,
+            # 创建数据字典
+            data_dict = {
+                'wavelength': wavelength,
+                'flux': flux,
+                'v_helio': v_helio
+            }
+            
+            # 处理光谱
+            processed_flux = self.process_spectrum(data_dict)
+            if processed_flux is None:
+                return None
+            
+            # 构建结果
+            snr_value = self._calculate_snr(flux) if flux is not None else 0
+            result = {
+                'spectrum': processed_flux,
+                'label': label,
+                'metadata': {
                 'obsid': obsid,
-                'label': label
+                    'original_flux': fits_file,
+                    'wavelength': wavelength if wavelength is not None else [],
+                    'snr': snr_value
+                }
             }
             
+            return result
         except Exception as e:
-            print(f"处理OBSID {obsid}时出错: {e}")
-            import traceback
-            traceback.print_exc()
-            return {
-                'status': 'error',
-                'message': str(e),
-                'obsid': obsid
-            }
+            logger.error(f"处理光谱失败: {e}")
+            return None
     
     def check_memory_usage(self):
         """检查内存使用情况，如果超过限制则触发垃圾回收"""
@@ -1331,7 +1335,7 @@ class LAMOSTPreprocessor:
             else:
                 logger.warning(f"处理光谱数据失败: {fits_file}")
                 return None
-                
+            
         except Exception as e:
             logger.error(f"处理FITS文件时出错 ({fits_file}): {str(e)}")
             return None
@@ -1980,49 +1984,74 @@ class LAMOSTPreprocessor:
 
     # 添加方法用于构建FITS文件到OBSID的映射
     def _build_fits_obsid_mapping(self):
-        """构建FITS文件与OBSID的映射关系"""
-        self._fits_obsid_map = {}
+        """构建FITS文件和OBSID的映射，优化为批处理方式"""
+        logger.info("构建FITS文件和OBSID的映射关系...")
         
-        # 获取FITS目录中的所有FITS文件
+        # 收集所有FITS文件
         fits_files = []
         for ext in ['.fits', '.fit', '.fits.gz', '.fit.gz']:
-            fits_files.extend(glob.glob(os.path.join(self.fits_dir, f'**/*{ext}'), recursive=True))
+            pattern = os.path.join(self.fits_dir, f"**/*{ext}")
+            fits_files.extend(glob.glob(pattern, recursive=True))
         
-        total_files = len(fits_files)
-        print(f"开始构建FITS-OBSID映射，共 {total_files} 个文件")
+        if not fits_files:
+            logger.warning(f"在目录 {self.fits_dir} 中未找到FITS文件")
+            return
         
-        # 使用tqdm显示进度
-        from tqdm import tqdm
-        for fits_file in tqdm(fits_files, desc="构建FITS-OBSID映射", unit="文件"):
-            obsid = self._extract_obsid_from_fits(fits_file)
-            if obsid:
-                self._fits_obsid_map[obsid] = fits_file
+        logger.info(f"找到 {len(fits_files)} 个FITS文件，开始批量构建映射...")
         
-        print(f"OBSID映射完成，共找到{len(self._fits_obsid_map)}个有效OBSID")
-        return self._fits_obsid_map
+        # 分批处理文件以提高效率
+        batch_size = min(1000, len(fits_files))  # 每批最多处理1000个文件
+        total_batches = (len(fits_files) + batch_size - 1) // batch_size
+        
+        with tqdm(total=len(fits_files), desc="构建FITS-OBSID映射", unit="文件") as pbar:
+            for batch_idx in range(total_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min(start_idx + batch_size, len(fits_files))
+                batch_files = fits_files[start_idx:end_idx]
+                
+                # 使用多进程加速处理
+                with Pool(processes=self.max_workers) as pool:
+                    results = pool.map(self._extract_obsid_from_fits, batch_files)
+                
+                # 处理结果
+                for fits_file, obsid in zip(batch_files, results):
+                    if obsid:
+                        self.obsid_cache.set_obsid(str(obsid), fits_file)
+                
+                # 更新进度条
+                pbar.update(len(batch_files))
+                
+                # 每批次后保存缓存
+                if batch_idx % 5 == 0 or batch_idx == total_batches - 1:
+                    self.obsid_cache.save_cache()
+        
+        logger.info(f"FITS-OBSID映射构建完成，成功映射 {len(self.obsid_cache._cache)} 个文件")
 
     def process_data(self):
         """执行数据处理"""
         try:
-            import time
             start_time = time.time()
             
             logger.info("=== 开始数据处理 ===")
             
-            # 1. 读取CSV数据并保存到self.csv_data
+            # 1. 读取CSV数据
             logger.info("步骤1: 读取CSV数据")
             self.read_csv_data()
             logger.info(f"CSV数据读取完成，共 {sum(len(df) for df in self.csv_data.values())} 条记录")
             
-            # 2. 处理所有元素数据（使用分批处理）
-            logger.info("步骤2: 开始批量处理元素数据")
+            # 2. 预先构建FITS-OBSID映射（一次性批量构建）
+            logger.info("步骤2: 构建FITS文件和OBSID的映射关系")
+            self._build_fits_obsid_mapping()
+            
+            # 3. 处理所有元素数据（使用分批处理）
+            logger.info("步骤3: 开始批量处理元素数据")
             processed_data = self.process_all_data_in_batches()
             
-            # 3. 保存所有缓存
-            logger.info("步骤3: 保存缓存数据")
+            # 4. 保存所有缓存
+            logger.info("步骤4: 保存缓存数据")
             self.obsid_cache.save_cache()
             
-            # 4. 计算并显示处理时间
+            # 5. 计算并显示处理时间
             end_time = time.time()
             total_time = end_time - start_time
             hours, remainder = divmod(total_time, 3600)
@@ -2030,13 +2059,9 @@ class LAMOSTPreprocessor:
             logger.info(f"=== 数据处理完成 ===")
             logger.info(f"总处理时间: {int(hours)}小时 {int(minutes)}分钟 {seconds:.2f}秒")
             
-            # 5. 返回处理后的数据
             return processed_data
-            
         except Exception as e:
-            # 保存缓存，即使发生错误
             self.obsid_cache.save_cache()
-            
             logger.error(f"数据处理失败: {str(e)}")
             import traceback
             traceback.print_exc()
@@ -2102,7 +2127,7 @@ class LAMOSTPreprocessor:
                     batch_start_time = time.time()
                     logger.info(f"开始处理第 {batch_index+1}/{total_batches} 批文件 (共 {len(current_batch)} 个文件)")
                     
-                    # 处理当前批次
+                # 处理当前批次
                     batch_results = {}
                     success_count = 0
                     error_count = 0
@@ -2148,12 +2173,15 @@ class LAMOSTPreprocessor:
                     # 每批次处理后清理内存
                     gc.collect()
                     if self.use_gpu and hasattr(torch, 'cuda') and torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                        # 输出GPU内存使用情况
-                        if hasattr(torch.cuda, 'memory_allocated'):
-                            allocated = torch.cuda.memory_allocated() / (1024 ** 2)
-                            reserved = torch.cuda.memory_reserved() / (1024 ** 2)
-                            logger.info(f"GPU内存使用: 已分配 {allocated:.2f}MB, 已保留 {reserved:.2f}MB")
+                        try:
+                            torch.cuda.empty_cache()
+                            # 输出GPU内存使用情况
+                            if hasattr(torch.cuda, 'memory_allocated'):
+                                allocated = torch.cuda.memory_allocated() / (1024 ** 2)
+                                reserved = torch.cuda.memory_reserved() / (1024 ** 2)
+                                logger.info(f"GPU内存使用: 已分配 {allocated:.2f}MB, 已保留 {reserved:.2f}MB")
+                        except Exception as e:
+                            logger.warning(f"清理GPU内存失败: {e}")
                     
                     # 保存OBSID缓存
                     if batch_index % 5 == 0 or batch_index == total_batches - 1:  # 每5批或最后一批保存一次
@@ -2299,16 +2327,16 @@ class LAMOSTPreprocessor:
                 self.update_common_wavelength_range(wavelength)
             
             # 4. 重采样
-            wavelength, flux = self.resample_spectrum(wavelength, flux)
+            resampled_wavelength, resampled_flux = self.resample_spectrum(wavelength, flux)
             
             # 5. 连续谱归一化
-            flux = self.normalize_continuum(wavelength, flux)
+            normalized_flux = self.normalize_continuum(resampled_wavelength, resampled_flux)
             
             # 6. 二次去噪和最终归一化
-            flux = self.denoise_spectrum_second(wavelength, flux)
-            flux = self.normalize_spectrum(flux)
+            denoised_flux = self.denoise_spectrum_second(resampled_wavelength, normalized_flux)
+            final_flux = self.normalize_spectrum(denoised_flux)
             
-            return flux
+            return final_flux
             
         except Exception as e:
             logger.error(f"处理光谱时出错: {e}")
@@ -2334,7 +2362,7 @@ def main():
                         help='波长范围[min, max]')
     parser.add_argument('--n_points', type=int, default=None,
                         help='重采样点数')
-    parser.add_argument('--batch_size', type=int, default=20,
+    parser.add_argument('--batch_size', type=int, default=Config.PREPROCESSING_BATCH_SIZE,
                         help='批处理大小')
     parser.add_argument('--max_workers', type=int, default=None,
                         help='最大工作线程数')
@@ -2359,11 +2387,11 @@ def main():
     csv_files = args.csv_files
     if csv_files is None:
         csv_files = []
-        if args.reference_csv:
-            csv_files.append(args.reference_csv)
-        if args.prediction_csv:
-            csv_files.append(args.prediction_csv)
-        if not csv_files:
+    if args.reference_csv:
+        csv_files.append(args.reference_csv)
+    if args.prediction_csv:
+        csv_files.append(args.prediction_csv)
+    if not csv_files:
             csv_files = ['X_FE.csv']  # 默认值
     
     # 确定GPU使用选项

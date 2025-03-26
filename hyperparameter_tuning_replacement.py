@@ -3,6 +3,12 @@ import pickle
 import logging
 import torch
 from sklearn.model_selection import ParameterGrid
+from utils import ProgressManager
+import config
+from model import train_and_evaluate_model
+
+# 设置logger
+logger = logging.getLogger(__name__)
 
 def hyperparameter_tuning(element, train_loader, val_loader, grid=None, device=None):
     """

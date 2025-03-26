@@ -4,6 +4,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import numpy as np
 from tqdm import tqdm
+from config import Config
+from preprocessing import LAMOSTDataset
 
 class LAMOSTNet(nn.Module):
     def __init__(self, input_size, hidden_size=128):
@@ -96,3 +98,15 @@ def train_model(model, train_loader, val_loader, test_loader, device,
         print('-' * 50)
     
     return history 
+
+def create_data_loaders(train_data, val_data, test_data, batch_size=Config.TRAINING_BATCH_SIZE, num_workers=4):
+    """创建数据加载器"""
+    train_dataset = LAMOSTDataset(train_data)
+    val_dataset = LAMOSTDataset(val_data)
+    test_dataset = LAMOSTDataset(test_data)
+    
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    
+    return train_loader, val_loader, test_loader 

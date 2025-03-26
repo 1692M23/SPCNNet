@@ -37,6 +37,15 @@
 │   ├── predict/      # 预测日志
 │   └── validation/   # 验证日志
 ├── results/           # 结果目录
+│   ├── preprocessing/             # 预处理批次结果（修改）
+│   │   ├── C_FE/                  # 按元素分类
+│   │   │   ├── batch_1/           # 每个批次的结果
+│   │   │   │   ├── metrics.txt    # 批次统计信息 
+│   │   │   │   ├── results.csv    # 详细结果数据
+│   │   │   │   └── plots/         # 批次可视化
+│   │   │   ├── summary.txt        # 处理总结
+│   │   │   └── plots/             # 总体可视化
+│   │   └── fits_processing/       # FITS文件处理结果
 │   ├── predictions/  # 预测结果
 │   ├── evaluation/   # 评估结果
 │   └── hyperopt/     # 超参数优化结果

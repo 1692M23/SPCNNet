@@ -23,6 +23,7 @@ from evaluation import evaluate_all_elements, plot_predictions_vs_true, plot_met
 from utils import CacheManager, ProgressManager, ask_clear_cache
 from multi_element_processor import MultiElementProcessor
 from fits_cache import FITSCache
+from hyperparameter_tuning_replacement import hyperparameter_tuning
 
 # 配置日志
 logging.basicConfig(
@@ -799,7 +800,7 @@ def main():
                 batch_size=config.training_config['batch_size'],
                 shuffle=False
             )
-            train_and_evaluate_model(train_loader_element, val_loader_element, element, CONFIG)
+            train_and_evaluate_model(train_loader_element, val_loader_element, element, config)
     
     if args.mode == 'tune' or args.mode == 'all':
         # 超参数调优

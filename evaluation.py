@@ -23,7 +23,8 @@ from matplotlib.cm import ScalarMappable
 from astropy.io import fits
 from scipy.stats import spearmanr, pearsonr
 import time
-import nn
+import torch.nn as nn
+from config import Config
 
 # 导入自定义模块
 import config

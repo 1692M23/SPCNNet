@@ -21,6 +21,7 @@ import config
 from model import load_trained_model, predict
 from multi_element_processor import MultiElementProcessor
 from utils import CacheManager, ProgressManager, ask_clear_cache
+from config import Config
 
 # 配置日志
 logging.basicConfig(
@@ -221,7 +222,7 @@ def predict_element(spectra, element, batch_size=32, device=None):
     
     return predictions
 
-def predict_all_elements(spectra, elements=None, batch_size=32):
+def predict_all_elements(spectra, elements=None, batch_size=Config.PREDICTION_BATCH_SIZE):
     """
     预测所有元素的丰度，并为每批次生成实时结果
     

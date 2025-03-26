@@ -336,4 +336,31 @@ CONFIG = {
     'preprocessing_config': preprocessing_config,
     'cache_config': cache_config,
     'progress_config': progress_config
-} 
+}
+
+class Config:
+    # 预处理配置
+    PREPROCESSING_BATCH_SIZE = 20
+    
+    # 训练配置
+    TRAINING_BATCH_SIZE = 32
+    EPOCHS = 100
+    
+    # 基线模型配置
+    BASELINE_BATCH_SIZE = 1000
+    BASELINE_BATCHES_PER_ROUND = 2
+    
+    # 评估配置
+    EVALUATION_BATCH_SIZE = 32
+    
+    # 预测配置
+    PREDICTION_BATCH_SIZE = 100
+    
+    # 批处理结果配置
+    SAVE_BATCH_RESULTS = True
+    GENERATE_VISUALIZATIONS = True
+    
+    # 环境配置
+    USE_GPU = True  # 自动检测
+    MAX_WORKERS = 4  # 并行处理的工作线程数
+    MEMORY_LIMIT = 0.7  # 内存使用限制百分比 
