@@ -222,9 +222,8 @@ class LAMOSTPreprocessor:
         self.validator = DataValidator(os.path.join(output_dir, 'validation'))
         
     def read_csv_data(self):
-        """读取CSV文件并返回DataFrame列表"""
-        dataframes = []
-        element_columns = []
+        """读取CSV文件并保存到self.csv_data"""
+        self.csv_data = {}  # 重置csv_data字典
         
         for csv_file in self.csv_files:
             if not os.path.exists(csv_file):
@@ -269,16 +268,16 @@ class LAMOSTPreprocessor:
             
             print(f"找到元素丰度列: {', '.join(fe_columns)}")
             
-            # 为每个元素丰度列创建单独的DataFrame
+            # 为每个元素丰度列创建单独的DataFrame并保存到self.csv_data
             for fe_col in fe_columns:
                 # 创建新的DataFrame，包含obsid和当前元素丰度列
                 element_df = df[['obsid', fe_col]].copy()
-                element_df.columns = ['obsid', 'abundance']  # 重命名丰度列为统一名称
-                dataframes.append(element_df)
-                element_columns.append(fe_col)
+                # 保存到csv_data字典
+                self.csv_data[fe_col] = element_df
                 print(f"处理元素 {fe_col}: {len(element_df)}条记录")
         
-        return dataframes, element_columns
+        # 返回self.csv_data以便向后兼容
+        return self.csv_data
     
     def _find_fits_file(self, obsid):
         """根据OBSID查找对应的FITS文件"""
@@ -1816,12 +1815,14 @@ class LAMOSTPreprocessor:
                     print(f"  - 包含 {len(df)} 条记录")
                     print(f"  - 列名: {', '.join(df.columns)}")
                     
-                    # 检查是否包含spec列
-                    if 'spec' in df.columns:
-                        spec_example = df['spec'].iloc[0] if len(df) > 0 else "无数据"
-                        print(f"  - 'spec'列示例: {spec_example}")
+                    # 检查是否包含obsid列（而不是spec列）
+                    if 'obsid' in df.columns:
+                        obsid_example = df['obsid'].iloc[0] if len(df) > 0 else "无数据"
+                        print(f"  - 'obsid'列示例: {obsid_example}")
+                        # 保存CSV数据
+                        self.csv_data[os.path.basename(csv_file)] = df
                     else:
-                        print(f"  ✗ 错误: {csv_file} 中没有'spec'列")
+                        print(f"  ✗ 错误: {csv_file} 中没有'obsid'列")
                 except Exception as e:
                     print(f"  ✗ 无法读取CSV文件 {csv_file}: {e}")
             else:
@@ -1860,22 +1861,22 @@ class LAMOSTPreprocessor:
                     if len(directories) > 5:
                         print(f"    - ... 共 {len(directories)} 个子目录")
                 
-                # 检查CSV文件中的spec值是否匹配fits文件
+                # 检查CSV文件中的obsid值是否匹配fits文件
                 for csv_file in self.csv_files:
                     if os.path.exists(csv_file):
                         df = pd.read_csv(csv_file)
-                        if 'spec' in df.columns and len(df) > 0:
-                            spec_examples = df['spec'].iloc[:5].tolist()
-                            print(f"\n  检查 {csv_file} 中的spec值是否匹配fits文件:")
+                        if 'obsid' in df.columns and len(df) > 0:
+                            obsid_examples = df['obsid'].iloc[:5].tolist()
+                            print(f"\n  检查 {csv_file} 中的obsid值是否匹配fits文件:")
                             
-                            for spec in spec_examples:
+                            for obsid in obsid_examples:
                                 # 使用新的查找逻辑
-                                found_path = self._find_fits_file(spec)
+                                found_path = self._find_fits_file(obsid)
                                 if found_path:
                                     rel_path = os.path.relpath(found_path, self.fits_dir)
-                                    print(f"    ✓ {spec} 存在: {rel_path}")
+                                    print(f"    ✓ OBSID {obsid} 存在: {rel_path}")
                                 else:
-                                    print(f"    ✗ {spec} 不存在，在所有目录中都未找到")
+                                    print(f"    ✗ OBSID {obsid} 不存在，在所有目录中都未找到")
                             
                             # 检测常见文件格式
                             extensions = [os.path.splitext(f)[1] for f in all_fits_files[:20]]
@@ -1913,10 +1914,10 @@ class LAMOSTPreprocessor:
         for csv_file in self.csv_files:
             if os.path.exists(csv_file):
                 df = pd.read_csv(csv_file)
-                if 'spec' in df.columns:
-                    for spec in df['spec'].values[:5]:  # 只取前5个测试
-                        if spec not in test_files:
-                            test_files.append(spec)
+                if 'obsid' in df.columns:
+                    for obsid in df['obsid'].values[:5]:  # 只取前5个测试
+                        if obsid not in test_files:
+                            test_files.append(obsid)
         
         if not test_files:
             print("无法找到测试文件，请检查CSV文件")
@@ -1939,28 +1940,30 @@ class LAMOSTPreprocessor:
         
         # 测试文件路径查找
         print("\n文件查找测试:")
-        for spec in test_files:
-            print(f"测试: {spec}")
-            # 直接路径测试
-            direct_path = os.path.join(self.fits_dir, spec)
-            if os.path.exists(direct_path):
-                print(f"  直接路径存在: {direct_path}")
-            else:
-                print(f"  直接路径不存在: {direct_path}")
+        for obsid in test_files:
+            print(f"测试OBSID: {obsid}")
+            
+            # 尝试直接查找文件
+            obsid_str = f"{float(obsid):.0f}" if not isinstance(obsid, str) else obsid
             
             # 测试带扩展名的路径
+            found = False
             for ext in ['.fits', '.fits.gz', '.fit', '.fit.gz']:
-                ext_path = direct_path + ext
-                if os.path.exists(ext_path):
-                    print(f"  带扩展名的路径存在: {ext_path}")
+                file_path = os.path.join(self.fits_dir, f"{obsid_str}{ext}")
+                if os.path.exists(file_path):
+                    print(f"  存在路径: {file_path}")
+                    found = True
                     break
             
             # 使用查找函数
-            found_path = self._find_fits_file(spec)
+            found_path = self._find_fits_file(obsid)
             if found_path:
                 print(f"  _find_fits_file找到: {found_path}")
             else:
                 print(f"  _find_fits_file未找到文件")
+            
+            if not found and not found_path:
+                print(f"  无法找到OBSID为{obsid}的FITS文件，查找路径: {self.fits_dir}")
             
         print("\n=== 诊断完成 ===\n")
 
@@ -2018,8 +2021,8 @@ class LAMOSTPreprocessor:
     def process_data(self):
         """执行数据处理"""
         try:
-            # 1. 读取CSV数据
-            df = self.read_csv_data()
+            # 1. 读取CSV数据并保存到self.csv_data
+            self.read_csv_data()
             
             # 2. 处理所有元素数据（使用分批处理）
             processed_data = self.process_all_data_in_batches()
