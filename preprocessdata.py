@@ -172,6 +172,7 @@ class LAMOSTPreprocessor:
         self.wavelengths = {}
         self.common_wavelength_range = None
         self.extension_cache = {}
+        self.processed_ranges = {}  # 添加processed_ranges属性
         
         # 创建缓存目录
         self.cache_dir = os.path.join(output_dir, 'cache', 'preprocessing')
@@ -316,8 +317,8 @@ class LAMOSTPreprocessor:
                 
         except Exception as e:
             logger.error(f"提取OBSID时出错 ({fits_file}): {e}")
-            return None
-
+        return None
+    
     def _get_file_extension(self, fits_file):
         """获取文件完整路径，使用缓存避免重复查找"""
         if fits_file in self.extension_cache:
@@ -334,71 +335,86 @@ class LAMOSTPreprocessor:
     
     def read_fits_file(self, fits_file):
         """读取FITS文件数据"""
+        if not os.path.exists(fits_file):
+            logger.error(f"FITS文件不存在: {fits_file}")
+            return None
+            
         try:
-            with fits.open(fits_file) as hdul:
-                # 首先尝试从第一个HDU读取数据
-                data = None
-                for hdu in hdul[1:]:  # 跳过主HDU（通常是空的）
-                    try:
-                        # 检查是否包含WAVELENGTH和FLUX列
-                        if 'WAVELENGTH' in hdu.columns.names and 'FLUX' in hdu.columns.names:
-                            wavelength = hdu.data['WAVELENGTH']
-                            flux = hdu.data['FLUX']
+            hdul = fits.open(fits_file)
+            
+            # 首先尝试从第一个HDU读取数据
+            data = None
+            
+            # 从第一个HDU开始检查
+            for i in range(1, len(hdul)):
+                hdu = hdul[i]
+                # 检查是否为表格式HDU
+                if isinstance(hdu, fits.BinTableHDU):
+                    column_names = hdu.columns.names
+                    
+                    # 尝试找到波长和流量列
+                    if 'WAVELENGTH' in column_names and 'FLUX' in column_names:
+                        wavelength = hdu.data['WAVELENGTH']
+                        flux = hdu.data['FLUX']
+                        
+                        if len(wavelength) > 0 and len(flux) > 0:
+                            # 获取红移和视向速度信息（如果有）
+                            z = hdu.header.get('Z', 0)
+                            v_helio = hdu.header.get('V_HELIO', 0)
+                            
+                            data = {
+                                'wavelength': wavelength,
+                                'flux': flux,
+                                'z': z,
+                                'v_helio': v_helio
+                            }
+                            break
+                            
+            # 如果没有找到标准格式，尝试其他可能的列名
+            if data is None:
+                for i in range(1, len(hdul)):
+                    hdu = hdul[i]
+                    if isinstance(hdu, fits.BinTableHDU):
+                        column_names = hdu.columns.names
+                        
+                        # 尝试不同的列名组合
+                        wave_cols = ['WAVELENGTH', 'WAVE', 'LAMBDA', 'WAV']
+                        flux_cols = ['FLUX', 'INTENSITY', 'FLUX_INTENSITY']
+                        
+                        found_wave_col = None
+                        found_flux_col = None
+                        
+                        for wave_col in wave_cols:
+                            if wave_col in column_names:
+                                found_wave_col = wave_col
+                                break
+                                
+                        for flux_col in flux_cols:
+                            if flux_col in column_names:
+                                found_flux_col = flux_col
+                                break
+                                
+                        if found_wave_col and found_flux_col:
+                            wavelength = hdu.data[found_wave_col]
+                            flux = hdu.data[found_flux_col]
+                            
                             if len(wavelength) > 0 and len(flux) > 0:
                                 data = {
                                     'wavelength': wavelength,
-                                    'flux': flux
+                                    'flux': flux,
+                                    'z': 0,
+                                    'v_helio': 0
                                 }
-                                
-                                # 尝试获取红移和视向速度信息
-                                try:
-                                    z = hdu.header.get('Z', 0)
-                                    v_helio = hdu.header.get('V_HELIO', 0)
-                                    data.update({
-                                        'z': z,
-                                        'v_helio': v_helio
-                                    })
-                                except:
-                                    pass
-                                    
                                 break
-                    except Exception as e:
-                        continue
+            
+            hdul.close()
+            
+            if data is None:
+                logger.error(f"无法从FITS文件中提取波长和流量数据: {fits_file}")
+                return None
                 
-                if data is None:
-                    # 如果没有找到标准格式，尝试其他可能的格式
-                    for hdu in hdul[1:]:
-                        try:
-                            # 检查数据是否为表格形式
-                            if isinstance(hdu.data, fits.fitsrec.FITS_rec):
-                                # 尝试不同的列名组合
-                                wave_candidates = ['WAVELENGTH', 'WAVE', 'LAMBDA', 'WAV']
-                                flux_candidates = ['FLUX', 'INTENSITY', 'FLUX_INTENSITY']
-                                
-                                for wave_col in wave_candidates:
-                                    for flux_col in flux_candidates:
-                                        if wave_col in hdu.columns.names and flux_col in hdu.columns.names:
-                                            wavelength = hdu.data[wave_col]
-                                            flux = hdu.data[flux_col]
-                                            if len(wavelength) > 0 and len(flux) > 0:
-                                                data = {
-                                                    'wavelength': wavelength,
-                                                    'flux': flux,
-                                                    'z': 0,
-                                                    'v_helio': 0
-                                                }
-                                                break
-                                    if data is not None:
-                                        break
-                        except:
-                            continue
-                
-                if data is None:
-                    logger.error(f"无法从FITS文件中提取波长和流量数据: {fits_file}")
-                    return None
-                
-                return data
-                
+            return data
+            
         except Exception as e:
             logger.error(f"读取FITS文件时出错 ({fits_file}): {e}")
             return None
@@ -406,38 +422,80 @@ class LAMOSTPreprocessor:
     def denoise_spectrum(self, wavelength, flux):
         """对光谱进行去噪处理"""
         try:
-            # 使用Savitzky-Golay滤波器去噪
-            window_length = 5  # 窗口大小
-            polyorder = 2  # 多项式阶数
+            # 确保数据是numpy数组
+            wavelength = np.array(wavelength)
+            flux = np.array(flux)
             
-            # 防止窗口长度不足的错误
-            if len(flux) < window_length:
-                print(f"数据点数太少({len(flux)})，无法使用窗口为{window_length}的滤波器")
-                return flux  # 数据点太少，直接返回原始数据
+            # 检查数据点数
+            if len(flux) < 5:
+                logger.warning(f"数据点数太少({len(flux)})，无法使用窗口为5的滤波器")
+                return flux  # 如果数据点太少，直接返回原始数据
             
-            # 处理无效值
-            mask = ~np.isnan(flux)
-            if not np.any(mask):
-                print("全部为NaN值，无法去噪")
-                return None
+            # 使用中值滤波去除尖峰噪声
+            window_size = 5
+            flux_filtered = signal.medfilt(flux, kernel_size=window_size)
             
-            # 只对有效数据进行滤波
-            valid_flux = flux[mask]
+            # 使用Savitzky-Golay滤波平滑光谱（同时保留吸收线特征）
+            if len(flux) >= 51:
+                flux_smoothed = signal.savgol_filter(flux_filtered, window_length=51, polyorder=3)
+            elif len(flux) >= 25:
+                flux_smoothed = signal.savgol_filter(flux_filtered, window_length=25, polyorder=2)
+            elif len(flux) >= 11:
+                flux_smoothed = signal.savgol_filter(flux_filtered, window_length=11, polyorder=1)
+            else:
+                flux_smoothed = flux_filtered  # 如果数据点太少，使用中值滤波结果
             
-            if len(valid_flux) < window_length:
-                print(f"有效数据点数太少({len(valid_flux)})，无法去噪")
-                return flux
+            return flux_smoothed
             
-            # 对有效数据进行滤波
-            flux_denoised = np.copy(flux)
-            flux_denoised[mask] = signal.savgol_filter(valid_flux, window_length, polyorder)
-            
-            return flux_denoised
         except Exception as e:
-            print(f"去噪处理出错: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
+            logger.error(f"去噪过程出错: {e}")
+            return flux  # 出错时返回原始数据
+            
+    def denoise_spectrum_second(self, wavelength, flux):
+        """对光谱进行二次去噪处理"""
+        try:
+            # 确保数据是numpy数组
+            wavelength = np.array(wavelength)
+            flux = np.array(flux)
+            
+            # 检查数据点数
+            if len(flux) < 5:
+                logger.warning(f"数据点数太少({len(flux)})，无法使用窗口为5的滤波器")
+                return flux  # 如果数据点太少，直接返回原始数据
+            
+            # 识别可能的吸收线（局部最小值）
+            absorption_lines = []
+            for i in range(2, len(flux) - 2):
+                if flux[i] < flux[i-1] and flux[i] < flux[i-2] and flux[i] < flux[i+1] and flux[i] < flux[i+2]:
+                    absorption_lines.append(i)
+            
+            print(f"检测到{len(absorption_lines)}个可能的吸收线")
+            
+            # 使用更温和的滤波器进行最终平滑
+            if len(flux) >= 31:
+                window_length = 31
+                polyorder = 2
+            elif len(flux) >= 15:
+                window_length = 15
+                polyorder = 2
+            elif len(flux) >= 9:
+                window_length = 9
+                polyorder = 1
+            else:
+                return flux  # 如果数据点太少，直接返回原始数据
+                
+            flux_smoothed = signal.savgol_filter(flux, window_length=window_length, polyorder=polyorder)
+            
+            # 保留吸收线的深度
+            for i in absorption_lines:
+                if i >= window_length//2 and i < len(flux) - window_length//2:
+                    flux_smoothed[i] = flux[i]
+            
+            return flux_smoothed
+            
+        except Exception as e:
+            logger.error(f"二次去噪过程出错: {e}")
+            return flux  # 出错时返回原始数据
     
     def correct_redshift(self, wavelength, flux, z):
         """校正红移
@@ -983,99 +1041,6 @@ class LAMOSTPreprocessor:
             except:
                 return flux
     
-    def denoise_spectrum_second(self, wavelength, flux):
-        """对光谱进行二次去噪处理，更强地移除噪声，但保留明显的特征"""
-        try:
-            # 检查是否有无效值
-            if flux is None or np.all(np.isnan(flux)):
-                print("无效的流量数据，无法进行二次去噪")
-                return flux
-            
-            # 对OI线区域进行特殊检查
-            oi_region = (wavelength >= 7700) & (wavelength <= 7850)
-            has_oi_anomaly = False
-            if np.any(oi_region):
-                oi_flux = flux[oi_region]
-                if np.max(oi_flux) > np.median(flux[~np.isnan(flux)]) * 1.5:
-                    print("OI线(7774埃)附近检测到异常，将加强平滑")
-                    has_oi_anomaly = True
-            
-            # 保存原始数据的副本
-            flux_denoised = np.copy(flux)
-            
-            # 使用SavGol滤波器进行平滑去噪
-            from scipy.signal import savgol_filter
-            
-            # 确定窗口大小 - 正常区域和异常区域使用不同的参数
-            standard_window = 7  # 默认窗口大小
-            oi_window = 15      # OI区域使用更大窗口
-            
-            # 处理NaN值
-            valid_mask = ~np.isnan(flux)
-            if not np.any(valid_mask):
-                return flux
-            
-            # 创建一个有效数据的副本用于填充
-            valid_flux = flux[valid_mask]
-            valid_wavelength = wavelength[valid_mask]
-            
-            # 对一般区域应用滤波
-            try:
-                flux_denoised[valid_mask] = savgol_filter(valid_flux, standard_window, 2)
-                print(f"二次去噪完成，使用窗口长度= {standard_window}")
-            except Exception as e:
-                print(f"SavGol滤波失败: {e}")
-                return flux
-                
-            # 如果OI区域有异常，使用更强的滤波参数专门处理
-            if has_oi_anomaly:
-                # 找到OI区域的有效数据点
-                oi_valid_mask = oi_region & valid_mask
-                if np.sum(oi_valid_mask) > oi_window:  # 确保有足够的点进行滤波
-                    try:
-                        # 对OI区域使用更大窗口和更高阶多项式
-                        oi_indices = np.where(oi_valid_mask)[0]
-                        if len(oi_indices) >= oi_window:
-                            oi_flux_section = flux[oi_valid_mask]
-                            # 使用更大窗口进行强平滑
-                            oi_smoothed = savgol_filter(oi_flux_section, oi_window, 3)
-                            flux_denoised[oi_valid_mask] = oi_smoothed
-                            print(f"OI区域增强去噪完成，使用窗口长度= {oi_window}")
-                    except Exception as e:
-                        print(f"OI区域特殊去噪失败: {e}")
-            
-            # 还可以额外进行中值滤波以移除尖峰
-            from scipy.signal import medfilt
-            
-            # 对特别突出的峰值使用中值滤波
-            if has_oi_anomaly:
-                # 寻找异常峰值
-                flux_mean = np.mean(flux_denoised[valid_mask])
-                flux_std = np.std(flux_denoised[valid_mask])
-                spike_threshold = flux_mean + 1.5 * flux_std
-                
-                spike_mask = (flux_denoised > spike_threshold) & valid_mask
-                if np.any(spike_mask):
-                    print(f"检测到{np.sum(spike_mask)}个异常峰值点，进行中值滤波")
-                    # 将这些点替换为周围7个点的中值
-                    for idx in np.where(spike_mask)[0]:
-                        start = max(0, idx - 3)
-                        end = min(len(flux_denoised), idx + 4)
-                        if end - start >= 3:  # 确保至少有3个点用于中值计算
-                            neighbors = flux_denoised[start:end]
-                            flux_denoised[idx] = np.median(neighbors)
-            
-            # 最后确保没有NaN值
-            flux_denoised = np.nan_to_num(flux_denoised, nan=np.median(flux_denoised[valid_mask]))
-            
-            return flux_denoised
-        
-        except Exception as e:
-            print(f"二次去噪失败: {e}")
-            import traceback
-            traceback.print_exc()
-            return flux
-    
     def process_single_spectrum(self, obsid, label):
         """处理单个光谱，适用于并行处理"""
         try:
@@ -1318,7 +1283,7 @@ class LAMOSTPreprocessor:
             data = self.read_fits_file(fits_file)
             if data is None:
                 logger.warning(f"无法读取FITS文件: {fits_file}")
-                return None
+            return None
             
             # 提取OBSID
             obsid = self._extract_obsid_from_file(fits_file)
@@ -1343,7 +1308,7 @@ class LAMOSTPreprocessor:
             if processed_spectrum is None:
                 logger.warning(f"处理光谱数据失败: {fits_file}")
                 return None
-            
+                
             # 构建结果字典
             result = {
                 'processed_spectrum': processed_spectrum,
@@ -1356,7 +1321,7 @@ class LAMOSTPreprocessor:
         except Exception as e:
             logger.error(f"处理FITS文件时出错 ({fits_file}): {e}")
             return None
-
+    
     def save_element_datasets(self, element, data):
         """为每个元素分割并保存数据集"""
         # 转换为NumPy数组
@@ -2087,7 +2052,7 @@ class LAMOSTPreprocessor:
                     
                     logger.info(f"开始处理第 {batch_index+1}/{total_batches} 批文件 (共 {len(current_batch)} 个文件)")
                     
-                    # 处理当前批次
+                # 处理当前批次
                     batch_results = {}
                     success_count = 0
                     error_count = 0
@@ -2109,10 +2074,10 @@ class LAMOSTPreprocessor:
                                 success_count += 1
                             else:
                                 error_count += 1
-                                
+                    
                             # 更新进度条
                             pbar.update(1)
-                            
+            
                         except Exception as e:
                             logger.error(f"处理FITS文件时出错 ({fits_file}): {e}")
                             error_count += 1
