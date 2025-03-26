@@ -102,13 +102,27 @@ class LAMOSTPreprocessor:
                  low_memory_mode=False):
         
         # 存储初始化参数
-        self.csv_files = csv_files if isinstance(csv_files, list) else [csv_files]
+        self.csv_files = csv_files
         self.fits_dir = fits_dir
         self.output_dir = output_dir
-        self.progress_dir = os.path.join(output_dir, 'progress')
+        self.wavelength_range = wavelength_range
+        self.n_points = n_points
+        self.log_step = log_step
+        self.compute_common_range = compute_common_range
+        self.max_workers = max_workers
+        self.batch_size = batch_size
+        self.memory_limit = memory_limit
+        self.low_memory_mode = low_memory_mode
+        
+        # 初始化其他属性
+        self.csv_data = {}
+        self.processed_data = {}
+        self.wavelengths = {}
+        self.common_wavelength_range = None
+        self.extension_cache = {}  # 添加文件扩展名缓存
         
         # 创建必要的目录
-        for directory in [output_dir, self.progress_dir]:
+        for directory in [output_dir, os.path.join(output_dir, 'progress')]:
             os.makedirs(directory, exist_ok=True)
             
         # 初始化FITS缓存
@@ -125,18 +139,6 @@ class LAMOSTPreprocessor:
             fits_count = len(glob.glob(os.path.join(fits_dir, "*")))
             logger.info(f"该目录中有 {fits_count} 个文件")
         
-        self.wavelength_range = wavelength_range
-        self.n_points = n_points
-        self.log_step = log_step
-        self.compute_common_range = compute_common_range
-        self.max_workers = max_workers
-        self.batch_size = batch_size
-        self.memory_limit = memory_limit
-        self.low_memory_mode = low_memory_mode
-        
-        # 初始化其他参数
-        self.common_wavelength_range = None
-        self.wavelength_grid = None
         self.validator = DataValidator(os.path.join(output_dir, 'validation'))
         
     def read_csv_data(self):
@@ -1318,46 +1320,38 @@ class LAMOSTPreprocessor:
             return {}
             
     def process_fits_file(self, fits_file):
-        """处理单个FITS文件并进行验证"""
-        if fits_file is None:
-            return None
-            
+        """处理单个FITS文件"""
         try:
-            # 检查文件是否是压缩格式
-            if fits_file.endswith('.gz'):
-                import gzip
-                import shutil
-                extracted_file = fits_file[:-3]  # 去掉.gz后缀
-                
-                # 如果解压后的文件不存在，则解压
-                if not os.path.exists(extracted_file):
-                    print(f"解压缩FITS文件: {os.path.basename(fits_file)}")
-                    with gzip.open(fits_file, 'rb') as f_in:
-                        with open(extracted_file, 'wb') as f_out:
-                            shutil.copyfileobj(f_in, f_out)
-                
-                # 使用解压后的文件
-                fits_file = extracted_file
-            
-            # 读取和处理FITS数据
+            # 读取FITS文件
             data_dict = self.read_fits_file(fits_file)
-            if data_dict is None:
-                return None
-                
-            # 验证数据
-            obsid = self._extract_obsid_from_file(fits_file)
-            passed, report = self.validator.validate_fits_data(data_dict, obsid)
             
-            if not passed:
-                logger.warning(f"FITS文件验证失败 ({fits_file}): {', '.join(report['issues'])}")
+            if data_dict is None:
+                logger.warning(f"无法读取FITS文件: {fits_file}")
                 return None
-                
-            return data_dict
+            
+            # 提取观测ID
+            obsid = self._extract_obsid_from_file(fits_file)
+            
+            # 处理光谱数据
+            processed_spectrum = self.process_spectrum(data_dict)
+            
+            if processed_spectrum is None:
+                logger.warning(f"处理光谱数据失败: {fits_file}")
+                return None
+            
+            # 构建结果字典
+            result = {
+                'processed_spectrum': processed_spectrum,
+                'original_filename': os.path.basename(fits_file),
+                'obsid': obsid
+            }
+            
+            return result
             
         except Exception as e:
             logger.error(f"处理FITS文件时出错 ({fits_file}): {e}")
             return None
-            
+    
     def _extract_obsid_from_file(self, fits_file):
         """从FITS文件名中提取观测ID"""
         try:
