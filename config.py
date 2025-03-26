@@ -18,14 +18,18 @@ logging.basicConfig(
 logger = logging.getLogger('config')
 
 # 数据路径配置
-data_paths = {
-    'train_data': 'data/processed/train_dataset.npz',
-    'val_data': 'data/processed/val_dataset.npz',
-    'test_data': 'data/processed/test_dataset.npz',
-    'raw_data': 'data/raw/spectra.npz',
-    'C_FE_csv': 'data/processed/C_FE_metadata.csv',
-    'MG_FE_csv': 'data/processed/MG_FE_metadata.csv',
-    'CA_FE_csv': 'data/processed/CA_FE_metadata.csv'
+DATA_CONFIG = {
+    # 数据集路径
+    'train_data': 'processed_data/train_dataset.npz',
+    'val_data': 'processed_data/val_dataset.npz',
+    'test_data': 'processed_data/test_dataset.npz',
+    'reference_data': 'processed_data/reference_dataset.npz',
+    # metadata元数据，按不同丰度存放额外信息，用于训练途中和评估(绘图等)，为预处理代码运行后生成
+    'C_FE_csv': 'processed_data/C_FE_metadata.csv',
+    'MG_FE_csv': 'processed_data/MG_FE_metadata.csv',
+    'CA_FE_csv': 'processed_data/CA_FE_metadata.csv',
+    'fits_dir': 'fits',  # FITS文件目录
+    'output_dir': 'processed_data'  # 处理后数据输出目录
 }
 
 # 数据处理配置
@@ -38,20 +42,16 @@ data_config = {
     'standardize': True,
     'remove_outliers': True,
     'outlier_threshold': 3.0,  # 标准差的倍数
-    'wavelength_range': [3800, 9000],  # 光谱波长范围
+    'wavelength_range': None,  # 设为None，表示使用最大公有波长范围
     'resample_dim': 3000,              # 光谱重采样维度
     'denoise': True,                   # 是否去噪
-    'denoise_params': [
-        {'window': 5, 'polyorder': 2},  # 第一次去噪参数
-        {'window': 7, 'polyorder': 3}   # 第二次去噪参数
-    ],
-    'denoise_window': 11,              # 去噪窗口大小 (Savitzky-Golay) - 旧参数，保留兼容性
-    'denoise_polyorder': 2,            # 去噪多项式阶数 - 旧参数，保留兼容性
+    'denoise_params': {
+        'first_pass': {'window': 5, 'polyorder': 2},  # 第一次去噪参数
+        'second_pass': {'window': 7, 'polyorder': 3}  # 第二次去噪参数
+    },
     'normalization_method': 'median',  # 归一化方法 (median, minmax, standard)
-        'n_splits': 5,                     # K折交叉验证的K值
-    'shuffle': True,                   # 是否打乱数据
-        'wavelength_grids': {
-            'u': np.linspace(3000, 4000, 1000),  # u波段波长范围
+    'wavelength_grids': {
+        'u': np.linspace(3000, 4000, 1000),  # u波段波长范围
         'g': np.linspace(4000, 5000, 1000),  # g波段波长范围
         'r': np.linspace(5000, 6000, 1000),  # r波段波长范围
         'i': np.linspace(6000, 7000, 1000),  # i波段波长范围
@@ -87,7 +87,6 @@ tuning_config = {
         'batch_size': [32, 64, 128],
         'weight_decay': [1e-6, 1e-5, 1e-4]
     },
-    'cv_folds': 3,                     # 交叉验证折数
     'early_stopping_patience': 10      # 调优时的早停耐心值
 }
 
@@ -130,30 +129,42 @@ element_config = {
     }
 }
 
-# 创建所需目录
-required_directories = [
-    'data/processed',
-    'data/raw',
-    model_config['model_dir'],
-    output_config['log_dir'],
-    output_config['results_dir'],
-    output_config['plots_dir'],
-    output_config['predictions_dir']
+# 创建必要的目录
+REQUIRED_DIRS = [
+    'fits',
+    'processed_data',
+    'processed_data/cache',
+    'processed_data/progress',
+    'models',
+    'results',
+    'plots'
 ]
 
-for directory in required_directories:
+for directory in REQUIRED_DIRS:
     os.makedirs(directory, exist_ok=True)
     print(f"已创建目录: {directory}")
 
 # 数据预处理配置
 preprocessing_config = {
-    'wavelength_range': (4000, 7000),  # 波长范围
-    'normalize': True,                  # 是否进行标准化
-    'denoise': True,                    # 是否进行去噪
-    'denoise_params': {
-        'window_size': 5,
-        'sigma': 1.0
-    }
+    'csv_files': ['C_FE.csv', 'MG_FE.csv', 'CA_FE.csv'],  # 要处理的CSV文件列表
+    'fits_dir': 'fits',                                  # FITS文件目录
+    'output_dir': 'processed_data',                      # 处理后数据输出目录
+    'wavelength_range': None,                            # 波长范围(None表示使用最大公有波长范围)
+    'n_points': None,                                    # 采样点数(None表示根据波长范围和步长自动计算)
+    'log_step': 0.0001,                                  # 对数空间重采样步长(dex)
+    'compute_common_range': True,                        # 是否计算最大公有波长范围
+    'max_workers': None,                                 # 最大工作进程数(None表示自动确定)
+    'batch_size': 20,                                    # 批处理大小
+    'memory_limit': 0.7,                                 # 内存使用限制(占总内存比例)
+    'low_memory_mode': False,                            # 低内存模式
+    'denoise': True,                                     # 是否进行去噪处理
+    'normalize': True,                                   # 是否进行归一化处理
+    'denoise_params': {                                  # 去噪参数
+        'first_pass': {'window': 5, 'polyorder': 2},     # 第一次去噪参数(Savitzky-Golay)
+        'second_pass': {'window': 7, 'polyorder': 3}     # 第二次去噪参数
+    },
+    'normalization_method': 'median',                    # 归一化方法
+    'split_dataset': True                                # 是否划分数据集
 }
 
 # 评估配置
@@ -168,9 +179,25 @@ for dir_name in output_config.values():
     os.makedirs(dir_name, exist_ok=True)
     logger.info(f"已创建目录: {dir_name}")
 
+# 缓存配置
+cache_config = {
+    'checkpoint_interval': 100,  # 每处理100个样本保存一次检查点
+    'validation_metrics': {
+        'min_data_size': 100,    # 最小数据量
+        'max_memory_usage': 0.8,  # 最大内存使用比例
+        'required_fields': ['data', 'metadata', 'validation_metrics']
+    },
+    'cache_dirs': {
+        'preprocessing': 'cache/preprocessing',
+        'training': 'cache/training',
+        'evaluation': 'cache/evaluation',
+        'prediction': 'cache/prediction'
+    }
+}
+
 # 将所有配置合并到一个字典中
 CONFIG = {
-    'data_paths': data_paths,
+    'data_paths': DATA_CONFIG,
     'data_config': data_config,
     'model_config': model_config,
     'training_config': training_config,
@@ -179,5 +206,7 @@ CONFIG = {
     'mist_isochrones': mist_isochrones,
     'element_config': element_config,
     'preprocessing_config': preprocessing_config,
-    'evaluation_config': evaluation_config
+    'evaluation_config': evaluation_config,
+    'cache_config': cache_config,
+    'in_colab': False  # 添加一个标志表示是否在Colab环境中运行
 } 

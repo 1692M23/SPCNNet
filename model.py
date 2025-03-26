@@ -145,7 +145,7 @@ class SpectralResCNN(nn.Module):
     3. 使用BatchNorm和Dropout防止过拟合
     4. 渐进式降维，保留重要特征
     """
-    def __init__(self, input_size):
+    def __init__(self, input_size, dropout_rate=0.5):
         super(SpectralResCNN, self).__init__()
         
         # 输入处理层：使用更小的卷积核和更少的通道数
@@ -160,7 +160,7 @@ class SpectralResCNN(nn.Module):
             ResidualBlock(16, 32, kernel_size=3),  # 减少通道数
             ResidualBlock(32, 32, kernel_size=3),
             nn.MaxPool1d(kernel_size=2, stride=2),  # 减小池化步长
-            nn.Dropout(0.1)  # 减少dropout率
+            nn.Dropout(dropout_rate)  # 减少dropout率
         )
         
         # 残差块组2：提取中级特征
@@ -168,7 +168,7 @@ class SpectralResCNN(nn.Module):
             ResidualBlock(32, 64, kernel_size=3),
             ResidualBlock(64, 64, kernel_size=3),
             nn.MaxPool1d(kernel_size=2, stride=2),
-            nn.Dropout(0.1)
+            nn.Dropout(dropout_rate)
         )
         
         # 残差块组3：提取高级特征
@@ -176,7 +176,7 @@ class SpectralResCNN(nn.Module):
             ResidualBlock(64, 128, kernel_size=3),
             ResidualBlock(128, 128, kernel_size=3),
             nn.MaxPool1d(kernel_size=2, stride=2),
-            nn.Dropout(0.1)
+            nn.Dropout(dropout_rate)
         )
         
         # 自适应池化层
@@ -186,21 +186,23 @@ class SpectralResCNN(nn.Module):
         self.fc = nn.Sequential(
             nn.Linear(128, 256),
             nn.LeakyReLU(0.1),
-            nn.Dropout(0.2),
+            nn.Dropout(dropout_rate),
             
             nn.Linear(256, 128),
             nn.LeakyReLU(0.1),
-            nn.Dropout(0.2),
+            nn.Dropout(dropout_rate),
             
             nn.Linear(128, 64),
             nn.LeakyReLU(0.1),
-            nn.Dropout(0.2),
+            nn.Dropout(dropout_rate),
             
             nn.Linear(64, 1)
         )
         
         # 初始化权重
         self._initialize_weights()
+        
+        self.dropout_rate = dropout_rate
     
     def _initialize_weights(self):
         """使用Kaiming初始化权重"""
@@ -214,11 +216,12 @@ class SpectralResCNN(nn.Module):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 nn.init.constant_(m.bias, 0)
     
-    def forward(self, x):
+    def forward(self, x, training=False):
         """
         前向传播
         Args:
             x: 输入光谱，形状为(batch_size, channels, n_pixels)
+            training: 是否使用训练模式（用于MC-Dropout）
         Returns:
             预测的元素丰度值
         """
@@ -226,9 +229,9 @@ class SpectralResCNN(nn.Module):
         x = self.input_conv(x)
         
         # 残差块处理
-        x = self.res_block1(x)  # 低级特征
-        x = self.res_block2(x)  # 中级特征
-        x = self.res_block3(x)  # 高级特征
+        x = self.res_block1(x)
+        x = self.res_block2(x)
+        x = self.res_block3(x)
         
         # 全局池化
         x = self.adaptive_pool(x)
@@ -236,10 +239,87 @@ class SpectralResCNN(nn.Module):
         # 展平
         x = x.view(x.size(0), -1)
         
-        # 全连接层
-        x = self.fc(x)
+        # 全连接层（使用功能性dropout以支持MC-Dropout）
+        for i, layer in enumerate(self.fc):
+            x = layer(x)
+            if isinstance(layer, nn.Linear) and i < len(self.fc) - 1:
+                x = F.leaky_relu(x, 0.1)
+                # 在训练或MC模式下，应用dropout
+                if training or self.training:
+                    x = F.dropout(x, p=self.dropout_rate, training=True)
         
         return x
+
+class SpectralResCNNEnsemble:
+    """光谱CNN集成模型"""
+    
+    def __init__(self, input_size, num_models=3, dropout_rate=0.5):
+        self.input_size = input_size
+        self.num_models = num_models
+        self.dropout_rate = dropout_rate
+        self.models = []
+        
+        # 创建多个模型实例
+        for i in range(num_models):
+            model = SpectralResCNN(input_size, dropout_rate=dropout_rate)
+            self.models.append(model)
+    
+    def train(self, train_loader, val_loader, element, config):
+        """训练所有模型"""
+        results = []
+        for i, model in enumerate(self.models):
+            logger.info(f"训练模型 {i+1}/{self.num_models}...")
+            train_losses, val_losses = train_model(
+                model=model,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                element=f"{element}_model{i+1}",
+                config=config
+            )
+            results.append((train_losses, val_losses))
+        return results
+    
+    def predict(self, x, device=None, mc_samples=5):
+        """预测函数，支持MC-Dropout不确定性估计"""
+        if device is None:
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            
+        # 确保输入是张量
+        if not isinstance(x, torch.Tensor):
+            x = torch.FloatTensor(x)
+            if len(x.shape) == 2:
+                x = x.unsqueeze(1)  # 添加通道维度
+                
+        x = x.to(device)
+        
+        # 收集所有预测结果
+        all_predictions = []
+        
+        for model in self.models:
+            model.eval()
+            model_predictions = []
+            
+            # 进行MC-Dropout采样
+            for _ in range(mc_samples):
+                with torch.no_grad():
+                    # 启用dropout(training=True)进行MC采样
+                    outputs = model(x, training=True)
+                    model_predictions.append(outputs.cpu().numpy())
+            
+            # 将模型的所有MC预测堆叠
+            model_predictions = np.stack(model_predictions, axis=0)
+            all_predictions.append(model_predictions)
+        
+        # 合并所有模型的预测结果
+        all_predictions = np.stack(all_predictions, axis=0)  # [num_models, mc_samples, batch, 1]
+        
+        # 计算最终预测值（所有模型和样本的平均值）
+        predictions = np.mean(all_predictions, axis=(0, 1))
+        
+        # 计算预测不确定性（所有预测的标准差）
+        uncertainty = np.std(all_predictions, axis=(0, 1))
+        
+        return predictions.squeeze(), uncertainty.squeeze()
 
 # =============== 2. 训练相关 ===============
 def _train_epoch(model, train_loader, criterion, optimizer, device):

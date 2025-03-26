@@ -1,6 +1,6 @@
 # 恒星光谱元素丰度预测系统
 
-本项目使用深度学习方法从LAMOST光谱数据中预测恒星的元素丰度值（C_FE、MG_FE、CA_FE）。通过残差卷积神经网络模型对光谱数据进行分析，可以快速准确地估计这些元素的丰度值。
+本项目使用深度学习方法从LAMOST光谱数据中预测恒星的元素丰度值（X_FE，其中X代表C、Mg、Ca等元素）。通过残差卷积神经网络模型对光谱数据进行分析，可以快速准确地估计这些元素的丰度值。
 
 ## 项目结构
 
@@ -19,11 +19,11 @@
 │   ├── train_dataset.npz  # 训练集
 │   ├── val_dataset.npz    # 验证集
 │   ├── test_dataset.npz   # 测试集
-│   └── processed_data.npz # 全部处理后的数据
-├── prediction_data/     # 预测数据集处理结果
-├── C_FE.csv             # C元素丰度参考数据
-├── MG_FE.csv            # Mg元素丰度参考数据
-├── CA_FE.csv            # Ca元素丰度参考数据
+│   ├── reference_dataset.npz # 参考数据集处理结果（训练+验证+测试）
+│   └── prediction_dataset.npz # 预测数据集处理结果
+├── X_FE.csv             # 元素丰度参考数据
+├── galah_X_FE.csv       # GALAH数据集元素丰度数据
+├── LASP_X_FE.csv        # LASP数据集元素丰度数据
 ├── models/              # 保存的模型
 ├── results/             # 评估结果
 └── plots/               # 图表输出
@@ -43,8 +43,8 @@
 
 ### 最新改进
 1. **双数据集处理机制**：支持参考数据集和预测数据集两种模式
-   - 参考数据集：参与预处理、划分和交叉验证（CA_FE.csv等）
-   - 预测数据集：仅用于预测和评估（galah_CA_FE.csv等）
+   - 参考数据集：参与预处理和划分，用于训练、验证和测试（X_FE.csv等）
+   - 预测数据集：仅参与预处理，用于预测和评估（galah_X_FE.csv等）
 
 2. **增强的数据验证**：
    - 自动检测和过滤无效数据
@@ -100,13 +100,13 @@
 !python preprocessdata.py
 
 # 指定参考数据集
-!python preprocessdata.py --reference CA_FE.csv
+!python preprocessdata.py --reference X_FE.csv
 
 # 同时指定参考和预测数据集
-!python preprocessdata.py --reference CA_FE.csv --prediction galah_CA_FE.csv
+!python preprocessdata.py --reference X_FE.csv --prediction galah_X_FE.csv
 
 # 不使用缓存，重新处理所有数据
-!python preprocessdata.py --reference CA_FE.csv --no_resume
+!python preprocessdata.py --reference X_FE.csv --no_resume
 ```
 
 ### 2. 训练与超参数调优
@@ -218,4 +218,94 @@ joblib
 
 ```bash
 pip install numpy pandas matplotlib torch scikit-learn astropy scipy seaborn psutil tqdm joblib
-``` 
+```
+
+## 系统架构
+
+### 数据预处理
+- 读取原始LAMOST FITS光谱数据
+- 去噪、波长定标和红移校正
+- 重采样和归一化
+- 引入双数据集处理机制，分别处理参考数据集和预测数据集
+- 参考数据集按7:1:2比例划分为训练集、验证集和测试集
+
+### 缓存机制
+系统实现了高效的缓存机制，主要包括以下特点：
+1. 检查点保存
+   - 每处理1000个样本自动保存一次检查点
+   - 支持断点续传，可以从上次中断处继续处理
+   - 检查点包含完整的处理状态和验证指标
+
+2. 数据验证
+   - 自动验证缓存数据的完整性
+   - 检查数据格式和必要字段
+   - 监控内存使用情况
+
+3. 缓存目录结构
+   - preprocessing/: 预处理缓存
+   - training/: 训练过程缓存
+   - evaluation/: 评估结果缓存
+   - prediction/: 预测结果缓存
+
+4. 性能优化
+   - 避免重复计算
+   - 支持增量更新
+   - 自动清理过期缓存
+
+### 模型架构
+- 使用CNN残差网络进行光谱特征提取
+- 支持多元素丰度同时预测
+- 集成学习策略，提高预测稳定性
+- MC-Dropout用于不确定性估计
+
+### 评估系统
+- 支持多元素丰度评估
+- 提供详细的评估指标
+- 可视化预测结果
+- 按恒星类型（矮星/巨星）分组评估
+
+## 使用说明
+
+### 环境配置
+1. 安装依赖：
+```bash
+pip install -r requirements.txt
+```
+
+2. 配置参数：
+- 在 `config.py` 中设置相关参数
+- 包括数据路径、模型参数、训练参数等
+
+### 运行流程
+1. 数据预处理：
+```bash
+python preprocessdata.py
+```
+
+2. 模型训练：
+```bash
+python main.py --train
+```
+
+3. 预测评估：
+```bash
+python main.py --predict
+```
+
+### 注意事项
+1. 首次运行时会自动创建缓存目录
+2. 程序中断后可以从检查点继续运行
+3. 定期检查日志文件了解处理进度
+4. 确保有足够的磁盘空间存储缓存文件
+
+## 性能优化
+1. 使用缓存机制避免重复计算
+2. 支持断点续传，提高处理效率
+3. 自动验证数据完整性
+4. 内存使用优化
+
+## 未来改进
+1. 优化缓存清理策略
+2. 添加分布式处理支持
+3. 改进数据验证机制
+4. 优化内存管理 

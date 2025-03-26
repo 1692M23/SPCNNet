@@ -9,6 +9,8 @@ import os
 import subprocess
 import sys
 import logging
+import pkg_resources
+from packaging import version
 
 # 配置日志
 logging.basicConfig(
@@ -32,6 +34,26 @@ def create_directories():
         os.makedirs(directory, exist_ok=True)
         logger.info(f"已创建目录: {directory}")
 
+def get_installed_version(package_name):
+    """获取已安装的包版本"""
+    try:
+        return pkg_resources.get_distribution(package_name).version
+    except pkg_resources.DistributionNotFound:
+        return None
+
+def parse_requirement(requirement):
+    """解析依赖要求，返回包名和版本要求"""
+    parts = requirement.split('>=')
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return requirement, None
+
+def check_version(current_version, required_version):
+    """检查版本是否满足要求"""
+    if not current_version or not required_version:
+        return False
+    return version.parse(current_version) >= version.parse(required_version)
+
 def install_requirements():
     """安装依赖包"""
     requirements = [
@@ -48,14 +70,34 @@ def install_requirements():
         'joblib>=1.0.0'
     ]
     
-    logger.info("安装依赖包...")
+    logger.info("检查依赖包...")
     try:
-        for package in requirements:
-            subprocess.run([sys.executable, '-m', 'pip', 'install', package], check=True)
-        logger.info("依赖包安装成功")
+        for requirement in requirements:
+            package_name, required_version = parse_requirement(requirement)
+            current_version = get_installed_version(package_name)
+            
+            if current_version and required_version:
+                if check_version(current_version, required_version):
+                    logger.info(f"已安装 {package_name} {current_version} (满足要求 >={required_version})")
+                    continue
+                else:
+                    logger.info(f"更新 {package_name} {current_version} -> >={required_version}")
+            else:
+                logger.info(f"安装 {package_name} >={required_version if required_version else ''}")
+            
+            try:
+                subprocess.run([sys.executable, '-m', 'pip', 'install', requirement], 
+                             check=True, 
+                             capture_output=True,
+                             text=True)
+            except subprocess.CalledProcessError as e:
+                logger.error(f"安装 {requirement} 失败: {e.stderr}")
+                return False
+                
+        logger.info("所有依赖包安装成功")
         return True
-    except subprocess.CalledProcessError as e:
-        logger.error(f"安装依赖包失败: {e}")
+    except Exception as e:
+        logger.error(f"安装依赖包过程出错: {e}")
         return False
 
 def setup_environment():

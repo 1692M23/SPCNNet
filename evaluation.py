@@ -88,7 +88,7 @@ def load_csv_metadata(csv_file):
         csv_file (str): CSV文件路径
         
     返回:
-        pandas.DataFrame: 包含spec、teff和logg的DataFrame
+        pandas.DataFrame: 包含obsid、teff和logg的DataFrame
     """
     # 检查缓存
     cache_key = f"metadata_{os.path.basename(csv_file)}"
@@ -99,8 +99,8 @@ def load_csv_metadata(csv_file):
     
     try:
         df = pd.read_csv(csv_file)
-        if 'spec' not in df.columns or 'teff' not in df.columns or 'logg' not in df.columns:
-            logger.error(f"CSV文件 {csv_file} 缺少必要的列")
+        if 'obsid' not in df.columns or 'teff' not in df.columns or 'logg' not in df.columns:
+            logger.error(f"CSV文件 {csv_file} 缺少必要的列(obsid, teff, logg)")
             return None
             
         # 保存到缓存
@@ -125,13 +125,13 @@ def load_test_predictions(elements=None, csv_files=None):
         dict: 包含每个元素预测结果和元数据的字典
     """
     if elements is None:
-        elements = config.training_config['elements']
+        elements = config.CONFIG['elements']
     
     if csv_files is None:
         csv_files = {
-            'C_FE': config.data_paths.get('C_FE_csv', ''),
-            'MG_FE': config.data_paths.get('MG_FE_csv', ''),
-            'CA_FE': config.data_paths.get('CA_FE_csv', '')
+            'C_FE': os.path.join('processed_data', 'C_FE_metadata.csv'),
+            'MG_FE': os.path.join('processed_data', 'MG_FE_metadata.csv'),
+            'CA_FE': os.path.join('processed_data', 'CA_FE_metadata.csv')
         }
     
     results = {}
@@ -153,7 +153,7 @@ def load_test_predictions(elements=None, csv_files=None):
                 # 如果没有CSV文件，创建一个简单的元数据
                 num_samples = len(element_results['true_values'])
                 element_results['metadata'] = pd.DataFrame({
-                    'spec': range(num_samples),
+                    'obsid': [f"OBSID{i}" for i in range(num_samples)],
                     'teff': range(num_samples),
                     'logg': range(num_samples)
                 })
@@ -542,7 +542,7 @@ def load_catalog_data(catalog_file, element_name):
         element_name (str): 元素名称
         
     返回:
-        pd.DataFrame: 包含光谱文件名和真实元素丰度的数据框
+        pd.DataFrame: 包含OBSID和真实元素丰度的数据框
     """
     # 检查缓存
     cache_key = f"catalog_{os.path.basename(catalog_file)}_{element_name}"
@@ -556,16 +556,16 @@ def load_catalog_data(catalog_file, element_name):
         df = pd.read_csv(catalog_file)
         
         # 检查是否包含必需列
-        if 'spec' not in df.columns:
-            logger.error(f"星表文件 {catalog_file} 中缺少'spec'列")
+        if 'obsid' not in df.columns:
+            logger.error(f"星表文件 {catalog_file} 中缺少'obsid'列")
             return None
             
         # 确保元素丰度列在最后一列
         abundance_col = df.columns[-1]
         logger.info(f"元素丰度列名: {abundance_col}")
         
-        # 提取只需要的列：光谱文件名和元素丰度
-        result_df = df[['spec', abundance_col]].copy()
+        # 提取只需要的列：OBSID和元素丰度
+        result_df = df[['obsid', abundance_col]].copy()
         result_df.rename(columns={abundance_col: 'true_abundance'}, inplace=True)
         
         logger.info(f"已加载 {len(result_df)} 个样本")
@@ -585,7 +585,7 @@ def predict_catalog_spectra(spectra_df, element, fits_dir='preFits', model=None)
     预测星表中光谱的元素丰度
     
     参数:
-        spectra_df (pd.DataFrame): 包含光谱文件名的数据框
+        spectra_df (pd.DataFrame): 包含OBSID的数据框
         element (str): 元素名称
         fits_dir (str): FITS文件目录
         model: 预训练模型，如果为None则加载
@@ -608,48 +608,30 @@ def predict_catalog_spectra(spectra_df, element, fits_dir='preFits', model=None)
     with ProgressManager(len(spectra_df), desc=f"预测 {element} 元素丰度") as progress:
         for idx, row in spectra_df.iterrows():
             try:
-                spec_name = row['spec']
-                fits_file = os.path.join(fits_dir, f"{spec_name}.fits.gz")
+                obsid = row['obsid']
                 
-                if not os.path.exists(fits_file):
-                    # 尝试其他可能的后缀
-                    alt_fits_file = os.path.join(fits_dir, f"{spec_name}.fits")
-                    if os.path.exists(alt_fits_file):
-                        fits_file = alt_fits_file
-                    else:
-                        logger.warning(f"找不到FITS文件: {fits_file}")
-                        continue
+                # 查找并读取FITS文件
+                fits_file = preprocessor._find_fits_file(obsid)
+                if fits_file is None:
+                    logger.warning(f"找不到OBSID为{obsid}的FITS文件")
+                    continue
                 
-                # 读取并预处理光谱
-                wavelength, flux = preprocessor.read_fits_file(fits_file)
-                if wavelength is None or flux is None:
-                    logger.warning(f"无法读取光谱: {fits_file}")
+                # 预处理光谱数据
+                processed_data = preprocessor.process_single_spectrum(obsid, None)
+                if not processed_data or 'spectrum' not in processed_data:
+                    logger.warning(f"处理OBSID为{obsid}的光谱失败")
                     continue
                     
-                # 预处理光谱
-                # 去噪
-                flux = preprocessor.denoise_spectrum(wavelength, flux)
-                flux = preprocessor.denoise_spectrum_second(wavelength, flux)
-                
-                # 重采样
-                resampled_flux = preprocessor.resample_spectrum(wavelength, flux)
-                if resampled_flux is None:
-                    logger.warning(f"无法重采样光谱: {fits_file}")
-                    continue
-                    
-                # 归一化
-                normalized_flux = preprocessor.normalize_spectrum(resampled_flux)
-                if normalized_flux is None:
-                    logger.warning(f"无法归一化光谱: {fits_file}")
-                    continue
+                # 获取处理后的光谱
+                spectrum = processed_data['spectrum']
                 
                 # 转换为张量并预测
-                input_tensor = torch.tensor(normalized_flux, dtype=torch.float32).unsqueeze(0)
+                input_tensor = torch.tensor(spectrum, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
                 abundance_pred = predict(model, input_tensor, config.training_config['device'])
                 
                 # 保存结果
                 results.append({
-                    'spec_name': spec_name,
+                    'obsid': obsid,
                     'true_abundance': row['true_abundance'],
                     'predicted_abundance': float(abundance_pred)
                 })
@@ -658,7 +640,7 @@ def predict_catalog_spectra(spectra_df, element, fits_dir='preFits', model=None)
                 progress.update(1)
                     
             except Exception as e:
-                logger.error(f"处理光谱 {row['spec']} 时出错: {e}")
+                logger.error(f"处理OBSID {row['obsid']} 时出错: {e}")
                 import traceback
                 traceback.print_exc()
     
@@ -878,8 +860,8 @@ def plot_teff_logg_abundance(element, catalog_type, plot_dir=None, figsize=(10, 
         return
     
     # 合并数据
-    merged_df = pd.merge(pred_df, catalog_df[['spec', 'teff', 'logg']], 
-                         left_on='spec_name', right_on='spec', how='inner')
+    merged_df = pd.merge(pred_df, catalog_df[['obsid', 'teff', 'logg']], 
+                         left_on='obsid', right_on='obsid', how='inner')
     
     # 创建两个子图: 真实丰度和预测丰度
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
@@ -994,6 +976,85 @@ def evaluate_catalogs_all_elements(elements=None, catalog_types=None, save_plots
     
     return all_results
 
+def evaluate_element_by_stellar_type(model, test_data, element, logg_threshold=4.0, config=None):
+    """按恒星类型评估元素丰度预测性能
+    
+    参数:
+        model: 训练好的模型
+        test_data: 测试数据(X, y, metadata)
+        element: 元素名称
+        logg_threshold: 矮星/巨星的logg阈值
+        config: 配置对象
+    
+    返回:
+        评估结果字典
+    """
+    X, y, metadata = test_data
+    
+    # 获取logg值（如果有）
+    has_logg = 'logg' in metadata.columns
+    
+    # 进行预测
+    device = config.training_config['device']
+    predictions, uncertainties = model.predict(X, device=device)
+    
+    # 计算整体评估指标
+    metrics = {
+        'mae': np.mean(np.abs(predictions - y)),
+        'rmse': np.sqrt(np.mean((predictions - y) ** 2)),
+        'bias': np.mean(predictions - y),
+        'scatter': np.std(predictions - y)
+    }
+    
+    # 如果有logg值，按恒星类型分组评估
+    if has_logg:
+        # 矮星掩码 (logg >= threshold)
+        dwarfs_mask = metadata['logg'] >= logg_threshold
+        
+        # 矮星评估
+        if np.sum(dwarfs_mask) > 0:
+            dwarfs_pred = predictions[dwarfs_mask]
+            dwarfs_true = y[dwarfs_mask]
+            metrics['dwarfs'] = {
+                'count': np.sum(dwarfs_mask),
+                'mae': np.mean(np.abs(dwarfs_pred - dwarfs_true)),
+                'rmse': np.sqrt(np.mean((dwarfs_pred - dwarfs_true) ** 2)),
+                'bias': np.mean(dwarfs_pred - dwarfs_true),
+                'scatter': np.std(dwarfs_pred - dwarfs_true)
+            }
+        
+        # 巨星评估
+        giants_mask = metadata['logg'] < logg_threshold
+        if np.sum(giants_mask) > 0:
+            giants_pred = predictions[giants_mask]
+            giants_true = y[giants_mask]
+            metrics['giants'] = {
+                'count': np.sum(giants_mask),
+                'mae': np.mean(np.abs(giants_pred - giants_true)),
+                'rmse': np.sqrt(np.mean((giants_pred - giants_true) ** 2)),
+                'bias': np.mean(giants_pred - giants_true),
+                'scatter': np.std(giants_pred - giants_true)
+            }
+    
+    # 打印评估结果
+    logger.info(f"{element}元素丰度预测评估结果:")
+    logger.info(f"  整体MAE: {metrics['mae']:.4f}, RMSE: {metrics['rmse']:.4f}")
+    logger.info(f"  偏差: {metrics['bias']:.4f}, 散度: {metrics['scatter']:.4f}")
+    
+    if has_logg and 'dwarfs' in metrics:
+        logger.info(f"  矮星(样本数: {metrics['dwarfs']['count']}): "
+                   f"MAE: {metrics['dwarfs']['mae']:.4f}, "
+                   f"偏差: {metrics['dwarfs']['bias']:.4f}, "
+                   f"散度: {metrics['dwarfs']['scatter']:.4f}")
+    
+    if has_logg and 'giants' in metrics:
+        logger.info(f"  巨星(样本数: {metrics['giants']['count']}): "
+                   f"MAE: {metrics['giants']['mae']:.4f}, "
+                   f"偏差: {metrics['giants']['bias']:.4f}, "
+                   f"散度: {metrics['giants']['scatter']:.4f}")
+    
+    return metrics
+
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='元素丰度预测模型评估工具')
@@ -1027,7 +1088,7 @@ def main():
             save_plots=not args.no_plots
         )
         logger.info("星表评估完成")
-    else:
+        else:
         # 执行测试集评估
         logger.info("执行测试集评估")
         results = evaluate_all_elements(

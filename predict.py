@@ -17,6 +17,7 @@ from torch.utils.data import TensorDataset, DataLoader
 # 导入自定义模块
 import config
 from model import load_trained_model, predict
+from multi_element_processor import MultiElementProcessor
 from utils import CacheManager, ProgressManager, ask_clear_cache
 
 # 配置日志
@@ -89,41 +90,73 @@ def load_data(data_path):
             df = pd.read_csv(data_path)
             logger.info(f"CSV文件包含以下列: {df.columns.tolist()}")
             
-            # 假设CSV文件中包含spec列和其他元数据列
-            if 'spec' not in df.columns:
-                logger.error("CSV文件缺少'spec'列")
+            # 假设CSV文件中包含obsid列和其他元数据列
+            if 'obsid' not in df.columns:
+                logger.error("CSV文件缺少'obsid'列，需要OBSID来匹配FITS文件")
                 return None, None
             
-            # 从CSV的spec列解析光谱数据
-            spectra = []
-            for spec_str in df['spec']:
-                try:
-                    # 假设光谱数据存储为空格分隔的数字字符串
-                    spectrum = np.array([float(x) for x in spec_str.split()])
-                    spectra.append(spectrum)
-                except:
-                    logger.warning("解析光谱数据失败，尝试其他方法")
-                    # 如果失败，尝试其他解析方式
+            # 从预处理模块获取处理好的光谱数据
+            from preprocessdata import LAMOSTPreprocessor
+            
+            try:
+                # 初始化预处理器
+                preprocessor = LAMOSTPreprocessor()
+                
+                # 获取所有OBSID
+                obsids = df['obsid'].values
+                logger.info(f"从CSV文件加载了{len(obsids)}个OBSID")
+                
+                # 处理每个OBSID对应的光谱
+                spectra = []
+                valid_indices = []
+                
+                for i, obsid in enumerate(obsids):
                     try:
-                        spectrum = np.array(eval(spec_str))
-                        spectra.append(spectrum)
-                    except:
-                        logger.error("无法解析光谱数据")
-                        return None, None
-            
-            spectra = np.array(spectra)
-            logger.info(f"成功从CSV文件加载光谱数据，形状: {spectra.shape}")
-            
-            # 获取元数据（除spec列外的所有列）
-            metadata = df.drop('spec', axis=1) if len(df.columns) > 1 else None
-            
-            # 保存到缓存
-            cache_manager.set_cache(cache_key, {
-                'spectra': spectra,
-                'metadata': metadata
-            })
-            
-            return spectra, metadata
+                        # 查找并读取FITS文件
+                        fits_file = preprocessor._find_fits_file(obsid)
+                        if fits_file is None:
+                            logger.warning(f"找不到OBSID为{obsid}的FITS文件")
+                            continue
+                            
+                        # 读取和预处理光谱
+                        wavelength, flux, _ = preprocessor.read_fits_file(fits_file)
+                        if wavelength is None or flux is None:
+                            logger.warning(f"无法读取FITS文件: {fits_file}")
+                            continue
+                        
+                        # 预处理光谱数据
+                        processed_data = preprocessor.process_single_spectrum(obsid, None)
+                        if processed_data and 'spectrum' in processed_data:
+                            spectra.append(processed_data['spectrum'])
+                            valid_indices.append(i)
+                        else:
+                            logger.warning(f"处理OBSID为{obsid}的光谱失败")
+                    except Exception as e:
+                        logger.warning(f"处理OBSID为{obsid}的光谱时出错: {str(e)}")
+                
+                if not spectra:
+                    logger.error("没有成功处理任何光谱")
+                    return None, None
+                    
+                spectra = np.array(spectra)
+                logger.info(f"成功处理{len(spectra)}个光谱，形状: {spectra.shape}")
+                
+                # 获取有效的元数据
+                metadata = df.iloc[valid_indices].reset_index(drop=True) if len(df.columns) > 1 else None
+                
+                # 保存到缓存
+                cache_manager.set_cache(cache_key, {
+                    'spectra': spectra,
+                    'metadata': metadata
+                })
+                
+                return spectra, metadata
+                
+            except Exception as e:
+                logger.error(f"处理CSV文件中的光谱数据失败: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                return None, None
             
         else:
             logger.error(f"不支持的文件格式: {data_path}")
@@ -244,6 +277,70 @@ def save_predictions(predictions, metadata=None, output_dir=None):
     logger.info(f"已保存预测结果到: {output_file}")
     
     return output_file
+
+def predict_multiple_elements(csv_file, elements=None, models=None, config=None):
+    """预测多个元素丰度
+    
+    参数:
+        csv_file: 包含obsid的CSV文件
+        elements: 要预测的元素列表
+        models: 训练好的模型字典
+        config: 配置对象
+    
+    返回:
+        predictions_df: 包含预测结果的DataFrame
+    """
+    # 读取CSV文件
+    df = pd.read_csv(csv_file)
+    
+    # 验证obsid列是否存在
+    if 'obsid' not in df.columns:
+        raise ValueError(f"CSV文件必须包含obsid列，现有列: {df.columns}")
+    
+    # 初始化数据处理器
+    processor = MultiElementProcessor(fits_dir=config.data_paths['fits_dir'])
+    
+    # 初始化结果字典
+    predictions = {}
+    uncertainties = {}
+    
+    # 处理每个obsid
+    for i, obsid in enumerate(df['obsid']):
+        # 获取光谱数据
+        spectrum = processor.get_spectrum(obsid)
+        if spectrum is None:
+            logger.warning(f"无法处理OBSID为{obsid}的光谱，跳过")
+            continue
+        
+        # 预测每个元素
+        for element in elements:
+            if element not in models:
+                logger.warning(f"找不到{element}的模型，跳过")
+                continue
+                
+            # 进行预测
+            model = models[element]
+            pred, unc = model.predict(spectrum[np.newaxis, :], 
+                                     device=config.training_config['device'])
+            
+            # 添加到结果字典
+            if element not in predictions:
+                predictions[element] = np.zeros(len(df)) * np.nan
+                uncertainties[element] = np.zeros(len(df)) * np.nan
+                
+            predictions[element][i] = pred
+            uncertainties[element][i] = unc
+    
+    # 创建结果DataFrame
+    result_df = df.copy()
+    
+    # 添加预测结果
+    for element in elements:
+        if element in predictions:
+            result_df[f'{element}_pred'] = predictions[element]
+            result_df[f'{element}_unc'] = uncertainties[element]
+    
+    return result_df
 
 def main():
     """主函数"""

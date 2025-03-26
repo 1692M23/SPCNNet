@@ -14,12 +14,14 @@ import torch
 from torch.utils.data import TensorDataset, DataLoader
 import matplotlib.pyplot as plt
 from sklearn.model_selection import ParameterGrid
+import pandas as pd
 
 # 导入自定义模块
 import config
-from model import SpectralResCNN, train_model, evaluate_model, load_trained_model
+from model import SpectralResCNN, SpectralResCNNEnsemble, train_model, evaluate_model, load_trained_model
 from evaluation import evaluate_all_elements, plot_predictions_vs_true, plot_metrics_comparison
 from utils import CacheManager, ProgressManager, ask_clear_cache
+from multi_element_processor import MultiElementProcessor
 
 # 配置日志
 logging.basicConfig(
@@ -157,14 +159,10 @@ def setup_training_directories():
     """
     创建训练所需的目录
     """
-    os.makedirs(config.model_config['model_dir'], exist_ok=True)
-    os.makedirs(config.output_config['log_dir'], exist_ok=True)
-    os.makedirs(config.output_config['results_dir'], exist_ok=True)
-    os.makedirs(config.output_config['plots_dir'], exist_ok=True)
-    os.makedirs(config.output_config['predictions_dir'], exist_ok=True)
-    os.makedirs(config.output_config['cache_dir'], exist_ok=True)
-    
-    logger.info(f"已创建输出目录")
+    # 创建必要的目录
+    for directory in config.REQUIRED_DIRS:
+        os.makedirs(directory, exist_ok=True)
+        logger.info(f"已创建目录: {directory}")
 
 def train_and_evaluate_model(train_loader, val_loader, test_loader, element, config):
     """
@@ -325,58 +323,35 @@ def visualize_training(element, train_metrics, val_metrics, output_dir=None):
     
     logger.info(f"已保存训练过程可视化图表")
 
-def process_element(element, train_data_path, val_data_path, test_data_path=None,
-                   tune_hyperparams=False, batch_size=32, device=None):
-    """
-    处理单个元素的完整流程：数据加载、超参数调优、训练、评估
-    
-    参数:
-        element (str): 元素名称
-        train_data_path (str): 训练数据路径
-        val_data_path (str): 验证数据路径
-        test_data_path (str): 测试数据路径
-        tune_hyperparams (bool): 是否进行超参数调优
-        batch_size (int): 批次大小
-        device (str): 计算设备
+def process_element(element, config=None):
+    """处理单个元素的训练和评估"""
+    if config is None:
+        config = config.CONFIG
         
-    返回:
-        tuple: (model, test_metrics) 模型和测试指标
-    """
-    # 检查缓存
-    cache_key = f"model_{element}"
-    cached_model = cache_manager.get_cache(cache_key)
-    if cached_model is not None:
-        logger.info(f"从缓存加载模型: {element}")
-        return cached_model['model'], cached_model['metrics']
+    # 加载数据集
+    train_data = load_dataset(os.path.join('processed_data', 'train_dataset.npz'), element)
+    val_data = load_dataset(os.path.join('processed_data', 'val_dataset.npz'), element)
+    test_data = load_dataset(os.path.join('processed_data', 'test_dataset.npz'), element)
     
-    # 加载训练数据
-    train_spectra, train_labels = load_dataset(train_data_path, element)
-    if train_spectra is None or train_labels is None:
-        logger.error(f"加载训练数据失败，退出处理 {element}")
-        return None, None
-    
-    # 加载验证数据
-    val_spectra, val_labels = load_dataset(val_data_path, element)
-    if val_spectra is None or val_labels is None:
-        logger.error(f"加载验证数据失败，退出处理 {element}")
-        return None, None
-    
+    if train_data[0] is None or val_data[0] is None:
+        logger.error(f"加载{element}的数据集失败")
+        return None
+        
     # 创建数据加载器
-    train_loader = create_data_loaders(train_spectra, train_labels, batch_size)
-    val_loader = create_data_loaders(val_spectra, val_labels, batch_size, shuffle=False)
-    
-    # 加载测试数据（如果提供）
+    train_loader = create_data_loaders(train_data[0], train_data[1], 
+                                     batch_size=config['training']['batch_size'])
+    val_loader = create_data_loaders(val_data[0], val_data[1], 
+                                   batch_size=config['training']['batch_size'])
     test_loader = None
-    if test_data_path:
-        test_spectra, test_labels = load_dataset(test_data_path, element)
-        if test_spectra is not None and test_labels is not None:
-            test_loader = create_data_loaders(test_spectra, test_labels, batch_size, shuffle=False)
+    if test_data[0] is not None:
+        test_loader = create_data_loaders(test_data[0], test_data[1], 
+                                        batch_size=config['training']['batch_size'])
     
     # 超参数调优（如果启用）
     hyperparams = None
-    if tune_hyperparams:
+    if config['training']['tune_hyperparams']:
         logger.info(f"开始 {element} 的超参数调优")
-        hyperparams = hyperparameter_tuning(element, train_loader, val_loader, device=device)
+        hyperparams = hyperparameter_tuning(element, train_loader, val_loader, device=config['training']['device'])
     
     # 使用最佳超参数训练模型
     logger.info(f"开始训练 {element} 模型")
@@ -389,37 +364,186 @@ def process_element(element, train_data_path, val_data_path, test_data_path=None
     )
     
     # 保存到缓存
-    if model is not None and test_metrics is not None:
-        cache_manager.set_cache(cache_key, {
-            'model': model,
-            'metrics': test_metrics
-        })
+    cache_key = f"model_{element}"
+    cache_manager.set_cache(cache_key, {
+        'model': model,
+        'metrics': test_metrics
+    })
     
     return model, test_metrics
+
+def process_multiple_elements(csv_file, fits_dir, element_columns=None, 
+                             test_size=0.2, val_size=0.1, batch_size=32, 
+                             tune_hyperparams=False, device=None):
+    """
+    处理多个元素丰度的完整流程：数据加载、训练、评估
+    
+    参数:
+        csv_file (str): 包含obsid和元素丰度的CSV文件
+        fits_dir (str): FITS文件目录
+        element_columns (list): 元素丰度列名列表，如['C_FE', 'MG_FE', 'CA_FE']
+        test_size (float): 测试集比例
+        val_size (float): 验证集比例
+        batch_size (int): 批次大小
+        tune_hyperparams (bool): 是否进行超参数调优
+        device (str): 计算设备
+        
+    返回:
+        dict: 包含各元素模型和评估指标的字典
+    """
+    # 检查缓存
+    cache_key = f"multi_elements_{os.path.basename(csv_file)}"
+    cached_data = cache_manager.get_cache(cache_key)
+    if cached_data is not None:
+        logger.info(f"从缓存加载多元素处理结果")
+        return cached_data
+    
+    if device is None:
+        device = config.training_config['device']
+    
+    # 初始化数据处理器
+    processor = MultiElementProcessor(fits_dir=fits_dir)
+    
+    # 准备数据集
+    logger.info(f"开始处理CSV文件 {csv_file} 中的多元素丰度数据")
+    datasets = processor.prepare_datasets(
+        csv_file, 
+        element_columns=element_columns,
+        test_size=test_size,
+        val_size=val_size
+    )
+    
+    # 处理每个元素
+    results = {}
+    with ProgressManager(len(datasets), desc="处理元素丰度") as progress:
+        for element, dataset in datasets.items():
+            logger.info(f"开始处理元素: {element}")
+            
+            # 创建数据加载器
+            train_loader = create_data_loaders(
+                dataset['train'][0], dataset['train'][1], 
+                batch_size=batch_size
+            )
+            val_loader = create_data_loaders(
+                dataset['val'][0], dataset['val'][1], 
+                batch_size=batch_size, shuffle=False
+            )
+            test_loader = create_data_loaders(
+                dataset['test'][0], dataset['test'][1], 
+                batch_size=batch_size, shuffle=False
+            )
+            
+            # 超参数调优（如果启用）
+            hyperparams = None
+            if tune_hyperparams:
+                logger.info(f"开始 {element} 的超参数调优")
+                hyperparams = hyperparameter_tuning(
+                    element, train_loader, val_loader, device=device
+                )
+            
+            # 训练集成模型
+            logger.info(f"开始训练 {element} 模型")
+            ensemble = SpectralResCNNEnsemble(
+                input_size=config.model_config['input_size'],
+                num_models=config.model_config.get('num_ensemble_models', 3),
+                dropout_rate=config.model_config.get('dropout_rate', 0.5)
+            )
+            
+            # 训练模型
+            train_results = ensemble.train(train_loader, val_loader, element, config)
+            
+            # 评估模型
+            logger.info(f"开始评估 {element} 模型")
+            test_metrics = {}
+            for i, model in enumerate(ensemble.models):
+                model_metrics = evaluate_model(
+                    model, test_loader, device=device
+                )
+                test_metrics[f"model_{i+1}"] = model_metrics
+            
+            # 评估集成模型
+            ensemble_predictions = []
+            ensemble_targets = []
+            
+            for spectra, targets in test_loader:
+                spectra = spectra.to(device)
+                predictions, _ = ensemble.predict(spectra)
+                ensemble_predictions.extend(predictions)
+                ensemble_targets.extend(targets.cpu().numpy())
+            
+            # 计算集成模型指标
+            ensemble_predictions = np.array(ensemble_predictions)
+            ensemble_targets = np.array(ensemble_targets)
+            
+            ensemble_metrics = {
+                'mae': np.mean(np.abs(ensemble_predictions - ensemble_targets)),
+                'mse': np.mean((ensemble_predictions - ensemble_targets) ** 2),
+                'rmse': np.sqrt(np.mean((ensemble_predictions - ensemble_targets) ** 2)),
+                'r2': 1 - (np.sum((ensemble_targets - ensemble_predictions) ** 2) / 
+                          np.sum((ensemble_targets - np.mean(ensemble_targets)) ** 2)),
+                'bias': np.mean(ensemble_predictions - ensemble_targets),
+                'scatter': np.std(ensemble_predictions - ensemble_targets),
+                'predictions': ensemble_predictions,
+                'targets': ensemble_targets
+            }
+            
+            test_metrics['ensemble'] = ensemble_metrics
+            
+            # 保存结果
+            results[element] = {
+                'ensemble': ensemble,
+                'train_results': train_results,
+                'test_metrics': test_metrics
+            }
+            
+            # 保存预测结果
+            pred_df = pd.DataFrame({
+                'true': ensemble_targets,
+                'predicted': ensemble_predictions,
+                'error': ensemble_predictions - ensemble_targets
+            })
+            
+            os.makedirs(config.output_config['predictions_dir'], exist_ok=True)
+            pred_file = os.path.join(
+                config.output_config['predictions_dir'], 
+                f"{element}_predictions.csv"
+            )
+            pred_df.to_csv(pred_file, index=False)
+            logger.info(f"已保存 {element} 预测结果到: {pred_file}")
+            
+            # 更新进度
+            progress.update(1)
+    
+    # 保存到缓存
+    cache_manager.set_cache(cache_key, results)
+    
+    return results
 
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='恒星光谱元素丰度预测模型训练与评估')
+    parser.add_argument('--csv_file', type=str, required=True,
+                       help='输入CSV文件，包含obsid和元素丰度')
+    parser.add_argument('--fits_dir', type=str, default='fits',
+                       help='FITS文件目录')
     parser.add_argument('--elements', nargs='+', default=None,
-                        help='要处理的元素列表，默认为所有配置的元素')
+                       help='要处理的元素列表，格式如C_FE MG_FE CA_FE，默认处理CSV中所有元素丰度列')
     parser.add_argument('--tune', action='store_true',
-                        help='是否进行超参数调优')
+                       help='是否进行超参数调优')
     parser.add_argument('--batch_size', type=int, default=32,
-                        help='批次大小')
-    parser.add_argument('--no_test', action='store_true',
-                        help='跳过测试评估')
+                       help='批次大小')
+    parser.add_argument('--test_size', type=float, default=0.2,
+                       help='测试集比例')
+    parser.add_argument('--val_size', type=float, default=0.1,
+                       help='验证集比例')
     parser.add_argument('--visualize', action='store_true',
-                        help='是否生成可视化')
+                       help='是否生成可视化')
     parser.add_argument('--cpu', action='store_true',
-                        help='强制使用CPU进行计算')
+                       help='强制使用CPU进行计算')
     parser.add_argument('--clear_cache', action='store_true',
-                        help='清除所有缓存')
+                       help='清除所有缓存')
     
     args = parser.parse_args()
-    
-    # 确定要处理的元素
-    elements = args.elements if args.elements else config.training_config['elements']
-    logger.info(f"将处理以下元素: {', '.join(elements)}")
     
     # 设置设备
     if args.cpu:
@@ -438,47 +562,81 @@ def main():
     else:
         ask_clear_cache(cache_manager)
     
-    # 获取数据路径
-    train_data_path = config.data_paths['train_data']
-    val_data_path = config.data_paths['val_data']
-    test_data_path = None if args.no_test else config.data_paths['test_data']
-    
-    # 使用进度管理器处理每个元素
-    with ProgressManager(len(elements), desc="处理元素") as progress:
-        # 处理每个元素
-        for element in elements:
-            logger.info(f"开始处理元素: {element}")
-            
-            # 运行完整处理流程
-            model, metrics = process_element(
-                element=element,
-                train_data_path=train_data_path,
-                val_data_path=val_data_path,
-                test_data_path=test_data_path,
-                tune_hyperparams=args.tune,
-                batch_size=args.batch_size,
-                device=device
-            )
-            
-            if model is None:
-                logger.error(f"处理 {element} 失败，跳过")
-                continue
-            
-            # 更新进度
-            progress.update(1)
+    # 处理多元素丰度
+    results = process_multiple_elements(
+        csv_file=args.csv_file,
+        fits_dir=args.fits_dir,
+        element_columns=args.elements,
+        test_size=args.test_size,
+        val_size=args.val_size,
+        batch_size=args.batch_size,
+        tune_hyperparams=args.tune,
+        device=device
+    )
     
     # 如果需要进行可视化评估
-    if args.visualize and not args.no_test:
+    if args.visualize:
         logger.info("生成评估可视化")
         
-        # 评估所有元素模型
-        evaluate_all_elements(elements)
+        # 生成每个元素的评估可视化
+        for element, element_results in results.items():
+            metrics = element_results['test_metrics']['ensemble']
+            
+            # 绘制预测对比图
+            plt.figure(figsize=(10, 8))
+            plt.scatter(metrics['targets'], metrics['predictions'], alpha=0.6)
+            plt.plot([min(metrics['targets']), max(metrics['targets'])], 
+                    [min(metrics['targets']), max(metrics['targets'])], 'r--')
+            plt.title(f'{element} 预测对比')
+            plt.xlabel('真实值')
+            plt.ylabel('预测值')
+            plt.grid(True, alpha=0.3)
+            plt.annotate(f'MAE: {metrics["mae"]:.4f}\nRMSE: {metrics["rmse"]:.4f}\n'
+                        f'散度: {metrics["scatter"]:.4f}',
+                        xy=(0.05, 0.95), xycoords='axes fraction',
+                        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8))
+            
+            # 保存图像
+            plot_dir = config.output_config['plots_dir']
+            os.makedirs(plot_dir, exist_ok=True)
+            plt.savefig(os.path.join(plot_dir, f'{element}_predictions.png'), dpi=300, bbox_inches='tight')
+            plt.close()
         
-        # 生成预测对比图
-        plot_predictions_vs_true(elements)
-        
-        # 生成评估指标比较图
-        plot_metrics_comparison(elements)
+        # 生成元素间比较图
+        if len(results) > 1:
+            # 收集各元素评估指标
+            elements = list(results.keys())
+            mae_values = [results[elem]['test_metrics']['ensemble']['mae'] for elem in elements]
+            rmse_values = [results[elem]['test_metrics']['ensemble']['rmse'] for elem in elements]
+            scatter_values = [results[elem]['test_metrics']['ensemble']['scatter'] for elem in elements]
+            
+            # 绘制比较图
+            plt.figure(figsize=(12, 8))
+            
+            # 绘制MAE比较
+            plt.subplot(311)
+            plt.bar(elements, mae_values, color='skyblue')
+            plt.title('各元素MAE比较')
+            plt.ylabel('MAE')
+            plt.grid(True, alpha=0.3)
+            
+            # 绘制RMSE比较
+            plt.subplot(312)
+            plt.bar(elements, rmse_values, color='salmon')
+            plt.title('各元素RMSE比较')
+            plt.ylabel('RMSE')
+            plt.grid(True, alpha=0.3)
+            
+            # 绘制散度比较
+            plt.subplot(313)
+            plt.bar(elements, scatter_values, color='lightgreen')
+            plt.title('各元素散度比较')
+            plt.ylabel('散度')
+            plt.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            plt.savefig(os.path.join(plot_dir, 'elements_comparison.png'), dpi=300, bbox_inches='tight')
+            plt.close()
     
     logger.info("处理完成")
 
