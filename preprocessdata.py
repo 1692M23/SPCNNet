@@ -1129,7 +1129,16 @@ class LAMOSTPreprocessor:
                 return None
             
             # 读取FITS数据
-            wavelength, flux, v_helio = self.read_fits_file(fits_file)
+            fits_data = self.read_fits_file(fits_file)
+            if fits_data is None:
+                return None
+            
+            # 从fits_data字典中提取数据
+            wavelength = fits_data.get('wavelength')
+            flux = fits_data.get('flux')
+            z = fits_data.get('z', 0)
+            v_helio = fits_data.get('v_helio', 0)
+            
             if wavelength is None or flux is None:
                 return None
             
@@ -1137,6 +1146,7 @@ class LAMOSTPreprocessor:
             data_dict = {
                 'wavelength': wavelength,
                 'flux': flux,
+                'z': z,
                 'v_helio': v_helio
             }
             
@@ -1151,7 +1161,7 @@ class LAMOSTPreprocessor:
                 'spectrum': processed_flux,
                 'label': label,
                 'metadata': {
-                'obsid': obsid,
+                    'obsid': obsid,
                     'original_flux': fits_file,
                     'wavelength': wavelength if wavelength is not None else [],
                     'snr': snr_value
@@ -1161,6 +1171,8 @@ class LAMOSTPreprocessor:
             return result
         except Exception as e:
             logger.error(f"处理光谱失败: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())  # 添加详细的堆栈跟踪
             return None
     
     def check_memory_usage(self):
@@ -2464,17 +2476,20 @@ class LAMOSTPreprocessor:
                 return None
             
             # 1. 去噪
-            flux = self.denoise_spectrum(wavelength, flux)
+            wavelength, flux = self.denoise_spectrum(wavelength, flux)
             
             # 2. 波长校正（红移和视向速度）
             z = data_dict.get('z', 0)
             v_helio = data_dict.get('v_helio', 0)
+            
+            # 先进行基本波长校正
             wavelength = self.correct_wavelength(wavelength, flux)
             
+            # 然后根据红移和视向速度进行进一步校正
             if z != 0:
-                wavelength, flux = self.correct_redshift(wavelength, flux, z)
+                wavelength = self.correct_redshift(wavelength, flux, z)
             if v_helio != 0:
-                wavelength, flux = self.correct_velocity(wavelength, flux, v_helio)
+                wavelength = self.correct_velocity(wavelength, flux, v_helio)
             
             # 3. 更新共同波长范围
             if self.compute_common_range:
@@ -2494,6 +2509,8 @@ class LAMOSTPreprocessor:
             
         except Exception as e:
             logger.error(f"处理光谱时出错: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())  # 添加详细的堆栈跟踪
             return None
 
 def main():
