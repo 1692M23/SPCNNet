@@ -1088,7 +1088,7 @@ def main():
             save_plots=not args.no_plots
         )
         logger.info("星表评估完成")
-    else:
+        else:
         # 执行测试集评估
         logger.info("执行测试集评估")
         results = evaluate_all_elements(
