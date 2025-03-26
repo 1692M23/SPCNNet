@@ -2,14 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-设置脚本：自动创建目录、克隆/更新GitHub仓库、安装依赖
+设置脚本：自动创建目录并安装依赖
 """
 
 import os
 import subprocess
 import sys
 import logging
-from setuptools import setup, find_packages
 
 # 配置日志
 logging.basicConfig(
@@ -33,44 +32,31 @@ def create_directories():
         os.makedirs(directory, exist_ok=True)
         logger.info(f"已创建目录: {directory}")
 
-def update_github_repo(repo_url, branch='main'):
-    """更新GitHub仓库"""
-    repo_name = repo_url.split('/')[-1].replace('.git', '')
-    
-    if os.path.exists(repo_name):
-        logger.info(f"更新仓库: {repo_name}")
-        try:
-            subprocess.run(['git', '-C', repo_name, 'pull'], check=True)
-            logger.info("仓库更新成功")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"更新仓库失败: {e}")
-            return False
-    else:
-        logger.info(f"克隆仓库: {repo_url}")
-        try:
-            subprocess.run(['git', 'clone', '-b', branch, repo_url], check=True)
-            logger.info("仓库克隆成功")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"克隆仓库失败: {e}")
-            return False
-    
-    return True
-
 def install_requirements():
     """安装依赖包"""
-    requirements_file = 'requirements.txt'
-    if os.path.exists(requirements_file):
-        logger.info("安装依赖包...")
-        try:
-            subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', requirements_file], check=True)
-            logger.info("依赖包安装成功")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"安装依赖包失败: {e}")
-            return False
-    else:
-        logger.warning(f"未找到 {requirements_file} 文件")
+    requirements = [
+        'numpy>=1.19.2',
+        'pandas>=1.2.0',
+        'matplotlib>=3.3.0',
+        'torch>=1.7.0',
+        'scikit-learn>=0.24.0',
+        'astropy>=4.2',
+        'scipy>=1.6.0',
+        'seaborn>=0.11.0',
+        'psutil>=5.8.0',
+        'tqdm>=4.50.0',
+        'joblib>=1.0.0'
+    ]
     
-    return True
+    logger.info("安装依赖包...")
+    try:
+        for package in requirements:
+            subprocess.run([sys.executable, '-m', 'pip', 'install', package], check=True)
+        logger.info("依赖包安装成功")
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(f"安装依赖包失败: {e}")
+        return False
 
 def setup_environment():
     """设置环境"""
@@ -99,47 +85,9 @@ def setup_environment():
         logger.error(f"环境设置失败: {e}")
         return False
 
-def main():
-    """主函数"""
-    # 你的GitHub仓库URL
-    repo_url = "https://github.com/1692M23/SPCNNet.git"
-    
-    # 设置环境
+if __name__ == '__main__':
     if setup_environment():
         logger.info("环境设置成功完成")
     else:
         logger.error("环境设置失败")
-        sys.exit(1)
-
-if __name__ == '__main__':
-    main()
-
-setup(
-    name="lamost_abundance",
-    version="0.1",
-    packages=find_packages(),
-    install_requires=[
-        'numpy',
-        'pandas',
-        'matplotlib',
-        'torch',
-        'scikit-learn',
-        'astropy',
-        'scipy',
-        'seaborn',
-        'psutil',
-        'tqdm',
-        'joblib'
-    ],
-    package_data={
-        'lamost_abundance': [
-            'fits/*',
-            'processed_data/*',
-            'models/*',
-            'results/*',
-            'plots/*'
-        ]
-    },
-    include_package_data=True,
-    python_requires='>=3.7'
-) 
+        sys.exit(1) 
