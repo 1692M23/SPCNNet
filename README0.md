@@ -8,25 +8,36 @@
 .
 ├── config.py            # 配置文件
 ├── preprocessdata.py    # 光谱数据预处理
-├── model.py             # 模型定义和训练函数
-├── main.py              # 训练和测试主程序
-├── evaluation.py        # 模型评估和可视化工具
-├── predict.py           # 单独的预测功能
-├── fits/                # 原始光谱FITS文件
-├── processed_data/      # 处理后的数据
-│   ├── cache/           # 处理过程中的临时缓存文件
-│   ├── progress/        # 处理进度信息
-│   ├── train_dataset.npz  # 训练集
-│   ├── val_dataset.npz    # 验证集
-│   ├── test_dataset.npz   # 测试集
-│   ├── reference_dataset.npz # 参考数据集处理结果（训练+验证+测试）
-│   └── prediction_dataset.npz # 预测数据集处理结果
-├── X_FE.csv             # 元素丰度参考数据
-├── galah_X_FE.csv       # GALAH数据集元素丰度数据
-├── LASP_X_FE.csv        # LASP数据集元素丰度数据
-├── models/              # 保存的模型
-├── results/             # 评估结果
-└── plots/               # 图表输出
+├── model.py            # 模型定义和训练函数
+├── main.py             # 训练和测试主程序
+├── evaluation.py       # 模型评估和可视化工具
+├── predict.py          # 预测功能
+├── fits/               # 原始光谱FITS文件
+├── processed_data/     # 处理后的数据
+│   ├── cache/         # 缓存目录
+│   │   ├── predict/  # 预测相关缓存
+│   │   └── train/    # 训练相关缓存
+│   ├── progress/     # 进度保存目录
+│   ├── train_dataset.npz    # 训练集
+│   ├── val_dataset.npz      # 验证集
+│   ├── test_dataset.npz     # 测试集
+│   ├── reference_dataset.npz # 参考数据集（训练+验证+测试）
+│   └── prediction_dataset.npz # 预测数据集
+├── models/             # 模型保存目录
+├── logs/              # 日志目录
+│   ├── train/        # 训练日志
+│   └── predict/      # 预测日志
+├── results/           # 结果目录
+│   ├── predictions/  # 预测结果
+│   └── evaluation/   # 评估结果
+├── plots/             # 图表目录
+│   ├── preprocessing/ # 预处理过程图表（光谱处理过程可视化、数据分布统计等）
+│   ├── training/     # 训练过程图表（损失曲线、学习率变化、指标趋势等）
+│   ├── predictions/  # 预测结果图表（预测结果分布、误差分析等）
+│   └── evaluation/   # 评估结果图表（性能指标对比、HR图等）
+├── X_FE.csv           # 元素丰度参考数据
+├── galah_X_FE.csv     # GALAH数据集元素丰度数据
+└── LASP_X_FE.csv      # LASP数据集元素丰度数据
 ```
 
 ## 数据预处理
@@ -96,18 +107,45 @@
 使用`preprocessdata.py`进行数据预处理：
 
 ```bash
-# 在Google Colab上运行（会提示上传数据）
-!python preprocessdata.py
+# 处理参考数据集（用于训练）
+python preprocessdata.py --reference_csv X_FE.csv \
+                       --fits_dir fits \
+                       --output_dir processed_data
 
-# 指定参考数据集
-!python preprocessdata.py --reference X_FE.csv
+# 处理预测数据集
+python preprocessdata.py --prediction_csv galah_X_FE.csv \
+                       --fits_dir fits \
+                       --output_dir processed_data
 
-# 同时指定参考和预测数据集
-!python preprocessdata.py --reference X_FE.csv --prediction galah_X_FE.csv
+# 同时处理参考和预测数据集
+python preprocessdata.py --reference_csv X_FE.csv \
+                       --prediction_csv galah_X_FE.csv \
+                       --fits_dir fits \
+                       --output_dir processed_data
 
-# 不使用缓存，重新处理所有数据
-!python preprocessdata.py --reference X_FE.csv --no_resume
+# 使用自定义配置进行预处理
+python preprocessdata.py --reference_csv X_FE.csv \
+                       --fits_dir fits \
+                       --output_dir processed_data \
+                       --batch_size 32 \
+                       --n_workers 4 \
+                       --no_cache \
+                       --denoise \
+                       --normalize
+
+# 清除缓存并重新处理
+python preprocessdata.py --reference_csv X_FE.csv \
+                       --clear_cache
 ```
+
+预处理后的数据将保存在`processed_data`目录下：
+- `train_dataset.npz`: 训练集
+- `val_dataset.npz`: 验证集
+- `test_dataset.npz`: 测试集
+- `reference_dataset.npz`: 完整参考数据集
+- `prediction_dataset.npz`: 预测数据集
+
+处理日志将保存在`logs`目录下，处理进度信息将保存在`processed_data/progress`目录下。
 
 ### 2. 训练与超参数调优
 
@@ -115,70 +153,101 @@
 
 ```bash
 # 完整流程（训练、调优和测试）
-python main.py --mode all
+python main.py --mode all --data_path processed_data/reference_dataset.npz
 
 # 仅训练模型
-python main.py --mode train
+python main.py --mode train --data_path processed_data/reference_dataset.npz
 
 # 仅进行超参数调优
-python main.py --mode tune
+python main.py --mode tune --data_path processed_data/reference_dataset.npz
 
 # 仅测试模型
-python main.py --mode test
+python main.py --mode test --data_path processed_data/test_dataset.npz
 
-# 指定元素
-python main.py --mode all --elements C_FE MG_FE
+# 训练特定元素的模型
+python main.py --mode train --data_path processed_data/reference_dataset.npz --elements C_FE MG_FE
+
+# 使用自定义配置进行训练
+python main.py --mode train \
+               --data_path processed_data/reference_dataset.npz \
+               --batch_size 64 \
+               --learning_rate 0.001 \
+               --epochs 200 \
+               --early_stopping 20
 ```
 
 超参数调优过程：
-1. 尝试不同的学习率、批次大小和权重衰减组合
-2. 在验证集上评估每组参数的性能
-3. 选择验证损失最低的参数组合
+1. 使用网格搜索或贝叶斯优化方法
+2. 对每组参数在验证集上评估性能
+3. 选择最佳参数组合
 4. 使用最佳参数重新训练模型
+
+训练过程中的监控指标：
+- 训练损失
+- 验证损失
+- 各项评估指标（MAE、RMSE、R²）
+- 学习率变化
+- GPU内存使用情况
+
+所有训练日志将保存在`logs/train`目录下，训练过程的图表将保存在`plots/training`目录下。
 
 ### 3. 模型评估与可视化
 
 使用`evaluation.py`进行模型评估和可视化：
 
 ```bash
-# 评估所有元素并生成所有图表
-python evaluation.py
+# 评估所有元素的模型性能
+python evaluation.py --data_path processed_data/test_dataset.npz
 
-# 仅生成预测vs真实值对比图
-python evaluation.py --plot_type compare
+# 评估特定元素
+python evaluation.py --data_path processed_data/test_dataset.npz --elements C_FE MG_FE
 
-# 仅生成评估指标对比图
-python evaluation.py --plot_type metrics
+# 指定评估指标和图表类型
+python evaluation.py --data_path processed_data/test_dataset.npz \
+                    --metrics mae rmse r2 \
+                    --plot_types scatter distribution error_hist
 
-# 指定元素
-python evaluation.py --elements C_FE MG_FE
+# 使用GALAH数据集进行外部验证
+python evaluation.py --data_path processed_data/galah_dataset.npz --external_validation
 ```
 
 评估指标包括：
-- RMSE (Root Mean Square Error): 预测误差的平方根
 - MAE (Mean Absolute Error): 平均绝对误差
-- MSE (Mean Squared Error): 均方误差
+- RMSE (Root Mean Square Error): 预测误差的平方根
 - R² (R-squared): 决定系数
-- DEX: 预测精度，即预测值与真实值差的标准差
+- DEX: 预测精度（以dex为单位）
 
 可视化图表：
-1. 预测值vs真实值对比图：横坐标为teff，纵坐标为logg，颜色表示元素丰度
-2. 评估指标对比折线图：对比三种元素的性能指标
+1. 散点图：预测值vs真实值
+2. 误差分布图：预测误差的直方图
+3. 残差图：预测误差vs真实值
+4. HR图：在HR图上展示预测结果
+5. 元素相关性图：不同元素丰度之间的相关性
+
+所有评估结果将保存在`results/evaluation`目录下，图表将保存在`plots/evaluation`目录下。
 
 ### 4. 预测新数据
 
-使用`predict.py`预测新的LAMOST光谱数据：
+使用`predict.py`预测新的光谱数据：
 
 ```bash
-# 预测光谱元素丰度
-python predict.py --input /path/to/lamost_spectra.fits --output predictions.csv
+# 预测光谱元素丰度（使用预处理后的数据）
+python predict.py --data_path processed_data/prediction_dataset.npz
 
-# 绘制预测结果分布图
-python predict.py --input /path/to/lamost_spectra.fits --output predictions.csv --plot
+# 预测并绘制结果分布图
+python predict.py --data_path processed_data/prediction_dataset.npz --plot
 
-# 指定元素
-python predict.py --input /path/to/lamost_spectra.fits --elements C_FE MG_FE
+# 指定特定元素进行预测（默认预测所有配置的元素）
+python predict.py --data_path processed_data/prediction_dataset.npz --elements C_FE MG_FE
+
+# 其他可选参数
+python predict.py --data_path processed_data/prediction_dataset.npz \
+                 --batch_size 64 \
+                 --device cuda \
+                 --clear_cache
 ```
+
+预测结果将自动保存在`results/predictions`目录下，图表将保存在`plots/predictions`目录下。
 
 ## 注意事项
 

@@ -22,12 +22,18 @@ logger = logging.getLogger('setup')
 def create_directories():
     """创建必要的目录"""
     directories = [
-        'processed_data/cache',    # 缓存目录
-        'processed_data/progress', # 进度保存目录
-        'models',                 # 模型保存目录
-        'logs',                   # 日志目录
-        'results',                # 结果目录（包含预测结果）
-        'plots'                   # 图表目录
+        os.path.join('processed_data', 'cache', 'predict'),  # 预测缓存目录
+        os.path.join('processed_data', 'cache', 'train'),    # 训练缓存目录
+        os.path.join('processed_data', 'progress'),          # 进度保存目录
+        'models',                                            # 模型保存目录
+        os.path.join('logs', 'train'),                      # 训练日志目录
+        os.path.join('logs', 'predict'),                    # 预测日志目录
+        os.path.join('results', 'predictions'),             # 预测结果目录
+        os.path.join('results', 'evaluation'),              # 评估结果目录
+        os.path.join('plots', 'preprocessing'),             # 预处理过程图表
+        os.path.join('plots', 'training'),                  # 训练过程图表
+        os.path.join('plots', 'predictions'),               # 预测结果图表
+        os.path.join('plots', 'evaluation'),                # 评估结果图表
     ]
     
     for directory in directories:
