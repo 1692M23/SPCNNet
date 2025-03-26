@@ -207,6 +207,7 @@ output_config = {
     'evaluation_batch_dir': 'results/evaluation_{}_batch_results',  # 评估批次结果目录模板
     'prediction_batch_dir': 'results/prediction_{}_batch_results',  # 预测批次结果目录模板
     'baseline_batch_dir': 'results/baseline_{}_{}_batch_results',  # 基线批次结果目录模板（元素_模型）
+    'analysis_dir': 'results/analysis',  # 模型分析结果目录
     'cache_dir': 'cache'  # 缓存目录
 }
 
@@ -322,17 +323,28 @@ progress_config = {
 
 # 添加模型分析配置
 analysis_config = {
-    'perform_analysis': True,       # 是否执行模型性能分析
-    'feature_importance': {         # 特征重要性分析配置
-        'n_samples': 10,            # 用于计算特征重要性的样本数量
-        'top_n': 30,                # 显示前N个重要特征
-        'min_importance': 0.2       # 最小显示重要性阈值
+    'enabled': True,                              # 是否启用模型性能分析
+    'batch_size': 32,                             # 分析批处理大小
+    'feature_importance': {
+        'enabled': True,                          # 是否分析特征重要性
+        'sample_size': 1000,                      # 用于分析的样本数
+        'top_n_features': 30,                     # 显示前N个重要特征
+        'min_importance_threshold': 0.05,         # 最小重要性阈值
     },
-    'residual_analysis': {          # 残差分析配置
-        'save_predictions': True,   # 是否保存预测结果
-        'plot_qq': True,            # 是否绘制QQ图
-        'plot_hist': True           # 是否绘制直方图
-    }
+    'residual_analysis': {
+        'enabled': True,                          # 是否进行残差分析
+        'save_predictions': True,                 # 是否保存预测结果
+        'plot_qq': True,                          # 是否绘制QQ图
+        'plot_hist': True,                        # 是否绘制直方图
+    },
+    'batch_results': {
+        'enabled': True,                          # 是否启用批处理结果
+        'save_batch_results': True,               # 是否保存批处理结果
+        'generate_batch_summary': True,           # 是否生成批处理摘要
+        'generate_trend_plots': True,             # 是否生成趋势图
+    },
+    'elements': ['C_FE', 'MG_FE', 'CA_FE'],      # 要分析的元素列表
+    'results_dir': 'results/analysis'             # 分析结果目录
 }
 
 # 将所有配置合并到一个字典中

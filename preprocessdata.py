@@ -130,6 +130,17 @@ class OBSIDCache:
         if self.changed:
             self.save_cache()
 
+    def get_fits_file(self, obsid):
+        if 'fits_files' not in self.mapping:
+            self.mapping['fits_files'] = {}
+        return self.mapping['fits_files'].get(obsid)
+    
+    def set_fits_file(self, obsid, fits_file):
+        if 'fits_files' not in self.mapping:
+            self.mapping['fits_files'] = {}
+        self.mapping['fits_files'][obsid] = fits_file
+        self.save_cache()
+
 class ProgressManager:
     def __init__(self, total, desc):
         self.total = total
@@ -278,7 +289,7 @@ class LAMOSTPreprocessor:
     def _find_fits_file(self, obsid):
         """根据OBSID查找对应的FITS文件，优化查找性能"""
         # 首先从缓存查找
-        cached_file = self.obsid_cache.get_obsid(str(obsid))
+        cached_file = self.obsid_cache.get_fits_file(obsid)
         if cached_file and os.path.exists(cached_file):
             return cached_file
         
@@ -450,25 +461,22 @@ class LAMOSTPreprocessor:
     
     def denoise_spectrum(self, wavelength, flux):
         """使用自适应方法对LAMOST低分辨率光谱进行去噪"""
-        n_points = len(flux)
-        
-        # 根据数据点数量自适应选择去噪方法
-        if n_points < 5:
-            logger.warning(f"数据点数太少({n_points})，返回原始数据")
+        if len(wavelength) < 10:  # 检查数据点是否太少
+            logger.warning(f"数据点数太少({len(wavelength)})，返回原始数据")
             return wavelength, flux
         
         try:
             # 方法一：自适应窗口Savitzky-Golay滤波
-            window_length = min(max(5, n_points // 10 * 2 + 1), 15)
+            window_length = min(max(5, len(flux) // 10 * 2 + 1), 15)
             window_length = window_length if window_length % 2 == 1 else window_length - 1
             polyorder = min(2, window_length // 3)
             
-            if n_points >= window_length:
+            if len(flux) >= window_length:
                 smoothed_flux = signal.savgol_filter(flux, window_length, polyorder)
             else:
                 # 方法二：对于较短光谱使用高斯平滑
                 from scipy.ndimage import gaussian_filter1d
-                sigma = max(0.8, min(1.5, n_points / 30))
+                sigma = max(0.8, min(1.5, len(flux) / 30))
                 smoothed_flux = gaussian_filter1d(flux, sigma)
             
             return wavelength, smoothed_flux
@@ -667,7 +675,7 @@ class LAMOSTPreprocessor:
         """对光谱进行归一化处理"""
         try:
             # 连续谱归一化 (简单的最大值归一化)
-            valid_flux = flux[~np.isnan(flux)]
+            valid_flux = flux[~np.isnan(flux)]  # 注意添加了~取反
             if len(valid_flux) == 0:
                 print("所有流量值都是NaN，无法归一化")
                 return None
@@ -710,7 +718,7 @@ class LAMOSTPreprocessor:
         """
         try:
             # 检查波长是否需要校准
-            flux_valid = flux[~np.isnan(flux)]
+            flux_valid = flux[~np.isnan(flux)]  # 注意添加了~取反
             if len(flux_valid) < 10:
                 print("有效数据点太少，无法进行波长校正")
                 return wavelength
@@ -1121,7 +1129,10 @@ class LAMOSTPreprocessor:
         return False
         
     def process_element_data(self, df, element, start_idx=0):
-        """处理单个元素的数据，支持从指定位置继续处理"""
+        # 确保为每个元素单独构建FITS映射关系
+        self._build_fits_obsid_mapping()
+        logger.info(f"已为{element}重建FITS文件映射关系")
+        
         print(f"处理{element}数据...")
         
         # 获取obsid和标签

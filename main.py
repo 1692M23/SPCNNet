@@ -24,7 +24,7 @@ from utils import CacheManager, ProgressManager, ask_clear_cache, setup_analysis
 from multi_element_processor import MultiElementProcessor
 from fits_cache import FITSCache
 from hyperparameter_tuning_replacement import hyperparameter_tuning
-from model_analysis import analyze_model_performance
+from model_analysis import analyze_model_performance, show_batch_results, analyze_feature_importance, analyze_residuals
 
 # 配置日志
 logging.basicConfig(
@@ -138,7 +138,7 @@ def train_and_evaluate_model(train_loader, val_loader, test_loader, element, con
     hyperparams = {
         'lr': config.training_config['lr'],
         'weight_decay': config.training_config['weight_decay'],
-        'epochs': config.training_config['epochs'],
+        'epochs': config.training_config['num_epochs'],
         'patience': config.training_config['early_stopping_patience']
     }
     
@@ -161,8 +161,13 @@ def train_and_evaluate_model(train_loader, val_loader, test_loader, element, con
     test_metrics = evaluate_model(best_model, test_loader, config.training_config['device'])
     
     # 分析模型性能（特征重要性和残差）
-    if hasattr(config, 'analysis_config') and config.analysis_config.get('perform_analysis', False):
+    if hasattr(config, 'analysis_config') and config.analysis_config.get('enabled', False):
         logger.info(f"开始对{element}模型进行性能分析...")
+        
+        # 获取分析配置
+        batch_size = config.analysis_config.get('batch_size', 32)
+        save_batch_results = config.analysis_config.get('batch_results', {}).get('save_batch_results', True)
+        
         analysis_results = analyze_model_performance(
             best_model,
             element,
@@ -170,7 +175,9 @@ def train_and_evaluate_model(train_loader, val_loader, test_loader, element, con
             val_loader,
             test_loader,
             config.training_config['device'],
-            config.model_config['input_size']
+            config.model_config['input_size'],
+            batch_size=batch_size,
+            save_batch_results=save_batch_results
         )
         logger.info(f"{element}模型性能分析完成, 结果保存在results目录")
     
@@ -749,7 +756,7 @@ def show_batch_results(element, result_type='training', config=None):
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='恒星光谱元素丰度预测系统')
-    parser.add_argument('--mode', type=str, choices=['train', 'tune', 'test', 'predict', 'all', 'show_results'], 
+    parser.add_argument('--mode', type=str, choices=['train', 'tune', 'test', 'predict', 'all', 'show_results', 'analyze'], 
                         default='train', help='运行模式')
     parser.add_argument('--data_path', type=str, default=None,
                        help='数据路径，默认使用配置文件中的设置')
@@ -769,10 +776,16 @@ def main():
                        help='超参数优化的批量数据大小')
     parser.add_argument('--batches_per_round', type=int, default=2,
                        help='超参数优化每轮处理的批次数')
-    parser.add_argument('--result_type', type=str, choices=['training', 'evaluation', 'prediction'], 
+    parser.add_argument('--result_type', type=str, choices=['training', 'evaluation', 'prediction', 'analysis'], 
                         default='training', help='要显示的结果类型')
     parser.add_argument('--perform_analysis', action='store_true',
                        help='是否执行模型性能分析（特征重要性和残差分析）')
+    parser.add_argument('--analysis_type', type=str, choices=['feature_importance', 'residual_analysis', 'both'], 
+                        default='both', help='要执行的分析类型')
+    parser.add_argument('--analysis_batch_size', type=int, default=None,
+                       help='模型分析批处理大小')
+    parser.add_argument('--save_batch_results', action='store_true',
+                       help='是否保存批处理结果')
     
     args = parser.parse_args()
     
@@ -788,10 +801,22 @@ def main():
     if args.device is not None:
         config.training_config['device'] = args.device
     
+    # 更新分析配置
     if args.perform_analysis:
         if not hasattr(config, 'analysis_config'):
             config.analysis_config = {}
-        config.analysis_config['perform_analysis'] = True
+        config.analysis_config['enabled'] = True
+        
+        if args.analysis_batch_size is not None:
+            config.analysis_config['batch_size'] = args.analysis_batch_size
+            
+        if args.save_batch_results:
+            config.analysis_config['batch_results'] = {
+                'enabled': True,
+                'save_batch_results': True,
+                'generate_batch_summary': True,
+                'generate_trend_plots': True
+            }
     
     # 确定要处理的元素
     elements = args.elements if args.elements else config.training_config['elements']
@@ -807,7 +832,83 @@ def main():
             return
         
         for element in elements:
-            show_batch_results(element, args.result_type, config)
+            if args.result_type == 'analysis':
+                # 显示分析批次结果
+                analysis_type = args.analysis_type
+                if analysis_type == 'both' or analysis_type == 'feature_importance':
+                    show_batch_results(element, 'feature_importance')
+                if analysis_type == 'both' or analysis_type == 'residual_analysis':
+                    show_batch_results(element, 'residual_analysis')
+            else:
+                # 显示其他类型的批次结果
+                show_batch_results(element, args.result_type, config)
+        return
+    
+    if args.mode == 'analyze':
+        # 执行模型分析
+        for element in elements:
+            logger.info(f"开始对 {element} 模型进行性能分析")
+            
+            # 加载训练好的模型
+            model = load_trained_model(config.model_config['input_size'], element, config)
+            
+            if model is None:
+                logger.error(f"无法加载 {element} 的模型，跳过分析")
+                continue
+            
+            # 加载数据集
+            try:
+                val_data = load_data(os.path.join('processed_data', 'val_dataset.npz'), element)
+                test_data = load_data(os.path.join('processed_data', 'test_dataset.npz'), element)
+                train_data = load_data(os.path.join('processed_data', 'train_dataset.npz'), element)
+                
+                # 创建数据加载器
+                val_loader = create_data_loaders(val_data[0], val_data[1], 
+                                               batch_size=config.analysis_config.get('batch_size', 32))
+                test_loader = create_data_loaders(test_data[0], test_data[1],
+                                                batch_size=config.analysis_config.get('batch_size', 32))
+                train_loader = create_data_loaders(train_data[0], train_data[1],
+                                                 batch_size=config.analysis_config.get('batch_size', 32))
+            except Exception as e:
+                logger.error(f"加载 {element} 的数据集失败: {str(e)}")
+                continue
+            
+            # 设置设备
+            device = config.training_config['device']
+            
+            analysis_type = args.analysis_type
+            batch_size = args.analysis_batch_size if args.analysis_batch_size else config.analysis_config.get('batch_size', 32)
+            save_batch_results = args.save_batch_results or config.analysis_config.get('batch_results', {}).get('save_batch_results', True)
+            
+            if analysis_type == 'both' or analysis_type == 'feature_importance':
+                logger.info(f"开始分析 {element} 模型的特征重要性")
+                feature_importance_path = analyze_feature_importance(
+                    model, val_loader, device, element,
+                    batch_size=batch_size,
+                    save_batch_results=save_batch_results
+                )
+                logger.info(f"特征重要性分析完成，结果保存在: {feature_importance_path}")
+            
+            if analysis_type == 'both' or analysis_type == 'residual_analysis':
+                logger.info(f"开始分析 {element} 模型的残差")
+                residual_results = analyze_residuals(
+                    model, test_loader, device, element,
+                    batch_size=batch_size,
+                    save_batch_results=save_batch_results
+                )
+                logger.info(f"残差分析完成，结果保存在: {residual_results['plot']}")
+            
+            if analysis_type == 'both':
+                # 执行全面分析
+                logger.info(f"开始对 {element} 模型进行全面性能分析")
+                analyze_model_performance(
+                    model, element, train_loader, val_loader, test_loader,
+                    device, config.model_config['input_size'],
+                    batch_size=batch_size,
+                    save_batch_results=save_batch_results
+                )
+                logger.info(f"{element} 模型性能分析完成")
+        
         return
     
     if args.mode in ['train', 'tune', 'test', 'all']:

@@ -14,6 +14,7 @@
 ├── predict.py          # 预测功能
 ├── batch_hyperopt.py   # 批量超参数优化
 ├── baseline_models.py  # 基线模型比较
+├── model_analysis.py   # 模型分析工具（特征重要性和残差分析）
 ├── data_validator.py   # 数据验证工具
 ├── fits/               # 原始光谱FITS文件
 ├── processed_data/     # 处理后的数据
@@ -48,7 +49,25 @@
 │   │   └── fits_processing/       # FITS文件处理结果
 │   ├── predictions/  # 预测结果
 │   ├── evaluation/   # 评估结果
-│   └── hyperopt/     # 超参数优化结果
+│   ├── hyperopt/     # 超参数优化结果
+│   ├── feature_importance/        # 特征重要性分析结果
+│   │   ├── C_FE_batch_results/    # 按元素分类的批次结果
+│   │   │   ├── batch_1_feature_importance.png    # 批次特征重要性图
+│   │   │   ├── batch_1_explanation.txt           # 批次特征解释
+│   │   │   ├── batch_tracking.csv                # 批次跟踪数据
+│   │   │   ├── C_FE_batch_trends.png             # 趋势图
+│   │   │   └── C_FE_batch_summary.txt            # 批次摘要
+│   │   └── C_FE_feature_importance.png           # 总体特征重要性图
+│   ├── residual_analysis/         # 残差分析结果
+│   │   ├── C_FE_batch_results/    # 按元素分类的批次结果
+│   │   │   ├── batch_1_residual_analysis.png     # 批次残差分析图
+│   │   │   ├── batch_1_residual_report.txt       # 批次残差报告
+│   │   │   ├── batch_1_predictions.csv           # 批次预测结果
+│   │   │   ├── batch_tracking.csv                # 批次跟踪数据
+│   │   │   ├── C_FE_batch_trends.png             # 趋势图
+│   │   │   └── C_FE_batch_summary.txt            # 批次摘要
+│   │   └── C_FE_residual_analysis.png            # 总体残差分析图
+│   └── batch_tracking/            # 批次跟踪结果
 ├── plots/             # 图表目录
 │   ├── preprocessing/ # 预处理过程图表（光谱处理过程可视化、数据分布统计等）
 │   ├── training/     # 训练过程图表（损失曲线、学习率变化、指标趋势等）
@@ -205,6 +224,18 @@ python main.py --mode tune \
 python main.py --mode show_results \
                --elements C_FE \
                --result_type training
+
+# 执行模型分析并启用批处理
+python main.py --mode analyze \
+               --elements C_FE MG_FE \
+               --analysis_type both \
+               --analysis_batch_size 32 \
+               --save_batch_results
+
+# 查看模型分析批处理结果
+python main.py --mode show_results \
+               --elements C_FE \
+               --result_type analysis
 ```
 
 超参数调优过程：
@@ -260,61 +291,100 @@ python main.py --mode show_results --elements C_FE --result_type prediction
 
 所有训练日志将保存在`logs/train`目录下，训练过程的图表将保存在相应的批次结果目录中。
 
-### 3. 模型评估与可视化
+### 3. 预测过程
 
-使用`evaluation.py`进行模型评估和可视化：
-
-```bash
-# 评估所有元素的模型性能
-python evaluation.py --data_path processed_data/test_dataset.npz
-
-# 评估特定元素
-python evaluation.py --data_path processed_data/test_dataset.npz --elements C_FE MG_FE
-
-# 指定评估指标和图表类型
-python evaluation.py --data_path processed_data/test_dataset.npz \
-                    --metrics mae rmse r2 \
-                    --plot_types scatter distribution error_hist
-
-# 使用GALAH数据集进行外部验证
-python evaluation.py --data_path processed_data/galah_dataset.npz --external_validation
-```
-
-评估指标包括：
-- MAE (Mean Absolute Error): 平均绝对误差
-- RMSE (Root Mean Square Error): 预测误差的平方根
-- R² (R-squared): 决定系数
-- DEX: 预测精度（以dex为单位）
-
-可视化图表：
-1. 散点图：预测值vs真实值
-2. 误差分布图：预测误差的直方图
-3. 残差图：预测误差vs真实值
-4. HR图：在HR图上展示预测结果
-5. 元素相关性图：不同元素丰度之间的相关性
-
-所有评估结果将保存在`results/evaluation`目录下，图表将保存在`plots/evaluation`目录下。分批处理的结果将保存在`results/evaluation_{element}_batch_results`目录下。
-
-### 4. 预测新数据
-
-使用`predict.py`预测新的光谱数据：
+使用`predict.py`进行预测：
 
 ```bash
-# 预测光谱元素丰度（使用预处理后的数据）
-python predict.py --data_path processed_data/prediction_dataset.npz
-
-# 预测并绘制结果分布图
-python predict.py --data_path processed_data/prediction_dataset.npz --plot
-
-# 指定特定元素进行预测（默认预测所有配置的元素）
-python predict.py --data_path processed_data/prediction_dataset.npz --elements C_FE MG_FE
-
-# 指定批次大小进行预测
+# 使用训练好的模型进行预测
 python predict.py --data_path processed_data/prediction_dataset.npz \
-                 --batch_size 64
+                 --output_dir results/predictions \
+                 --elements C_FE MG_FE CA_FE
+                 
+# 使用集成模型进行预测
+python predict.py --data_path processed_data/prediction_dataset.npz \
+                 --ensemble_mode \
+                 --output_dir results/predictions
 ```
 
-预测结果将保存在`results/predictions`目录下，分批处理的结果将保存在`results/prediction_{element}_batch_results`目录下。
+### 4. 模型分析
+
+使用`model_analysis.py`功能或通过`main.py`的`analyze`模式进行模型分析：
+
+#### 特征重要性分析
+
+分析光谱波长区域对预测的重要性，找出对元素丰度预测最重要的光谱特征：
+
+```bash
+# 执行特征重要性分析
+python main.py --mode analyze \
+               --elements C_FE \
+               --analysis_type feature_importance \
+               --analysis_batch_size 32 \
+               --save_batch_results
+```
+
+特征重要性分析会生成以下结果：
+- 光谱特征重要性图（突出显示重要波长区域）
+- 特征解释文件（解释关键光谱特征的天文物理意义）
+- 批次处理趋势和摘要（多批次模式下）
+
+#### 残差分析
+
+分析模型预测的残差分布，评估模型在不同元素丰度区间的表现：
+
+```bash
+# 执行残差分析
+python main.py --mode analyze \
+               --elements C_FE \
+               --analysis_type residual_analysis \
+               --analysis_batch_size 32 \
+               --save_batch_results
+```
+
+残差分析会生成以下结果：
+- 真实值vs预测值散点图
+- 残差分布图（直方图和散点图）
+- 残差QQ图（检查正态性）
+- 性能指标报告（RMSE、MAE、R²等）
+- 批次处理趋势和摘要（多批次模式下）
+
+#### 完整模型分析
+
+同时执行特征重要性分析和残差分析：
+
+```bash
+# 执行完整分析
+python main.py --mode analyze \
+               --elements C_FE MG_FE CA_FE \
+               --analysis_type both \
+               --analysis_batch_size 32 \
+               --save_batch_results
+```
+
+#### 批次分析比较
+
+比较不同批次的分析结果，查找趋势和模式：
+
+```bash
+# 显示特征重要性批次分析结果
+python main.py --mode show_results \
+               --elements C_FE \
+               --result_type analysis \
+               --analysis_type feature_importance
+
+# 显示残差分析批次结果
+python main.py --mode show_results \
+               --elements C_FE \
+               --result_type analysis \
+               --analysis_type residual_analysis
+```
+
+批次分析结果包括：
+1. **特征重要性趋势**：跟踪不同批次的顶级特征重要性变化
+2. **残差指标趋势**：跟踪RMSE、MAE、R²等指标随批次变化
+3. **批次摘要报告**：汇总每个批次的关键发现
+4. **批次间比较**：比较不同批次的结果差异
 
 ### 5. 基线模型比较
 
@@ -495,4 +565,31 @@ python main.py --predict
 1. 优化缓存清理策略
 2. 添加分布式处理支持
 3. 改进数据验证机制
-4. 优化内存管理 
+4. 优化内存管理
+
+## 最近更新日志
+
+### 2023年11月更新
+
+#### 增加了模型分析批处理功能
+- 添加了`model_analysis.py`模块，支持特征重要性和残差分析
+- 实现了批处理跟踪功能，可以比较和可视化不同批次的分析结果
+- 增强了特征解释功能，可以识别和解释重要光谱特征
+- 在`main.py`中添加了`analyze`模式，支持批处理分析和结果显示
+- 配置文件`config.py`中添加了分析参数控制
+
+#### 改进的批处理功能
+- 在多个模块中统一了批处理机制
+- 实现了批次结果的自动保存和加载
+- 添加了批次间比较和趋势分析功能
+- 增强了批次可视化和报告生成
+
+#### 命令行接口更新
+- 添加了`--analysis_type`、`--analysis_batch_size`和`--save_batch_results`参数
+- 在`show_results`命令中添加了`analysis`结果类型
+- 添加了分析批次结果显示功能
+
+未来工作计划:
+- 进一步优化批处理性能
+- 添加更多特征解释和可视化选项
+- 扩展到更多元素的批处理分析支持 
