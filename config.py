@@ -9,11 +9,18 @@ import os
 import torch
 import numpy as np
 import logging
+import json
+import time
+import pickle
 
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('config.log'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger('config')
 
@@ -188,11 +195,14 @@ cache_config = {
         'required_fields': ['data', 'metadata', 'validation_metrics']
     },
     'cache_dirs': {
-        'preprocessing': 'cache/preprocessing',
-        'training': 'cache/training',
-        'evaluation': 'cache/evaluation',
-        'prediction': 'cache/prediction'
-    }
+        'preprocessing': 'processed_data/cache/preprocessing',
+        'training': 'processed_data/cache/train',
+        'evaluation': 'processed_data/cache/evaluation',
+        'prediction': 'processed_data/cache/predict'
+    },
+    'file_format': 'npz',  # 缓存文件格式
+    'compression': True,   # 是否压缩缓存文件
+    'max_cache_size': 1000  # 最大缓存文件数
 }
 
 # 将所有配置合并到一个字典中

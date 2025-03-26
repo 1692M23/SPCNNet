@@ -1,23 +1,43 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+LAMOST光谱数据预处理模块
+"""
+
+import os
+import sys
+import json
+import time
+import pickle
+import logging
+import warnings
+import glob
+import zipfile
+import gc
 import numpy as np
 import pandas as pd
-from astropy.io import fits
-import os
-import glob
-from sklearn.model_selection import train_test_split, KFold
-from scipy import signal, interpolate
-from multiprocessing import Pool, cpu_count
-import time
-from tqdm import tqdm
 import matplotlib.pyplot as plt
-import gc  # 垃圾回收
-import psutil  # 系统资源监控
-import pickle  # 用于保存中间结果
-import warnings
-import subprocess  # 用于执行shell命令
-import zipfile  # 用于解压文件
-import sys  # 用于检测环境
-import shutil
-import torch  # 用于深度学习处理
+from astropy.io import fits
+from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import Pool
+from scipy import interpolate, signal
+from sklearn.model_selection import train_test_split
+import psutil
+from data_validator import DataValidator
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('preprocessing.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger('lamost_preprocessor')
+
 warnings.filterwarnings('ignore')  # 忽略不必要的警告
 
 # 判断是否在Colab环境中
@@ -34,74 +54,101 @@ def is_in_colab():
 # 环境设置
 IN_COLAB = is_in_colab()
 
+class FITSCache:
+    def __init__(self, cache_dir):
+        self.cache_dir = cache_dir
+        os.makedirs(cache_dir, exist_ok=True)
+
+    def get_fits_data(self, obsid):
+        cache_file = os.path.join(self.cache_dir, f"{obsid}.pkl")
+        if os.path.exists(cache_file):
+            with open(cache_file, 'rb') as f:
+                return pickle.load(f)
+        return None
+
+    def cache_fits_data(self, obsid, data):
+        cache_file = os.path.join(self.cache_dir, f"{obsid}.pkl")
+        with open(cache_file, 'wb') as f:
+            pickle.dump(data, f)
+
+class ProgressManager:
+    def __init__(self, total, desc):
+        self.total = total
+        self.desc = desc
+        self.progress = tqdm(total=total, desc=desc, unit="FITS文件")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.progress.close()
+
+    def update(self, value):
+        self.progress.update(value)
+
 class LAMOSTPreprocessor:
-    def __init__(self, csv_files=['C_FE.csv', 'MG_FE.csv', 'CA_FE.csv'], 
+    def __init__(self, csv_files=['X_FE.csv'], 
                  fits_dir='fits', 
                  output_dir='processed_data',
-                 wavelength_range=None,  # 修改为None，表示将使用最大公有波长范围
-                 n_points=None,  # 修改为None，点数将根据波长范围和步长自动计算
-                 log_step=0.0001,  # 新增：对数空间中的重采样步长（dex）
-                 compute_common_range=True,  # 新增：是否计算最大公有波长范围
-                 max_workers=None,  # 最大工作进程数，None表示自动确定
-                 batch_size=20,  # 批处理大小
-                 memory_limit=0.7,  # 内存使用限制(占总内存比例)
-                 low_memory_mode=False):  # 低内存模式
+                 wavelength_range=None,  
+                 n_points=None,  
+                 log_step=0.0001,  
+                 compute_common_range=True,  
+                 max_workers=None,  
+                 batch_size=20,  
+                 memory_limit=0.7,  
+                 low_memory_mode=False):
         
         # 存储初始化参数
-        self.csv_files = csv_files
+        self.csv_files = csv_files if isinstance(csv_files, list) else [csv_files]
         self.fits_dir = fits_dir
         self.output_dir = output_dir
+        self.progress_dir = os.path.join(output_dir, 'progress')
         
-        # 确保目录存在
-        os.makedirs(self.fits_dir, exist_ok=True)
-        os.makedirs(self.output_dir, exist_ok=True)
+        # 创建必要的目录
+        for directory in [output_dir, self.progress_dir]:
+            os.makedirs(directory, exist_ok=True)
+            
+        # 初始化FITS缓存
+        self.fits_cache = FITSCache(
+            cache_dir=os.path.join(output_dir, 'fits_cache'),
+            batch_size=batch_size
+        )
+            
+        # 检查fits目录是否存在
+        if not os.path.exists(fits_dir):
+            os.makedirs(fits_dir)
+            logger.warning(f"创建了fits目录，请确保FITS文件放在 {os.path.abspath(fits_dir)} 目录下")
+        else:
+            logger.info(f"已找到fits目录: {os.path.abspath(fits_dir)}")
+            fits_count = len(glob.glob(os.path.join(fits_dir, "*")))
+            logger.info(f"该目录中有 {fits_count} 个文件")
         
-        # 创建进度保存目录
-        self.progress_dir = os.path.join(self.output_dir, "progress")
-        os.makedirs(self.progress_dir, exist_ok=True)
-        
-        # 设置波长范围和点数
         self.wavelength_range = wavelength_range
         self.n_points = n_points
         self.log_step = log_step
         self.compute_common_range = compute_common_range
-        
-        # 设置并行处理参数
-        if max_workers is None:
-            # 自动设置为CPU核心数减1，避免系统资源过度使用
-            self.max_workers = max(1, os.cpu_count() - 1) if os.cpu_count() else 2
-        else:
-            self.max_workers = max_workers
-            
+        self.max_workers = max_workers
         self.batch_size = batch_size
         self.memory_limit = memory_limit
-        
-        # 设置缓存
-        self.extension_cache = {}
-        
         self.low_memory_mode = low_memory_mode
         
-        # 读取CSV文件并保存为实例变量，方便其他方法访问
-        self.dataframes = self.read_csv_data()
-        
-        # 光速常量（km/s）
-        self.c = 299792.458
-        
-        # 存储已处理光谱的波长范围，用于计算最大公有范围
-        self.processed_ranges = []
-        
-        print(f"设置最大工作进程数: {self.max_workers}")
+        # 初始化其他参数
+        self.common_wavelength_range = None
+        self.wavelength_grid = None
+        self.validator = DataValidator(os.path.join(output_dir, 'validation'))
         
     def read_csv_data(self):
         """读取CSV文件并返回DataFrame列表"""
         dataframes = []
+        element_columns = []
+        
         for csv_file in self.csv_files:
             if not os.path.exists(csv_file):
                 print(f"错误: 找不到CSV文件 {csv_file}")
                 continue
                 
             df = pd.read_csv(csv_file)
-            dataframes.append(df)
             print(f"已加载{csv_file}，共{len(df)}条记录")
             
             # 显示CSV文件的列名，帮助诊断
@@ -130,8 +177,25 @@ class LAMOSTPreprocessor:
                     if pd.api.types.is_numeric_dtype(df[col]):
                         mean_snr = df[col].mean()
                         print(f"  {col} 平均值: {mean_snr:.2f}")
-
-        return dataframes
+        
+            # 查找元素丰度列（以_FE结尾的列）
+            fe_columns = [col for col in df.columns if col.endswith('_FE')]
+            if not fe_columns:
+                print(f"警告: {csv_file}中没有找到元素丰度列（以_FE结尾的列）")
+                continue
+            
+            print(f"找到元素丰度列: {', '.join(fe_columns)}")
+            
+            # 为每个元素丰度列创建单独的DataFrame
+            for fe_col in fe_columns:
+                # 创建新的DataFrame，包含obsid和当前元素丰度列
+                element_df = df[['obsid', fe_col]].copy()
+                element_df.columns = ['obsid', 'abundance']  # 重命名丰度列为统一名称
+                dataframes.append(element_df)
+                element_columns.append(fe_col)
+                print(f"处理元素 {fe_col}: {len(element_df)}条记录")
+        
+        return dataframes, element_columns
     
     def _find_fits_file(self, obsid):
         """通过OBSID查找对应的FITS文件"""
@@ -1205,149 +1269,121 @@ class LAMOSTPreprocessor:
         print(f"成功处理{total_processed}/{len(obsids)}条{element}光谱数据")
         return results
     
-    def process_all_data(self, resume=True):
-        """处理所有数据并准备训练集，支持断点续传"""
-        start_time = time.time()
-        all_data = []
-        
-        # 检查是否有整体进度文件
-        progress_file = os.path.join(self.progress_dir, "all_progress.pkl")
-        if resume and os.path.exists(progress_file):
-            try:
-                with open(progress_file, 'rb') as f:
-                    all_data = pickle.load(f)
-                print(f"已加载保存的处理结果，共{len(all_data)}条记录")
-                
-                # 是否继续处理
-                if input("是否继续处理剩余数据？(y/n): ").lower() != 'y':
-                    # 直接跳到数据转换步骤
-                    return self._prepare_arrays(all_data)
-            except Exception as e:
-                print(f"加载进度文件出错: {e}，将重新处理所有数据")
-                all_data = []
-        
-        # 读取CSV文件
-        dataframes = self.read_csv_data()
-        if not dataframes:
-            print("错误: 没有有效的数据集")
-            return np.array([]), np.array([]), np.array([]), np.array([])
-        
-        # 处理每个元素的数据
-        for i, (df, element) in enumerate(zip(dataframes, ['C_FE', 'MG_FE', 'CA_FE'])):
-            # 检查是否已处理过这个元素
-            element_processed = any(item.get('element') == element for item in all_data) if all_data else False
-            
-            if not element_processed:
-                results = self.process_element_data(df, element)
-                all_data.extend(results)
-            else:
-                print(f"{element}数据已在之前的运行中处理完成")
-            
-            # 保存总进度
-            with open(progress_file, 'wb') as f:
-                pickle.dump(all_data, f)
-                
-            print(f"当前已处理总数据量: {len(all_data)}条")
-            
-            # 检查内存使用情况
-            self.check_memory_usage()
-        
-        # 如果没有处理到任何数据
-        if not all_data:
-            print("警告: 没有成功处理任何光谱数据!")
-            return np.array([]), np.array([]), np.array([]), np.array([])
-        
-        # 转换为NumPy数组并返回
-        return self._prepare_arrays(all_data)
-    
-    def _prepare_arrays(self, all_data):
-        """将处理结果转换为NumPy数组并保存"""
-        # 在转换之前检查并过滤无效数据
-        valid_data = []
-        invalid_count = 0
-        spectrum_lengths = []
-        
-        for item in all_data:
-            # 检查spectrum是否是有效的数组
-            spectrum = item.get('spectrum')
-            if spectrum is not None and isinstance(spectrum, (list, np.ndarray)) and len(spectrum) > 0:
-                spectrum_lengths.append(len(spectrum))
-                valid_data.append(item)
-            else:
-                invalid_count += 1
-        
-        if invalid_count > 0:
-            print(f"警告: 过滤了{invalid_count}条无效数据")
-        
-        if len(valid_data) == 0:
-            print("错误: 没有有效的处理结果")
-            return np.array([]), np.array([]), np.array([]), np.array([])
-        
-        # 检查所有光谱的长度是否一致
-        if len(set(spectrum_lengths)) > 1:
-            most_common_length = max(set(spectrum_lengths), key=spectrum_lengths.count)
-            print(f"警告: 光谱长度不一致! 发现{len(set(spectrum_lengths))}种不同长度")
-            print(f"最常见的长度为{most_common_length}，将其他长度的光谱过滤掉")
-            
-            # 过滤掉长度不一致的数据
-            consistent_data = [item for item, length in zip(valid_data, spectrum_lengths) 
-                              if length == most_common_length]
-            
-            print(f"保留了{len(consistent_data)}/{len(valid_data)}条长度一致的数据")
-            valid_data = consistent_data
-        
-        # 转换为NumPy数组
+    def process_all_data(self):
+        """处理所有数据并生成验证报告"""
         try:
-            X = np.array([item['spectrum'] for item in valid_data])
-            y = np.array([item['label'] for item in valid_data])
-            elements = np.array([item.get('element', '') for item in valid_data])
-            filenames = np.array([item['filename'] for item in valid_data])
+            # 1. 读取CSV文件，获取所有unique的obsid和元素丰度值
+            all_obsids = set()
+            for csv_file in self.csv_files:
+                df = pd.read_csv(csv_file)
+                all_obsids.update(df['obsid'].unique())
             
-            print(f"成功创建数据数组: X形状={X.shape}, y形状={y.shape}")
-        except ValueError as e:
-            print(f"创建数组时出错: {e}")
-            # 尝试更详细地诊断问题
-            lengths = [len(item['spectrum']) for item in valid_data]
-            unique_lengths = set(lengths)
-            if len(unique_lengths) > 1:
-                print(f"光谱长度不一致: {unique_lengths}")
-                length_counts = {length: lengths.count(length) for length in unique_lengths}
-                print(f"各长度数量: {length_counts}")
+            # 2. 处理所有FITS文件
+            processed_data = {}
+            with ProgressManager(len(all_obsids), desc="处理FITS文件") as progress:
+                for obsid in all_obsids:
+                    fits_file = self._find_fits_file(obsid)
+                    if fits_file is not None:
+                        processed_data[obsid] = self.process_fits_file(fits_file)
+                        if processed_data[obsid] is not None:
+                            progress.update(1)
+            
+            # 3. 收集验证数据
+            validation_data = []
+            for obsid, data_dict in processed_data.items():
+                if data_dict is not None:
+                    validation_data.append({
+                        'obsid': obsid,
+                        'data_dict': data_dict
+                    })
+            
+            # 4. 生成验证摘要
+            summary = self.validator.validate_batch(validation_data)
+            
+            # 5. 绘制验证摘要图表
+            self.validator.plot_validation_summary(summary)
+            
+            # 6. 输出验证结果
+            logger.info(f"数据处理完成。总计: {summary['total']}, 通过: {summary['passed']}, 失败: {summary['failed']}")
+            if summary['issues']:
+                logger.warning("发现的问题:")
+                for issue, count in summary['issues'].items():
+                    logger.warning(f"- {issue}: {count}次")
+            
+            return processed_data
+            
+        except Exception as e:
+            logger.error(f"处理数据时出错: {e}")
+            return {}
+            
+    def process_fits_file(self, fits_file):
+        """处理单个FITS文件并进行验证"""
+        if fits_file is None:
+            return None
+            
+        try:
+            # 读取和处理FITS数据
+            data_dict = self._read_fits_file(fits_file)
+            if data_dict is None:
+                return None
                 
-                # 选择最常见的长度
-                most_common = max(length_counts.items(), key=lambda x: x[1])
-                print(f"最常见的长度为: {most_common[0]}，出现{most_common[1]}次")
+            # 验证数据
+            obsid = self._extract_obsid_from_file(fits_file)
+            passed, report = self.validator.validate_fits_data(data_dict, obsid)
+            
+            if not passed:
+                logger.warning(f"FITS文件验证失败 ({fits_file}): {', '.join(report['issues'])}")
+                return None
                 
-                # 只保留最常见长度的数据
-                filtered_data = [item for item, length in zip(valid_data, lengths) 
-                                if length == most_common[0]]
-                print(f"过滤后保留{len(filtered_data)}/{len(valid_data)}条数据")
-                
-                # 重新尝试创建数组
-                X = np.array([item['spectrum'] for item in filtered_data])
-                y = np.array([item['label'] for item in filtered_data])
-                elements = np.array([item.get('element', '') for item in filtered_data])
-                filenames = np.array([item['filename'] for item in filtered_data])
-                valid_data = filtered_data
-            else:
-                # 如果不是长度问题，可能是其他类型不一致
-                print("检查数据类型:")
-                sample_types = [type(item['spectrum']) for item in valid_data[:5]]
-                print(f"前5条记录的光谱类型: {sample_types}")
-                
-                # 尝试将所有数据转换为相同类型
-                X = np.array([np.array(item['spectrum'], dtype=float) for item in valid_data])
-                y = np.array([item['label'] for item in valid_data])
-                elements = np.array([item.get('element', '') for item in valid_data])
-                filenames = np.array([item['filename'] for item in valid_data])
+            return data_dict
+            
+        except Exception as e:
+            logger.error(f"处理FITS文件时出错 ({fits_file}): {e}")
+            return None
+            
+    def _extract_obsid_from_file(self, fits_file):
+        """从FITS文件名中提取观测ID"""
+        try:
+            # 假设文件名格式为：path/to/spec-OBSID.fits
+            filename = os.path.basename(fits_file)
+            obsid = filename.split('-')[1].split('.')[0]
+            return obsid
+        except Exception:
+            return os.path.splitext(os.path.basename(fits_file))[0]
+    
+    def save_element_datasets(self, element, data):
+        """为每个元素分割并保存数据集"""
+        # 转换为NumPy数组
+        X = np.array([item['spectrum'] for item in data])
+        y = np.array([item['label'] for item in data])
+        filenames = np.array([item['metadata']['original_flux'] for item in data])
+        
+        print(f"成功创建{element}数据数组: X形状={X.shape}, y形状={y.shape}")
         
         # 保存处理后的数据
-        np.savez(os.path.join(self.output_dir, 'processed_data.npz'),
-                X=X, y=y, elements=elements, filenames=filenames)
+        output_file = os.path.join(self.output_dir, f'processed_data_{element}.npz')
+        np.savez(output_file, X=X, y=y, element=element, filenames=filenames)
+        print(f"已保存{element}的数据到: {output_file}")
         
-        print(f"数据处理完成，总数据量: {len(X)}条")
+        # 分割数据集
+        train_data, val_data, test_data = self.split_dataset(X, y, np.full(len(X), element))
         
-        return X, y, elements, filenames
+        # 保存训练集
+        np.savez(os.path.join(self.output_dir, f'train_dataset_{element}.npz'),
+                X=train_data[0], y=train_data[1], element=element)
+        
+        # 保存验证集
+        np.savez(os.path.join(self.output_dir, f'val_dataset_{element}.npz'),
+                X=val_data[0], y=val_data[1], element=element)
+        
+        # 保存测试集
+        np.savez(os.path.join(self.output_dir, f'test_dataset_{element}.npz'),
+                X=test_data[0], y=test_data[1], element=element)
+        
+        print(f"{element}数据集分割完成:")
+        print(f"训练集: {train_data[0].shape[0]}条 (70%)")
+        print(f"验证集: {val_data[0].shape[0]}条 (10%)")
+        print(f"测试集: {test_data[0].shape[0]}条 (20%)")
     
     def split_dataset(self, X, y, elements):
         """按照7:1:2的比例分割数据集为训练集、验证集和测试集"""
@@ -1507,7 +1543,7 @@ class LAMOSTPreprocessor:
                                 break
             except Exception as e:
                 print(f"从CSV查找红移数据出错: {e}")
-        
+            
         # 定义主要吸收线位置(埃)和标签
         absorption_lines = {
             'CaII K': 3933.7,
@@ -1858,17 +1894,7 @@ class LAMOSTPreprocessor:
         
     def clean_cache(self):
         """清理缓存文件"""
-        if os.path.exists(self.cache_dir):
-            cache_files = glob.glob(os.path.join(self.cache_dir, "*"))
-            if cache_files:
-                print(f"发现{len(cache_files)}个缓存文件")
-                if input("是否清理缓存? (y/n): ").lower() == 'y':
-                    for file in tqdm(cache_files, desc="清理缓存"):
-                        try:
-                            os.remove(file)
-                        except Exception:
-                            pass
-                    print("缓存清理完成")
+        self.fits_cache.clean_cache()
 
     def check_and_fix_file_paths(self):
         """检查并修复文件路径问题"""
@@ -1928,24 +1954,6 @@ class LAMOSTPreprocessor:
             else:
                 print(f"  _find_fits_file未找到文件")
             
-            # 使用缓存函数
-            cached_path = self._get_file_extension(spec)
-            if cached_path:
-                print(f"  _get_file_extension找到: {cached_path}")
-            else:
-                print(f"  _get_file_extension未找到文件")
-        
-        # 清除缓存并重新测试
-        print("\n清除缓存后重新测试:")
-        self.extension_cache = {}
-        for spec in test_files[:1]:  # 只测试第一个
-            print(f"重新测试: {spec}")
-            found_path = self._find_fits_file(spec)
-            if found_path:
-                print(f"  重新测试找到: {found_path}")
-            else:
-                print(f"  重新测试未找到文件")
-        
         print("\n=== 诊断完成 ===\n")
 
     # 添加新方法，用于从FITS文件提取OBSID
@@ -2042,7 +2050,7 @@ class LAMOSTPreprocessor:
                         if user_input != 'y':
                             print("用户选择停止处理")
                             break
-                else:
+                    else:
                     print(f"批次 {processed_batches + 1} 处理失败")
                     
             return processed_batches > 0
@@ -2055,42 +2063,61 @@ class LAMOSTPreprocessor:
 
 def main():
     """主函数"""
-    # 设置参数
-    params = {
-        'csv_file': 'CA_FE.csv',  # 参考数据集
-        'fits_dir': 'fits',  # 光谱文件目录
-        'output_dir': 'processed_data',  # 输出目录
-        'batch_size': 32,  # 批处理大小
-        'num_workers': 4,  # 数据加载的工作进程数
-        'test_size': 0.2,  # 测试集比例
-        'val_size': 0.2,  # 验证集比例
-        'random_state': 42,  # 随机种子
-        'device': 'cuda' if torch.cuda.is_available() else 'cpu'  # 设备选择
-    }
+    import argparse
+    
+    # 创建参数解析器
+    parser = argparse.ArgumentParser(description='预处理LAMOST光谱数据')
+    parser.add_argument('--reference_csv', type=str, help='参考数据集CSV文件，例如X_FE.csv')
+    parser.add_argument('--prediction_csv', type=str, help='预测数据集CSV文件，例如galah_X_FE.csv或LASP_X_FE.csv')
+    parser.add_argument('--fits_dir', type=str, default='fits', help='FITS文件目录')
+    parser.add_argument('--output_dir', type=str, default='processed_data', help='输出目录')
+    parser.add_argument('--batch_size', type=int, default=32, help='批处理大小')
+    parser.add_argument('--n_workers', type=int, default=4, help='工作进程数')
+    parser.add_argument('--no_cache', action='store_true', help='不使用缓存')
+    parser.add_argument('--denoise', action='store_true', help='进行去噪处理')
+    parser.add_argument('--normalize', action='store_true', help='进行归一化处理')
+    parser.add_argument('--clear_cache', action='store_true', help='清除缓存并重新处理')
+    
+    # 解析命令行参数
+    args = parser.parse_args()
+    
+    # 设置CSV文件列表
+    csv_files = []
+    if args.reference_csv:
+        if not args.reference_csv.endswith('X_FE.csv'):
+            print(f"警告：参考数据集文件名应为X_FE.csv格式，当前为{args.reference_csv}")
+        csv_files.append(args.reference_csv)
+    
+    if args.prediction_csv:
+        if not any(args.prediction_csv.startswith(prefix) for prefix in ['galah_', 'LASP_']) or \
+           not args.prediction_csv.endswith('X_FE.csv'):
+            print(f"警告：预测数据集文件名应为galah_X_FE.csv或LASP_X_FE.csv格式，当前为{args.prediction_csv}")
+        csv_files.append(args.prediction_csv)
+    
+    if not csv_files:
+        print("错误：至少需要指定一个CSV文件（--reference_csv 或 --prediction_csv）")
+        return
+    
+    print("处理以下CSV文件：")
+    for csv_file in csv_files:
+        print(f"- {csv_file}")
     
     # 创建预处理器
     preprocessor = LAMOSTPreprocessor(
-        csv_file=params['csv_file'],
-        fits_dir=params['fits_dir'],
-        output_dir=params['output_dir'],
-        batch_size=params['batch_size'],
-        num_workers=params['num_workers'],
-        test_size=params['test_size'],
-        val_size=params['val_size'],
-        random_state=params['random_state'],
-        device=params['device']
+        csv_files=csv_files,
+        fits_dir=args.fits_dir,
+        output_dir=args.output_dir,
+        batch_size=args.batch_size,
+        max_workers=args.n_workers,
+        low_memory_mode=args.no_cache
     )
     
-    # 询问用户是否继续数据处理
-    if not preprocessor.ask_user_continue():
-        return
-    
-    # 询问用户是否划分数据集
-    if not preprocessor.ask_user_split():
-        return
+    # 如果指定了clear_cache，先清除缓存
+    if args.clear_cache:
+        preprocessor.clean_cache()
     
     # 执行预处理
-    preprocessor.process()
+    preprocessor.process_all_data()
 
 if __name__ == "__main__":
     try:
@@ -2103,7 +2130,7 @@ if __name__ == "__main__":
                 
                 # 询问用户是否需要上传文件
                 if input("是否需要上传CSV文件? (y/n): ").lower() == 'y':
-                    print("请上传C_FE.csv, MG_FE.csv, CA_FE.csv文件...")
+                    print("请上传(galah_)X_FE.csv文件...")
                     uploaded = colab_files.upload()
                     print("上传的文件:", list(uploaded.keys()))
 

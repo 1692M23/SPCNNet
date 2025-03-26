@@ -22,6 +22,7 @@ from model import SpectralResCNN, SpectralResCNNEnsemble, train_model, evaluate_
 from evaluation import evaluate_all_elements, plot_predictions_vs_true, plot_metrics_comparison
 from utils import CacheManager, ProgressManager, ask_clear_cache
 from multi_element_processor import MultiElementProcessor
+from fits_cache import FITSCache
 
 # 配置日志
 logging.basicConfig(
@@ -37,68 +38,23 @@ logger = logging.getLogger('main')
 # 创建缓存管理器
 cache_manager = CacheManager(cache_dir=os.path.join(config.output_config['cache_dir'], 'main'))
 
-def load_dataset(data_path, element):
-    """
-    加载数据集
+def load_data(data_path, element=None):
+    """加载数据，支持从缓存加载FITS信息"""
+    data = np.load(data_path)
+    X = data['X']
+    y = data['y']
     
-    参数:
-        data_path (str): 数据文件路径
-        element (str): 元素名称
-        
-    返回:
-        tuple: (spectra, labels) 光谱数据和标签
-    """
-    # 检查缓存
-    cache_key = f"dataset_{os.path.basename(data_path)}_{element}"
-    cached_data = cache_manager.get_cache(cache_key)
-    if cached_data is not None:
-        logger.info(f"从缓存加载数据集: {data_path}")
-        return cached_data['spectra'], cached_data['labels']
+    if 'obsid' in data:
+        obsids = data['obsid']
+        # 如果需要额外的FITS信息
+        fits_cache = FITSCache(os.path.join('processed_data', 'fits_cache'))
+        additional_data = []
+        for obsid in obsids:
+            cached_data = fits_cache.get_fits_data(obsid)
+            if cached_data is not None:
+                additional_data.append(cached_data)
     
-    try:
-        data = np.load(data_path)
-        
-        # 检查'X'字段（光谱数据）是否存在
-        if 'X' not in data:
-            logger.error(f"数据文件缺少'X'字段")
-            return None, None
-        
-        # 获取光谱数据
-        spectra = data['X']
-        
-        # 检查'y'字段是否存在
-        if 'y' not in data:
-            logger.error(f"数据文件缺少'y'字段")
-            return None, None
-            
-        # 获取标签数据
-        labels = data['y']
-        
-        # 检查元素是否匹配
-        if 'elements' in data:
-            # 获取第一个元素名称（因为所有元素名称都是相同的）
-            dataset_element = str(data['elements'][0])
-            if dataset_element != element:
-                logger.error(f"数据集元素 {dataset_element} 与请求元素 {element} 不匹配")
-                return None, None
-            else:
-                logger.info(f"找到元素 {element} 的数据")
-        
-        logger.info(f"已加载数据集: {data_path}, 光谱数量: {len(spectra)}")
-        
-        # 保存到缓存
-        cache_manager.set_cache(cache_key, {
-            'spectra': spectra,
-            'labels': labels
-        })
-        
-        return spectra, labels
-        
-    except Exception as e:
-        logger.error(f"加载数据集失败: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return None, None
+    return X, y, additional_data if 'obsid' in data else None
 
 def create_data_loaders(spectra, labels, batch_size=32, shuffle=True):
     """
@@ -329,9 +285,9 @@ def process_element(element, config=None):
         config = config.CONFIG
         
     # 加载数据集
-    train_data = load_dataset(os.path.join('processed_data', 'train_dataset.npz'), element)
-    val_data = load_dataset(os.path.join('processed_data', 'val_dataset.npz'), element)
-    test_data = load_dataset(os.path.join('processed_data', 'test_dataset.npz'), element)
+    train_data = load_data(os.path.join('processed_data', 'train_dataset.npz'), element)
+    val_data = load_data(os.path.join('processed_data', 'val_dataset.npz'), element)
+    test_data = load_data(os.path.join('processed_data', 'test_dataset.npz'), element)
     
     if train_data[0] is None or val_data[0] is None:
         logger.error(f"加载{element}的数据集失败")

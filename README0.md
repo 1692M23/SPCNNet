@@ -12,12 +12,17 @@
 ├── main.py             # 训练和测试主程序
 ├── evaluation.py       # 模型评估和可视化工具
 ├── predict.py          # 预测功能
+├── data_validator.py   # 数据验证工具
 ├── fits/               # 原始光谱FITS文件
 ├── processed_data/     # 处理后的数据
 │   ├── cache/         # 缓存目录
-│   │   ├── predict/  # 预测相关缓存
-│   │   └── train/    # 训练相关缓存
-│   ├── progress/     # 进度保存目录
+│   │   ├── preprocessing/  # 预处理缓存
+│   │   ├── train/     # 训练缓存
+│   │   ├── evaluation/ # 评估缓存
+│   │   └── predict/   # 预测缓存
+│   ├── progress/      # 进度保存目录
+│   ├── validation/    # 数据验证结果
+│   │   └── plots/     # 验证图表
 │   ├── train_dataset.npz    # 训练集
 │   ├── val_dataset.npz      # 验证集
 │   ├── test_dataset.npz     # 测试集
@@ -26,7 +31,8 @@
 ├── models/             # 模型保存目录
 ├── logs/              # 日志目录
 │   ├── train/        # 训练日志
-│   └── predict/      # 预测日志
+│   ├── predict/      # 预测日志
+│   └── validation/   # 验证日志
 ├── results/           # 结果目录
 │   ├── predictions/  # 预测结果
 │   └── evaluation/   # 评估结果
