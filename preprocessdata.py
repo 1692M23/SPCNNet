@@ -111,8 +111,7 @@ class LAMOSTPreprocessor:
             
         # 初始化FITS缓存
         self.fits_cache = FITSCache(
-            cache_dir=os.path.join(output_dir, 'fits_cache'),
-            batch_size=batch_size
+            os.path.join(output_dir, 'fits_cache')
         )
             
         # 检查fits目录是否存在
