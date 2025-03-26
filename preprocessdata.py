@@ -1300,49 +1300,40 @@ class LAMOSTPreprocessor:
             return {}
             
     def process_fits_file(self, fits_file):
-        """处理单个FITS文件"""
+        """处理单个FITS文件，提取和预处理光谱数据"""
         try:
-            # 读取FITS文件
-            data = self.read_fits_file(fits_file)
-            if data is None:
+            logger.info(f"开始处理FITS文件: {os.path.basename(fits_file)}")
+            
+            # 读取FITS文件数据
+            data_dict = self.read_fits_file(fits_file)
+            
+            if data_dict is None:
                 logger.warning(f"无法读取FITS文件: {fits_file}")
-            return None
-            
-            # 提取OBSID
-            obsid = self._extract_obsid_from_file(fits_file)
-            if obsid is None:
-                logger.warning(f"无法从文件名提取OBSID: {fits_file}")
                 return None
-            
-            # 确保data是字典类型
-            if isinstance(data, tuple):
-                data_dict = {
-                    'wavelength': data[0],
-                    'flux': data[1],
-                    'z': data[2] if len(data) > 2 else 0,
-                    'v_helio': data[3] if len(data) > 3 else 0
-                }
-            else:
-                data_dict = data
-            
-            # 处理光谱数据
+                
+            # 提取光谱数据进行处理
             processed_spectrum = self.process_spectrum(data_dict)
             
-            if processed_spectrum is None:
+            if processed_spectrum is not None:
+                # 获取观测ID和原始文件名
+                obsid = data_dict.get('obsid', self._extract_obsid_from_fits(fits_file))
+                original_filename = os.path.basename(fits_file)
+                
+                # 构建结果字典
+                result = {
+                    'obsid': obsid,
+                    'processed_spectrum': processed_spectrum,
+                    'original_filename': original_filename
+                }
+                
+                logger.info(f"成功处理FITS文件: {os.path.basename(fits_file)}")
+                return result
+            else:
                 logger.warning(f"处理光谱数据失败: {fits_file}")
                 return None
                 
-            # 构建结果字典
-            result = {
-                'processed_spectrum': processed_spectrum,
-                'original_filename': os.path.basename(fits_file),
-                'obsid': obsid
-            }
-            
-            return result
-            
         except Exception as e:
-            logger.error(f"处理FITS文件时出错 ({fits_file}): {e}")
+            logger.error(f"处理FITS文件时出错 ({fits_file}): {str(e)}")
             return None
     
     def save_element_datasets(self, element, data):
@@ -1989,28 +1980,20 @@ class LAMOSTPreprocessor:
 
     # 添加方法用于构建FITS文件到OBSID的映射
     def _build_fits_obsid_mapping(self):
-        """扫描FITS目录，构建文件路径到OBSID的映射"""
-        if hasattr(self, '_fits_obsid_map') and self._fits_obsid_map:
-            return self._fits_obsid_map
-        
-        print("构建FITS文件与OBSID的映射关系...")
+        """构建FITS文件与OBSID的映射关系"""
         self._fits_obsid_map = {}
         
-        # 获取所有FITS文件
+        # 获取FITS目录中的所有FITS文件
         fits_files = []
-        for root, _, files in os.walk(self.fits_dir):
-            for file in files:
-                if any(file.endswith(ext) for ext in ['.fits', '.fits.gz', '.fit', '.fit.gz']):
-                    fits_files.append(os.path.join(root, file))
+        for ext in ['.fits', '.fit', '.fits.gz', '.fit.gz']:
+            fits_files.extend(glob.glob(os.path.join(self.fits_dir, f'**/*{ext}'), recursive=True))
         
-        print(f"找到{len(fits_files)}个FITS文件，开始提取OBSID...")
-        
-        # 批量处理文件，显示进度
         total_files = len(fits_files)
-        for i, fits_file in enumerate(fits_files):
-            if i % 100 == 0:
-                print(f"进度: {i}/{total_files} ({i/total_files*100:.1f}%)")
-            
+        print(f"开始构建FITS-OBSID映射，共 {total_files} 个文件")
+        
+        # 使用tqdm显示进度
+        from tqdm import tqdm
+        for fits_file in tqdm(fits_files, desc="构建FITS-OBSID映射", unit="文件"):
             obsid = self._extract_obsid_from_fits(fits_file)
             if obsid:
                 self._fits_obsid_map[obsid] = fits_file
@@ -2021,23 +2004,40 @@ class LAMOSTPreprocessor:
     def process_data(self):
         """执行数据处理"""
         try:
+            import time
+            start_time = time.time()
+            
+            logger.info("=== 开始数据处理 ===")
+            
             # 1. 读取CSV数据并保存到self.csv_data
+            logger.info("步骤1: 读取CSV数据")
             self.read_csv_data()
+            logger.info(f"CSV数据读取完成，共 {sum(len(df) for df in self.csv_data.values())} 条记录")
             
             # 2. 处理所有元素数据（使用分批处理）
+            logger.info("步骤2: 开始批量处理元素数据")
             processed_data = self.process_all_data_in_batches()
             
             # 3. 保存所有缓存
+            logger.info("步骤3: 保存缓存数据")
             self.obsid_cache.save_cache()
             
-            # 4. 返回处理后的数据
+            # 4. 计算并显示处理时间
+            end_time = time.time()
+            total_time = end_time - start_time
+            hours, remainder = divmod(total_time, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            logger.info(f"=== 数据处理完成 ===")
+            logger.info(f"总处理时间: {int(hours)}小时 {int(minutes)}分钟 {seconds:.2f}秒")
+            
+            # 5. 返回处理后的数据
             return processed_data
             
         except Exception as e:
             # 保存缓存，即使发生错误
             self.obsid_cache.save_cache()
             
-            print(f"数据处理失败: {str(e)}")
+            logger.error(f"数据处理失败: {str(e)}")
             import traceback
             traceback.print_exc()
             return False
@@ -2048,20 +2048,30 @@ class LAMOSTPreprocessor:
         final_results = {}
         
         try:
+            # 使用已存在的ProgressManager类添加进度显示
+            from tqdm import tqdm
+            
             # 检查数据源和文件路径
+            logger.info("检查数据源和文件路径...")
             self.check_data_sources()
             self.check_and_fix_file_paths()
             
             # 准备FITS文件列表
+            logger.info("准备FITS文件列表...")
             fits_files = []
             for element, df in self.csv_data.items():
-                for obsid in df['obsid'].values:
+                element_count = 0
+                # 使用tqdm显示当前元素的处理进度
+                for obsid in tqdm(df['obsid'].values, desc=f"查找{element}的FITS文件", unit="文件"):
                     fits_file = self._find_fits_file(obsid)
                     if fits_file and fits_file not in fits_files:
                         fits_files.append(fits_file)
+                        element_count += 1
+                logger.info(f"元素{element}：找到 {element_count} 个FITS文件")
             
             # 如果处理所有FITS文件，则获取目录中的所有文件
             if self.process_all_fits:
+                logger.info("获取所有FITS文件...")
                 all_fits_files = []
                 for ext in ['.fits', '.fit', '.fits.gz', '.fit.gz']:
                     all_fits_files.extend(glob.glob(os.path.join(self.fits_dir, f'**/*{ext}'), recursive=True))
@@ -2074,18 +2084,25 @@ class LAMOSTPreprocessor:
             # 设置批处理参数
             batch_size = self.batch_size
             total_batches = math.ceil(total_files / batch_size)
+            logger.info(f"将分 {total_batches} 批处理，每批 {batch_size} 个文件")
             
-            # 初始化进度显示和处理结果
-            with tqdm(total=total_files, desc="处理FITS文件") as pbar:
+            # 使用ProgressManager创建进度管理器
+            total_success = 0
+            total_errors = 0
+            
+            # 初始化进度显示
+            with tqdm(total=total_files, desc="处理FITS文件", unit="文件") as pbar:
                 for batch_index in range(total_batches):
                     # 确定当前批次的文件
                     start_idx = batch_index * batch_size
                     end_idx = min(start_idx + batch_size, total_files)
                     current_batch = fits_files[start_idx:end_idx]
                     
+                    # 批次开始信息
+                    batch_start_time = time.time()
                     logger.info(f"开始处理第 {batch_index+1}/{total_batches} 批文件 (共 {len(current_batch)} 个文件)")
                     
-                # 处理当前批次
+                    # 处理当前批次
                     batch_results = {}
                     success_count = 0
                     error_count = 0
@@ -2112,15 +2129,21 @@ class LAMOSTPreprocessor:
                             pbar.update(1)
             
                         except Exception as e:
-                            logger.error(f"处理FITS文件时出错 ({fits_file}): {e}")
+                            logger.error(f"处理FITS文件时出错 ({os.path.basename(fits_file)}): {str(e)}")
                             error_count += 1
                             pbar.update(1)
                     
                     # 批次处理完成，合并结果
                     final_results.update(batch_results)
                     
+                    # 更新总计数
+                    total_success += success_count
+                    total_errors += error_count
+                    
+                    # 计算批次处理时间
+                    batch_time = time.time() - batch_start_time
                     # 报告当前批次的结果
-                    logger.info(f"第 {batch_index+1}/{total_batches} 批处理完成: 成功 {success_count}, 失败 {error_count}")
+                    logger.info(f"第 {batch_index+1}/{total_batches} 批处理完成: 成功 {success_count}, 失败 {error_count}, 耗时 {batch_time:.2f} 秒")
                     
                     # 每批次处理后清理内存
                     gc.collect()
@@ -2133,35 +2156,54 @@ class LAMOSTPreprocessor:
                             logger.info(f"GPU内存使用: 已分配 {allocated:.2f}MB, 已保留 {reserved:.2f}MB")
                     
                     # 保存OBSID缓存
-                    self.obsid_cache.save_cache()
+                    if batch_index % 5 == 0 or batch_index == total_batches - 1:  # 每5批或最后一批保存一次
+                        self.obsid_cache.save_cache()
+                        logger.info("已保存OBSID缓存")
+            
+            # 处理完成统计
+            logger.info(f"FITS文件处理完成: 总文件数 {total_files}, 成功 {total_success}, 失败 {total_errors}")
             
             # 处理CSV数据中的每个元素
             processed_elements = {}
+            logger.info("开始处理各元素数据...")
+            
             for element, df in self.csv_data.items():
-                logger.info(f"处理元素 {element} 的数据")
+                logger.info(f"处理元素 {element} 的数据 (共 {len(df)} 条记录)")
                 element_data = self.process_element_data_with_cache(df, element, final_results)
                 
                 # 保存元素数据集
                 if element_data:
+                    logger.info(f"保存元素 {element} 的数据集...")
                     self.save_element_datasets(element, element_data)
                     processed_elements[element] = element_data
+                    logger.info(f"元素 {element} 处理完成，共 {len(element_data)} 条有效数据")
+                else:
+                    logger.warning(f"元素 {element} 没有有效数据")
             
             return processed_elements
             
         except Exception as e:
-            logger.error(f"批处理数据时出错: {e}")
+            logger.error(f"批处理数据时出错: {str(e)}")
             import traceback
             traceback.print_exc()
             return final_results
-            
+
     def process_element_data_with_cache(self, df, element, processed_fits_data):
         """使用已处理的FITS数据处理元素数据"""
         # 初始化处理结果
         processed_data = []
         
         try:
-            # 显示进度
-            with tqdm(total=len(df), desc=f"处理{element}数据") as pbar:
+            # 显示处理进度
+            from tqdm import tqdm
+            
+            start_time = time.time()
+            logger.info(f"开始处理元素 {element} 的数据 (共 {len(df)} 条记录)")
+            found_count = 0
+            missing_count = 0
+            error_count = 0
+            
+            with tqdm(total=len(df), desc=f"处理{element}数据", unit="记录") as pbar:
                 for index, row in df.iterrows():
                     try:
                         # 获取观测ID和标签
@@ -2171,6 +2213,7 @@ class LAMOSTPreprocessor:
                         # 检查是否已处理过这个FITS文件
                         if obsid in processed_fits_data:
                             data_dict = processed_fits_data[obsid]
+                            found_count += 1
                             
                             # 构建结果字典
                             result = {
@@ -2186,20 +2229,45 @@ class LAMOSTPreprocessor:
                             if result['spectrum'] is not None:
                                 processed_data.append(result)
                         else:
-                            logger.warning(f"未找到观测ID {obsid} 的已处理数据")
+                            missing_count += 1
+                            if missing_count < 10:
+                                logger.warning(f"未找到观测ID {obsid} 的已处理数据")
+                            elif missing_count == 10:
+                                logger.warning(f"已有10个观测ID未找到，后续未找到的观测ID将不再单独显示")
                             
                         # 更新进度
                         pbar.update(1)
                         
+                        # 每处理1000条数据输出一次统计信息
+                        if (index + 1) % 1000 == 0:
+                            logger.info(f"已处理 {index + 1}/{len(df)} 条记录")
+                        
                     except Exception as e:
-                        logger.error(f"处理元素数据时出错 (观测ID: {obsid}): {e}")
+                        error_count += 1
+                        if error_count < 10:
+                            logger.error(f"处理元素数据时出错 (观测ID: {obsid}): {str(e)}")
+                        elif error_count == 10:
+                            logger.error(f"已有10个记录处理错误，后续错误将不再单独显示")
                         pbar.update(1)
             
-            logger.info(f"元素 {element} 的数据处理完成，共处理 {len(processed_data)}/{len(df)} 条数据")
+            end_time = time.time()
+            processing_time = end_time - start_time
+            
+            success_rate = (len(processed_data) / len(df)) * 100 if len(df) > 0 else 0
+            logger.info(f"元素 {element} 的数据处理完成:")
+            logger.info(f"  - 总记录: {len(df)}")
+            logger.info(f"  - 成功处理: {len(processed_data)} ({success_rate:.2f}%)")
+            logger.info(f"  - 已找到FITS数据: {found_count}")
+            logger.info(f"  - 缺失FITS数据: {missing_count}")
+            logger.info(f"  - 处理错误: {error_count}")
+            logger.info(f"  - 处理时间: {processing_time:.2f}秒")
+            
             return processed_data
             
         except Exception as e:
-            logger.error(f"处理元素 {element} 数据时出错: {e}")
+            logger.error(f"处理元素 {element} 数据时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return processed_data
 
     def process_spectrum(self, data_dict):
