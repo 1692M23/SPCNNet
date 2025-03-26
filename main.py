@@ -513,148 +513,221 @@ def process_multiple_elements(csv_file, fits_dir, element_columns=None,
                              test_size=0.2, val_size=0.1, batch_size=32, 
                              tune_hyperparams=False, device=None, batch_size_hyperopt=1000, batches_per_round=2):
     """
-    处理多个元素丰度的完整流程：数据加载、训练、评估
+    处理多元素数据
     
     参数:
-        csv_file (str): 包含obsid和元素丰度的CSV文件
+        csv_file (str): CSV文件路径，包含元素丰度数据
         fits_dir (str): FITS文件目录
-        element_columns (list): 元素丰度列名列表，如['C_FE', 'MG_FE', 'CA_FE']
+        element_columns (list): 要处理的元素列名列表，如果为None则自动检测
         test_size (float): 测试集比例
         val_size (float): 验证集比例
-        batch_size (int): 批次大小
-        tune_hyperparams (bool): 是否进行超参数调优
-        device (str): 计算设备
-        batch_size_hyperopt (int): 批量超参数优化批量大小
-        batches_per_round (int): 批量超参数优化每轮处理的批次数
+        batch_size (int): 训练批次大小
+        tune_hyperparams (bool): 是否调优超参数
+        device (str): 使用的设备（'cpu'或'cuda'）
+        batch_size_hyperopt (int): 超参数调优的批次大小
+        batches_per_round (int): 每轮超参数调优使用的批次数
         
     返回:
-        dict: 包含各元素模型和评估指标的字典
+        dict: 各元素的评估结果
     """
-    # 检查缓存
-    cache_key = f"multi_elements_{os.path.basename(csv_file)}"
-    cached_data = cache_manager.get_cache(cache_key)
-    if cached_data is not None:
-        logger.info(f"从缓存加载多元素处理结果")
-        return cached_data
+    logger.info(f"开始处理多元素数据: {csv_file}, 元素列表: {element_columns}")
     
-    if device is None:
-        device = config.training_config['device']
+    # 创建输出目录
+    output_dir = os.path.join(config.data_config['processed_data_dir'], 'multi_element')
+    os.makedirs(output_dir, exist_ok=True)
     
-    # 初始化数据处理器
-    processor = MultiElementProcessor(fits_dir=fits_dir)
+    # 创建多元素处理器
+    processor = MultiElementProcessor(
+        fits_dir=fits_dir,
+        cache_dir=os.path.join(config.output_config['cache_dir'], 'multi_element'),
+        output_dir=output_dir
+    )
     
-    # 准备数据集
-    logger.info(f"开始处理CSV文件 {csv_file} 中的多元素丰度数据")
+    # 准备数据集 (返回dict: element -> {train, val, test})
     datasets = processor.prepare_datasets(
-        csv_file, 
+        csv_file=csv_file,
         element_columns=element_columns,
         test_size=test_size,
         val_size=val_size
     )
     
-    # 处理每个元素
+    if not datasets:
+        logger.warning("未找到有效的元素数据")
+        return {}
+    
+    # 设置设备
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info(f"使用设备: {device}")
+    
+    # 为每个元素训练模型
     results = {}
-    with ProgressManager(len(datasets), desc="处理元素丰度") as progress:
-        for element, dataset in datasets.items():
-            logger.info(f"开始处理元素: {element}")
+    for element, data in datasets.items():
+        logger.info(f"开始处理元素 {element}")
+        
+        # 提取数据
+        X_train, y_train = data['train']
+        X_val, y_val = data['val']
+        X_test, y_test = data['test']
+        
+        logger.info(f"元素 {element} 数据集大小: 训练集:{X_train.shape}, 验证集:{X_val.shape}, 测试集:{X_test.shape}")
+        
+        # 创建数据加载器
+        train_loader = create_data_loaders(X_train, y_train, batch_size=batch_size)
+        val_loader = create_data_loaders(X_val, y_val, batch_size=batch_size, shuffle=False)
+        test_loader = create_data_loaders(X_test, y_test, batch_size=batch_size, shuffle=False)
+        
+        # 创建训练配置
+        element_config = config
+        element_config.training_config['device'] = device
+        
+        # 检查是否使用批处理分析
+        if hasattr(config, 'analysis_config') and config.analysis_config.get('enabled', False):
+            if config.analysis_config.get('batch_processing', {}).get('enabled', False):
+                logger.info(f"为{element}启用批处理分析")
+                # 设置批处理参数
+                batch_size_analysis = config.analysis_config.get('batch_processing', {}).get('batch_size', 32)
+                save_batch_results = config.analysis_config.get('batch_processing', {}).get('save_batch_results', True)
+                # 确保分析目录存在
+                analysis_dir = os.path.join(config.output_config['results_dir'], 'analysis', element)
+                os.makedirs(analysis_dir, exist_ok=True)
+        
+        # 是否执行超参数调优
+        best_hyperparams = None
+        if tune_hyperparams:
+            logger.info(f"开始为元素 {element} 进行超参数调优")
             
-            # 创建数据加载器
-            train_loader = create_data_loaders(
-                dataset['train'][0], dataset['train'][1], 
-                batch_size=batch_size
-            )
-            val_loader = create_data_loaders(
-                dataset['val'][0], dataset['val'][1], 
-                batch_size=batch_size, shuffle=False
-            )
-            test_loader = create_data_loaders(
-                dataset['test'][0], dataset['test'][1], 
-                batch_size=batch_size, shuffle=False
+            # 准备超参数网格
+            param_grid = config.hyperparameter_config['param_grid']
+            
+            # 进行超参数调优
+            from hyperparameter_tuning_replacement import hyperparameter_tuning
+            best_hyperparams = hyperparameter_tuning(
+                element=element,
+                X_train=X_train, y_train=y_train,
+                X_val=X_val, y_val=y_val,
+                param_grid=param_grid,
+                device=device,
+                batch_size=batch_size_hyperopt,
+                batches_per_round=batches_per_round
             )
             
-            # 超参数调优（如果启用）
-            hyperparams = None
-            if tune_hyperparams:
-                logger.info(f"开始 {element} 的超参数调优")
-                hyperparams = hyperparameter_tuning(
-                    element, train_loader, val_loader, device=device
-                )
-            
-            # 训练集成模型
-            logger.info(f"开始训练 {element} 模型")
-            ensemble = SpectralResCNNEnsemble(
-                input_size=config.model_config['input_size'],
-                num_models=config.model_config.get('num_ensemble_models', 3),
-                dropout_rate=config.model_config.get('dropout_rate', 0.5)
-            )
-            
+            # 更新配置
+            for param, value in best_hyperparams.items():
+                if param in element_config.training_config:
+                    element_config.training_config[param] = value
+                    
+            logger.info(f"元素 {element} 超参数调优完成: {best_hyperparams}")
+        
+        # 使用最佳超参数训练模型
+        logger.info(f"开始为元素 {element} 训练最终模型")
+        
+        try:
             # 训练模型
-            train_results = ensemble.train(train_loader, val_loader, element, config)
-            
-            # 评估模型
-            logger.info(f"开始评估 {element} 模型")
-            test_metrics = {}
-            for i, model in enumerate(ensemble.models):
-                model_metrics = evaluate_model(
-                    model, test_loader, device=device
-                )
-                test_metrics[f"model_{i+1}"] = model_metrics
-            
-            # 评估集成模型
-            ensemble_predictions = []
-            ensemble_targets = []
-            
-            for spectra, targets in test_loader:
-                spectra = spectra.to(device)
-                predictions, _ = ensemble.predict(spectra)
-                ensemble_predictions.extend(predictions)
-                ensemble_targets.extend(targets.cpu().numpy())
-            
-            # 计算集成模型指标
-            ensemble_predictions = np.array(ensemble_predictions)
-            ensemble_targets = np.array(ensemble_targets)
-            
-            ensemble_metrics = {
-                'mae': np.mean(np.abs(ensemble_predictions - ensemble_targets)),
-                'mse': np.mean((ensemble_predictions - ensemble_targets) ** 2),
-                'rmse': np.sqrt(np.mean((ensemble_predictions - ensemble_targets) ** 2)),
-                'r2': 1 - (np.sum((ensemble_targets - ensemble_predictions) ** 2) / 
-                          np.sum((ensemble_targets - np.mean(ensemble_targets)) ** 2)),
-                'bias': np.mean(ensemble_predictions - ensemble_targets),
-                'scatter': np.std(ensemble_predictions - ensemble_targets),
-                'predictions': ensemble_predictions,
-                'targets': ensemble_targets
-            }
-            
-            test_metrics['ensemble'] = ensemble_metrics
+            best_model, best_val_loss, test_metrics = train_and_evaluate_model(
+                train_loader=train_loader,
+                val_loader=val_loader,
+                test_loader=test_loader,
+                element=element,
+                config=element_config
+            )
             
             # 保存结果
-            results[element] = {
-                'ensemble': ensemble,
-                'train_results': train_results,
+            result_info = {
+                'element': element,
+                'best_val_loss': best_val_loss,
                 'test_metrics': test_metrics
             }
             
-            # 保存预测结果
-            pred_df = pd.DataFrame({
-                'true': ensemble_targets,
-                'predicted': ensemble_predictions,
-                'error': ensemble_predictions - ensemble_targets
-            })
+            if best_hyperparams:
+                result_info['hyperparams'] = best_hyperparams
+                
+            results[element] = result_info
             
-            os.makedirs(config.output_config['predictions_dir'], exist_ok=True)
-            pred_file = os.path.join(
-                config.output_config['predictions_dir'], 
-                f"{element}_predictions.csv"
-            )
-            pred_df.to_csv(pred_file, index=False)
-            logger.info(f"已保存 {element} 预测结果到: {pred_file}")
+            # 分析特征重要性
+            if hasattr(config, 'analysis_config') and config.analysis_config.get('perform_feature_importance', False):
+                logger.info(f"分析元素 {element} 的特征重要性")
+                try:
+                    # 获取分析配置
+                    feature_config = config.analysis_config.get('feature_importance', {})
+                    sample_size = feature_config.get('sample_size', 1000)
+                    num_features = feature_config.get('num_top_features', 20)
+                    save_plots = feature_config.get('save_plots', True)
+                    batch_size = config.analysis_config.get('batch_size', 32)
+                    
+                    # 执行特征重要性分析
+                    analyze_feature_importance(
+                        model=best_model,
+                        element=element,
+                        test_loader=test_loader,
+                        device=device,
+                        sample_size=min(sample_size, len(X_test)),
+                        num_top_features=num_features,
+                        save_plots=save_plots,
+                        batch_size=batch_size,
+                        batch_id=None,  # 使用全部数据
+                        save_batch_results=True
+                    )
+                    logger.info(f"元素 {element} 特征重要性分析完成")
+                except Exception as e:
+                    logger.error(f"元素 {element} 特征重要性分析失败: {str(e)}")
             
-            # 更新进度
-            progress.update(1)
-    
-    # 保存到缓存
-    cache_manager.set_cache(cache_key, results)
+            # 分析残差
+            if hasattr(config, 'analysis_config') and config.analysis_config.get('perform_residual_analysis', False):
+                logger.info(f"分析元素 {element} 的残差")
+                try:
+                    # 获取分析配置
+                    residual_config = config.analysis_config.get('residual_analysis', {})
+                    save_predictions = residual_config.get('save_predictions', True)
+                    save_plots = residual_config.get('save_plots', True)
+                    batch_size = config.analysis_config.get('batch_size', 32)
+                    
+                    # 执行残差分析
+                    analyze_residuals(
+                        model=best_model,
+                        element=element,
+                        test_loader=test_loader,
+                        device=device,
+                        save_predictions=save_predictions,
+                        save_plots=save_plots,
+                        batch_size=batch_size,
+                        batch_id=None,  # 使用全部数据
+                        save_batch_results=True
+                    )
+                    logger.info(f"元素 {element} 残差分析完成")
+                except Exception as e:
+                    logger.error(f"元素 {element} 残差分析失败: {str(e)}")
+                    
+            # 保存结果
+            result_file = os.path.join(config.output_config['results_dir'], f'results_{element}.json')
+            import json
+            with open(result_file, 'w') as f:
+                # 将不可序列化的对象转换为可序列化的形式
+                serializable_results = {}
+                for key, value in result_info.items():
+                    if key == 'test_metrics':
+                        serializable_results[key] = {k: float(v) for k, v in value.items()}
+                    elif key == 'hyperparams':
+                        serializable_results[key] = {k: float(v) if isinstance(v, (int, float)) else v for k, v in value.items()}
+                    else:
+                        serializable_results[key] = float(value) if isinstance(value, (int, float, np.float32, np.float64)) else value
+                        
+                json.dump(serializable_results, f, indent=4)
+                
+            logger.info(f"元素 {element} 处理完成")
+            
+        except Exception as e:
+            logger.error(f"元素 {element} 处理失败: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            
+    # 所有元素处理完成，评估整体结果
+    logger.info("所有元素处理完成")
+    if results:
+        logger.info("结果摘要:")
+        for element, result in results.items():
+            test_metrics = result['test_metrics']
+            logger.info(f"元素 {element}: 均方误差: {test_metrics['mse']:.4f}, R^2: {test_metrics['r2']:.4f}")
     
     return results
 
@@ -839,10 +912,10 @@ def main():
                     show_batch_results(element, 'feature_importance')
                 if analysis_type == 'both' or analysis_type == 'residual_analysis':
                     show_batch_results(element, 'residual_analysis')
-            else:
+    else:
                 # 显示其他类型的批次结果
                 show_batch_results(element, args.result_type, config)
-        return
+    return
     
     if args.mode == 'analyze':
         # 执行模型分析

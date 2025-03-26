@@ -11,9 +11,26 @@ from preprocessdata import LAMOSTPreprocessor
 logger = logging.getLogger('multi_element_processor')
 
 class MultiElementProcessor:
-    def __init__(self, fits_dir=None, cache_dir=None):
-        self.fits_dir = fits_dir
-        self.preprocessor = LAMOSTPreprocessor()
+    def __init__(self, fits_dir=None, cache_dir=None, output_dir='processed_data'):
+        """初始化多元素处理器
+        
+        参数:
+            fits_dir: FITS文件目录
+            cache_dir: 缓存目录
+            output_dir: 输出数据目录
+        """
+        # 确保目录存在
+        self.output_dir = output_dir
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # 初始化预处理器
+        self.preprocessor = LAMOSTPreprocessor(
+            fits_dir=fits_dir if fits_dir else 'fits',
+            output_dir=output_dir,
+            batch_size=100  # 使用较小的批次大小提高响应性
+        )
+        
+        # 缓存映射和处理好的光谱
         self.obsid_fits_mapping = {}
         self.cached_spectra = {}
         
@@ -62,6 +79,7 @@ class MultiElementProcessor:
         # 初始化结果数组
         X = []
         y = []
+        metadata = []
         processed_indices = []
         
         # 处理每个有效样本
@@ -70,28 +88,41 @@ class MultiElementProcessor:
             abundance = csv_data.iloc[idx][element_column]
             
             # 处理光谱数据
-            spectrum_data = self.get_spectrum(obsid)
+            spectrum_data = self.get_spectrum(obsid, abundance)
             if spectrum_data is not None:
-                X.append(spectrum_data)
-                y.append(abundance)
-                processed_indices.append(idx)
+                if 'spectrum' in spectrum_data:
+                    X.append(spectrum_data['spectrum'])
+                    y.append(abundance)
+                    if 'metadata' in spectrum_data:
+                        metadata.append(spectrum_data['metadata'])
+                    else:
+                        metadata.append({'obsid': obsid})
+                    processed_indices.append(idx)
         
-        return np.array(X), np.array(y), processed_indices
+        if len(X) == 0:
+            logger.warning(f"元素{element_column}没有有效处理数据")
+            return np.array([]), np.array([]), [], []
+            
+        return np.array(X), np.array(y), metadata, processed_indices
     
-    def get_spectrum(self, obsid):
+    def get_spectrum(self, obsid, label=None):
         """获取处理后的光谱数据，支持缓存"""
         # 检查缓存
         if obsid in self.cached_spectra:
             return self.cached_spectra[obsid]
         
         try:
+            # 确保FITS-OBSID映射已加载
+            if not hasattr(self.preprocessor, 'fits_obsid_map') or not self.preprocessor.fits_obsid_map:
+                self.preprocessor._build_fits_obsid_mapping()
+            
             # 处理光谱
-            processed_data = self.preprocessor.process_single_spectrum(obsid, None)
+            processed_data = self.preprocessor.process_single_spectrum(obsid, label)
+            
             if processed_data and 'spectrum' in processed_data:
-                spectrum = processed_data['spectrum']
                 # 缓存结果
-                self.cached_spectra[obsid] = spectrum
-                return spectrum
+                self.cached_spectra[obsid] = processed_data
+                return processed_data
             else:
                 logger.warning(f"处理OBSID为{obsid}的光谱失败")
                 return None
@@ -112,7 +143,7 @@ class MultiElementProcessor:
         datasets = {}
         for element in element_columns:
             logger.info(f"准备{element}元素数据集...")
-            X, y, _ = self.build_element_dataset(csv_data, element)
+            X, y, metadata, _ = self.build_element_dataset(csv_data, element)
             
             if len(X) == 0:
                 logger.warning(f"元素{element}没有有效数据，跳过")
@@ -127,6 +158,22 @@ class MultiElementProcessor:
             val_size_adjusted = val_size / (1 - test_size)  # 调整验证集比例
             X_train, X_val, y_train, y_val = train_test_split(
                 X_temp, y_temp, test_size=val_size_adjusted, random_state=random_state)
+            
+            # 保存数据集
+            element_dir = os.path.join(self.output_dir, element)
+            os.makedirs(element_dir, exist_ok=True)
+            
+            # 保存训练集
+            np.savez(os.path.join(element_dir, f'train_dataset_{element}.npz'),
+                    X=X_train, y=y_train, element=element)
+            
+            # 保存验证集
+            np.savez(os.path.join(element_dir, f'val_dataset_{element}.npz'),
+                    X=X_val, y=y_val, element=element)
+            
+            # 保存测试集
+            np.savez(os.path.join(element_dir, f'test_dataset_{element}.npz'),
+                    X=X_test, y=y_test, element=element)
             
             datasets[element] = {
                 'train': (X_train, y_train),
