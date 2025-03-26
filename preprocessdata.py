@@ -26,6 +26,8 @@ from scipy import interpolate, signal
 from sklearn.model_selection import train_test_split
 import psutil
 from data_validator import DataValidator
+import math
+import torch
 
 # 配置日志
 logging.basicConfig(
@@ -1338,7 +1340,7 @@ class LAMOSTPreprocessor:
                 fits_file = extracted_file
             
             # 读取和处理FITS数据
-            data_dict = self._read_fits_file(fits_file)
+            data_dict = self.read_fits_file(fits_file)
             if data_dict is None:
                 return None
                 
@@ -2023,58 +2025,177 @@ class LAMOSTPreprocessor:
         return self._fits_obsid_map
 
     def process_data(self):
-        """处理所有数据"""
+        """执行数据处理"""
         try:
-            # 计算总批次数
-            total_samples = len(self.dataframes[0])
-            total_batches = (total_samples + self.batch_size - 1) // self.batch_size
-            processed_batches = 0
+            # 1. 读取CSV数据
+            df = self.read_csv_data()
             
-            # 获取数据批次
-            for batch_idx, batch_data in enumerate(self.get_batches(self.batch_size)):
-                # 处理当前批次
-                success = self.process_batch(batch_data)
-                
-                if success:
-                    processed_batches += 1
-                    # 保存当前批次结果
-                    batch_results = {
-                        'processed_data': self.processed_data if hasattr(self, 'processed_data') else None,
-                        'wavelength_range': self.wavelength_range,
-                        'n_points': self.n_points,
-                        'batch_info': {
-                            'size': len(batch_data),
-                            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
-                        }
-                    }
-                    
-                    # 保存到临时文件
-                    batch_file = os.path.join(self.progress_dir, f'batch_results_{time.strftime("%Y%m%d_%H%M%S")}.pkl')
-                    with open(batch_file, 'wb') as f:
-                        pickle.dump(batch_results, f)
-                    
-                    # 显示当前进度和处理结果
-                    print(f"\n批次 {processed_batches}/{total_batches} 处理完成")
-                    print("本批次处理结果：")
-                    print(f"- 处理的光谱数量: {len(batch_data)}")
-                    print(f"- 结果保存到: {batch_file}")
-                    
-                    # 在处理完前两批后询问是否继续
-                    if batch_idx < 2:
-                        user_input = input("\n是否继续处理下一批数据？(y/n): ").lower().strip()
-                        if user_input != 'y':
-                            print("用户选择停止处理")
-                            break
-                    else:
-                        print(f"批次 {processed_batches + 1} 处理失败")
-                    
-            return processed_batches > 0
+            # 2. 处理所有元素数据（使用分批处理）
+            processed_data = self.process_all_data_in_batches()
+            
+            # 3. 返回处理后的数据
+            return processed_data
             
         except Exception as e:
             print(f"数据处理失败: {str(e)}")
             import traceback
             traceback.print_exc()
             return False
+
+    def process_all_data_in_batches(self):
+        """使用分批处理方式处理所有数据"""
+        # 创建默认返回结果
+        final_results = {}
+        
+        try:
+            # 检查数据源和文件路径
+            self.check_data_sources()
+            self.check_and_fix_file_paths()
+            
+            # 建立FITS文件与观测ID的映射
+            self._build_fits_obsid_mapping()
+            
+            # 准备FITS文件列表
+            fits_files = []
+            for element, df in self.csv_data.items():
+                for obsid in df['obsid'].values:
+                    fits_file = self._find_fits_file(obsid)
+                    if fits_file and fits_file not in fits_files:
+                        fits_files.append(fits_file)
+            
+            # 准备FITS文件列表
+            all_fits_files = []
+            if self.process_all_fits:
+                # 如果处理所有FITS文件，则获取目录中的所有文件
+                for ext in ['.fits', '.fit', '.fits.gz', '.fit.gz']:
+                    all_fits_files.extend(glob.glob(os.path.join(self.fits_dir, f'**/*{ext}'), recursive=True))
+                fits_files = list(set(all_fits_files))
+            
+            # 显示找到的文件总数
+            total_files = len(fits_files)
+            logger.info(f"找到 {total_files} 个FITS文件需要处理")
+            
+            # 设置批处理参数
+            batch_size = self.batch_size  # 使用已有的batch_size参数
+            total_batches = math.ceil(total_files / batch_size)
+            
+            # 初始化进度显示和处理结果
+            with tqdm(total=total_files, desc="处理FITS文件") as pbar:
+                for batch_index in range(total_batches):
+                    # 确定当前批次的文件
+                    start_idx = batch_index * batch_size
+                    end_idx = min(start_idx + batch_size, total_files)
+                    current_batch = fits_files[start_idx:end_idx]
+                    
+                    logger.info(f"开始处理第 {batch_index+1}/{total_batches} 批文件 (共 {len(current_batch)} 个文件)")
+                    
+                    # 处理当前批次
+                    batch_results = {}
+                    success_count = 0
+                    error_count = 0
+                    
+                    for fits_file in current_batch:
+                        # 检查内存使用情况
+                        self.check_memory_usage()
+                        
+                        try:
+                            # 处理单个FITS文件
+                            data_dict = self.process_fits_file(fits_file)
+                            
+                            if data_dict is not None:
+                                # 提取观测ID
+                                obsid = self._extract_obsid_from_file(fits_file)
+                                
+                                # 存储结果
+                                batch_results[obsid] = data_dict
+                                success_count += 1
+                            else:
+                                error_count += 1
+                                
+                            # 更新进度条
+                            pbar.update(1)
+                            
+                        except Exception as e:
+                            logger.error(f"处理FITS文件时出错 ({fits_file}): {e}")
+                            error_count += 1
+                            pbar.update(1)
+                    
+                    # 批次处理完成，合并结果
+                    final_results.update(batch_results)
+                    
+                    # 报告当前批次的结果
+                    logger.info(f"第 {batch_index+1}/{total_batches} 批处理完成: 成功 {success_count}, 失败 {error_count}")
+                    
+                    # 每批次处理后清理内存
+                    gc.collect()
+                    if hasattr(torch, 'cuda') and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+            
+            # 处理CSV数据中的每个元素
+            for element, df in self.csv_data.items():
+                logger.info(f"处理元素 {element} 的数据")
+                # 使用已处理的FITS数据处理元素数据
+                element_data = self.process_element_data_with_cache(df, element, final_results)
+                
+                # 保存元素数据集
+                if element_data:
+                    self.save_element_datasets(element, element_data)
+            
+            return final_results
+            
+        except Exception as e:
+            logger.error(f"批处理数据时出错: {e}")
+            import traceback
+            traceback.print_exc()
+            return final_results
+            
+    def process_element_data_with_cache(self, df, element, processed_fits_data):
+        """使用已处理的FITS数据处理元素数据"""
+        # 初始化处理结果
+        processed_data = []
+        
+        try:
+            # 显示进度
+            with tqdm(total=len(df), desc=f"处理{element}数据") as pbar:
+                for index, row in df.iterrows():
+                    try:
+                        # 获取观测ID和标签
+                        obsid = str(row['obsid'])
+                        label = float(row[element])
+                        
+                        # 检查是否已处理过这个FITS文件
+                        if obsid in processed_fits_data:
+                            data_dict = processed_fits_data[obsid]
+                            
+                            # 构建结果字典
+                            result = {
+                                'spectrum': data_dict.get('processed_spectrum', None),
+                                'label': label,
+                                'metadata': {
+                                    'obsid': obsid,
+                                    'original_flux': data_dict.get('original_filename', '')
+                                }
+                            }
+                            
+                            # 如果成功处理，添加到结果列表
+                            if result['spectrum'] is not None:
+                                processed_data.append(result)
+                        else:
+                            logger.warning(f"未找到观测ID {obsid} 的已处理数据")
+                            
+                        # 更新进度
+                        pbar.update(1)
+                        
+                    except Exception as e:
+                        logger.error(f"处理元素数据时出错 (观测ID: {obsid}): {e}")
+                        pbar.update(1)
+            
+            logger.info(f"元素 {element} 的数据处理完成，共处理 {len(processed_data)}/{len(df)} 条数据")
+            return processed_data
+            
+        except Exception as e:
+            logger.error(f"处理元素 {element} 数据时出错: {e}")
+            return processed_data
 
 def main():
     """主函数"""
