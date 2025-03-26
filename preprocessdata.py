@@ -1321,6 +1321,22 @@ class LAMOSTPreprocessor:
             return None
             
         try:
+            # 检查文件是否是压缩格式
+            if fits_file.endswith('.gz'):
+                import gzip
+                import shutil
+                extracted_file = fits_file[:-3]  # 去掉.gz后缀
+                
+                # 如果解压后的文件不存在，则解压
+                if not os.path.exists(extracted_file):
+                    print(f"解压缩FITS文件: {os.path.basename(fits_file)}")
+                    with gzip.open(fits_file, 'rb') as f_in:
+                        with open(extracted_file, 'wb') as f_out:
+                            shutil.copyfileobj(f_in, f_out)
+                
+                # 使用解压后的文件
+                fits_file = extracted_file
+            
             # 读取和处理FITS数据
             data_dict = self._read_fits_file(fits_file)
             if data_dict is None:
