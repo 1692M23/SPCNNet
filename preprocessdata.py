@@ -82,8 +82,24 @@ class OBSIDCache:
         """初始化OBSID缓存"""
         self.cache_dir = cache_dir
         self.cache_file = os.path.join(cache_dir, 'obsid_mapping.pkl')
+        os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
         self.mapping = self._load_cache()
         self.changed = False
+        
+        # 确保映射是标准格式
+        self._normalize_mapping()
+        
+    def _normalize_mapping(self):
+        """确保映射结构统一"""
+        # 检查是否有旧版本的嵌套结构
+        if isinstance(self.mapping, dict) and 'fits_files' in self.mapping:
+            # 使用fits_files子字典作为主映射
+            fits_files = self.mapping.pop('fits_files', {})
+            if isinstance(fits_files, dict):
+                # 合并映射
+                self.mapping.update(fits_files)
+                self.changed = True
+                logger.info("已将嵌套映射结构转换为扁平结构")
         
     def _load_cache(self):
         """加载缓存数据"""
@@ -91,8 +107,12 @@ class OBSIDCache:
             try:
                 with open(self.cache_file, 'rb') as f:
                     mapping = pickle.load(f)
-                    logger.info(f"已加载OBSID缓存，包含 {len(mapping)} 条映射")
-                    return mapping
+                    # 如果加载的是字典，直接使用
+                    if isinstance(mapping, dict):
+                        logger.info(f"已加载OBSID缓存，包含 {len(mapping)} 条映射")
+                        return mapping
+                    else:
+                        logger.warning(f"缓存文件格式不正确，重新初始化")
             except Exception as e:
                 logger.warning(f"加载OBSID缓存失败: {e}")
         return {}
@@ -104,9 +124,17 @@ class OBSIDCache:
             
         try:
             os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
+            
+            # 确保所有值都是字符串，不是字典
+            cleaned_mapping = {}
+            for key, value in self.mapping.items():
+                if isinstance(value, str):
+                    cleaned_mapping[key] = value
+            
             with open(self.cache_file, 'wb') as f:
-                pickle.dump(self.mapping, f)
-            logger.info(f"已保存OBSID缓存，包含 {len(self.mapping)} 条映射")
+                pickle.dump(cleaned_mapping, f)
+            logger.info(f"已保存OBSID缓存，包含 {len(cleaned_mapping)} 条映射")
+            self.mapping = cleaned_mapping
             self.changed = False
         except Exception as e:
             logger.error(f"保存OBSID缓存失败: {e}")
@@ -130,17 +158,33 @@ class OBSIDCache:
         """在对象销毁时保存缓存"""
         if self.changed:
             self.save_cache()
+            
+    def get_all_mappings(self):
+        """获取所有映射数量"""
+        return len(self.mapping)
 
     def get_fits_file(self, obsid):
-        if 'fits_files' not in self.mapping:
-            self.mapping['fits_files'] = {}
-        return self.mapping['fits_files'].get(obsid)
+        """获取OBSID对应的FITS文件路径"""
+        # 直接从主映射中获取
+        fits_file = self.mapping.get(obsid)
+        if fits_file and isinstance(fits_file, str):
+            return fits_file
+            
+        # 向后兼容：如果有旧格式的嵌套结构
+        if 'fits_files' in self.mapping and isinstance(self.mapping['fits_files'], dict):
+            return self.mapping['fits_files'].get(obsid)
+            
+        return None
     
     def set_fits_file(self, obsid, fits_file):
-        if 'fits_files' not in self.mapping:
-            self.mapping['fits_files'] = {}
-        self.mapping['fits_files'][obsid] = fits_file
-        self.save_cache()
+        """设置OBSID对应的FITS文件路径"""
+        if isinstance(fits_file, str):
+            self.mapping[obsid] = fits_file
+            self.changed = True
+            
+            # 每20个映射保存一次
+            if len(self.mapping) % 20 == 0:
+                self.save_cache()
 
 class ProgressManager:
     def __init__(self, total, desc):
@@ -2013,20 +2057,39 @@ class LAMOSTPreprocessor:
         cache_loaded = False
         if self.obsid_cache:
             if hasattr(self.obsid_cache, 'mapping') and isinstance(self.obsid_cache.mapping, dict):
-                self.fits_obsid_map = self.obsid_cache.mapping
+                # 确保obsid_cache.mapping不是一个复杂的字典结构
+                if 'fits_files' in self.obsid_cache.mapping:
+                    # 如果是旧格式，从fits_files子字典加载
+                    self.fits_obsid_map = self.obsid_cache.mapping.get('fits_files', {})
+                else:
+                    # 否则直接使用mapping
+                    self.fits_obsid_map = self.obsid_cache.mapping
                 cache_loaded = True
                 logger.info(f"从缓存加载了{len(self.fits_obsid_map)}个FITS-OBSID映射")
             elif hasattr(self.obsid_cache, '_mapping') and isinstance(self.obsid_cache._mapping, dict):
-                self.fits_obsid_map = self.obsid_cache._mapping
+                # 类似地检查_mapping结构
+                if '_mapping' in self.obsid_cache._mapping:
+                    self.fits_obsid_map = self.obsid_cache._mapping.get('fits_files', {})
+                else:
+                    self.fits_obsid_map = self.obsid_cache._mapping
                 cache_loaded = True
                 logger.info(f"从缓存_mapping加载了{len(self.fits_obsid_map)}个FITS-OBSID映射")
         
         # 验证缓存的映射文件是否存在
-        if cache_loaded:
+        if cache_loaded and self.fits_obsid_map:
             valid_mappings = {}
             invalid_count = 0
-            for obsid, file_path in self.fits_obsid_map.items():
-                if os.path.exists(file_path):
+            
+            # 遍历所有映射并验证
+            for obsid, file_path in list(self.fits_obsid_map.items()):
+                # 确保file_path是字符串而不是字典
+                if isinstance(file_path, dict):
+                    logger.warning(f"映射值为字典，而不是文件路径: {obsid} -> {file_path}")
+                    invalid_count += 1
+                    continue
+                    
+                # 验证路径是否存在
+                if isinstance(file_path, str) and os.path.exists(file_path):
                     valid_mappings[obsid] = file_path
                 else:
                     invalid_count += 1
@@ -2080,9 +2143,16 @@ class LAMOSTPreprocessor:
             
             logger.info(f"新增了{new_mappings_count}个FITS-OBSID映射")
         
+        # 最后检查确保所有映射值都是字符串
+        self.fits_obsid_map = {k: v for k, v in self.fits_obsid_map.items() if isinstance(v, str)}
+        
         # 保存到缓存
         if self.obsid_cache:
-            self.obsid_cache.mapping = self.fits_obsid_map
+            # 确保缓存使用正确的结构
+            if 'fits_files' in self.obsid_cache.mapping:
+                self.obsid_cache.mapping['fits_files'] = self.fits_obsid_map
+            else:
+                self.obsid_cache.mapping = self.fits_obsid_map
             self.obsid_cache.save_cache()
             logger.info("已将FITS-OBSID映射保存到缓存")
         
