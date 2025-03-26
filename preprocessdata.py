@@ -2249,8 +2249,10 @@ def main():
     parser = argparse.ArgumentParser(description='LAMOST光谱数据预处理工具')
     
     # 基本参数
-    parser.add_argument('--csv_files', type=str, nargs='+', default=['X_FE.csv'], 
+    parser.add_argument('--csv_files', type=str, nargs='+', default=None, 
                         help='CSV文件列表')
+    parser.add_argument('--reference_csv', type=str, help='参考数据集CSV文件（向后兼容）')
+    parser.add_argument('--prediction_csv', type=str, help='预测数据集CSV文件（向后兼容）')
     parser.add_argument('--fits_dir', type=str, default='fits', 
                         help='FITS文件目录')
     parser.add_argument('--output_dir', type=str, default='processed_data', 
@@ -2282,6 +2284,17 @@ def main():
     
     args = parser.parse_args()
     
+    # 处理CSV文件参数（兼容旧版本）
+    csv_files = args.csv_files
+    if csv_files is None:
+        csv_files = []
+        if args.reference_csv:
+            csv_files.append(args.reference_csv)
+        if args.prediction_csv:
+            csv_files.append(args.prediction_csv)
+        if not csv_files:
+            csv_files = ['X_FE.csv']  # 默认值
+    
     # 确定GPU使用选项
     use_gpu = None
     if args.use_gpu:
@@ -2291,7 +2304,7 @@ def main():
     
     # 初始化预处理器
     preprocessor = LAMOSTPreprocessor(
-        csv_files=args.csv_files,
+        csv_files=csv_files,
         fits_dir=args.fits_dir,
         output_dir=args.output_dir,
         wavelength_range=args.wavelength_range,
