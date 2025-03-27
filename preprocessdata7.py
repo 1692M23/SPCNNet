@@ -1346,14 +1346,30 @@ class LAMOSTPreprocessor:
         
         return X, y, elements, filenames
     
-    def split_dataset(self, X, y, elements):
-        """按照7:1:2的比例分割数据集为训练集、验证集和测试集"""
+    def split_dataset(self, X, y, elements, ask_for_split=True):
+        """按照7:1:2的比例分割数据集为训练集、验证集和测试集，可选择是否分割"""
         if len(X) == 0:
             print("错误: 没有数据可以分割")
             return (np.array([]), np.array([]), np.array([])), \
                    (np.array([]), np.array([]), np.array([])), \
                    (np.array([]), np.array([]), np.array([]))
         
+        # 询问用户是否进行数据集划分
+        if ask_for_split:
+            response = input("是否要进行数据集划分？(y/n): ").lower()
+            if response != 'y':
+                print(f"跳过数据集划分，将完整数据集保存到 {os.path.join(self.output_dir, 'full_dataset.npz')}")
+                
+                # 保存完整数据集
+                np.savez(os.path.join(self.output_dir, 'full_dataset.npz'),
+                        X=X, y=y, elements=elements)
+                
+                print(f"完整数据集保存完成: {X.shape[0]}条记录")
+                
+                # 返回完整数据集作为训练集，空数组作为验证集和测试集
+                return (X, y, elements), (np.array([]), np.array([]), np.array([])), (np.array([]), np.array([]), np.array([]))
+        
+        # 原有的数据集分割逻辑
         # 首先分割出测试集 (80% vs 20%)
         X_temp, X_test, y_temp, y_test, elements_temp, elements_test = train_test_split(
             X, y, elements, test_size=0.2, random_state=42)
@@ -1376,33 +1392,7 @@ class LAMOSTPreprocessor:
         print(f"测试集: {X_test.shape[0]}条 (20%)")
         
         return (X_train, y_train, elements_train), (X_val, y_val, elements_val), (X_test, y_test, elements_test)
-    
-    def setup_cross_validation(self, X, y):
-        """设置交叉验证"""
-        if len(X) == 0:
-            print("错误: 没有数据可以进行交叉验证")
-            return []
-            
-        kf = KFold(n_splits=self.n_splits, shuffle=True, random_state=42)
-        folds = []
-        
-        for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
-            X_train_fold, X_val_fold = X[train_idx], X[val_idx]
-            y_train_fold, y_val_fold = y[train_idx], y[val_idx]
-            
-            folds.append((X_train_fold, y_train_fold, X_val_fold, y_val_fold))
-            
-            # 保存每个折的数据
-            fold_dir = os.path.join(self.output_dir, f"fold_{fold}")
-            if not os.path.exists(fold_dir):
-                os.makedirs(fold_dir)
-                
-            np.savez(os.path.join(fold_dir, 'fold_data.npz'),
-                    X_train=X_train_fold, y_train=y_train_fold,
-                    X_val=X_val_fold, y_val=y_val_fold)
-        
-        print(f"交叉验证设置完成: {self.n_splits}折")
-        return folds
+
     
     def predict_abundance(self, fits_file, model):
         """预测单个FITS文件的元素丰度"""
@@ -2088,11 +2078,13 @@ def main():
         return
     
     # 分割数据集
-    train_data, val_data, test_data = preprocessor.split_dataset(X, y, elements)
+    train_dataset, val_dataset, test_dataset = preprocessor.split_dataset(X, y, elements)
     
-    # 设置交叉验证
-    X_train, y_train, _ = train_data
-    folds = preprocessor.setup_cross_validation(X_train, y_train)
+    # 检查用户是否选择了分割数据集
+    if len(val_dataset[0]) == 0:  # 空验证集表示用户选择不分割
+        print("用户选择不分割数据集，使用完整数据集")
+    else:
+        print(f"用户选择分割数据集为训练集、验证集和测试集")
     
     # 可视化几个示例光谱(可选)
     if len(filenames) > 0 and not low_memory_mode and input("是否可视化示例光谱? (y/n): ").lower() == 'y':
