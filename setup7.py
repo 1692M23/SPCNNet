@@ -2,14 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-LAMOST光谱预处理环境设置脚本
-创建必要目录并检查依赖
+设置脚本：自动创建目录并安装依赖
 """
 
 import os
-import sys
 import subprocess
+import sys
 import logging
+import pkg_resources
+from packaging import version
 
 # 配置日志
 logging.basicConfig(
@@ -26,100 +27,126 @@ def create_directories():
         os.path.join('processed_data', 'cache'), # 缓存目录
         os.path.join('processed_data', 'progress') # 进度保存目录
     ]
-    
+        
     for directory in directories:
         os.makedirs(directory, exist_ok=True)
         logger.info(f"已创建目录: {directory}")
 
-def check_dependencies():
-    """检查并安装依赖包"""
-    dependencies = [
-        'numpy', 
-        'pandas', 
-        'astropy', 
-        'scipy', 
-        'matplotlib', 
-        'scikit-learn', 
-        'tqdm', 
-        'psutil'
+def get_installed_version(package_name):
+    """获取已安装的包版本"""
+    try:
+        return pkg_resources.get_distribution(package_name).version
+    except pkg_resources.DistributionNotFound:
+        return None
+
+def parse_requirement(requirement):
+    """解析依赖要求，返回包名和版本要求"""
+    parts = requirement.split('>=')
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return requirement, None
+
+def check_version(current_version, required_version):
+    """检查版本是否满足要求"""
+    if not current_version or not required_version:
+        return False
+    return version.parse(current_version) >= version.parse(required_version)
+
+def install_requirements():
+    """安装依赖包"""
+    requirements = [
+        'numpy>=1.19.2',
+        'pandas>=1.2.0',
+        'matplotlib>=3.3.0',
+        'torch>=1.7.0',
+        'scikit-learn>=0.24.0',
+        'astropy>=4.2',
+        'scipy>=1.6.0',
+        'seaborn>=0.11.0',
+        'psutil>=5.8.0',
+        'tqdm>=4.50.0',
+        'joblib>=1.0.0',
+        'hyperopt>=0.2.5'
     ]
     
-    missing = []
-    for package in dependencies:
-        try:
-            __import__(package)
-            logger.info(f"检查通过: {package}")
-        except ImportError:
-            missing.append(package)
-    
-    if missing:
-        logger.warning(f"缺少以下依赖包: {', '.join(missing)}")
-        install = input("是否自动安装缺失的依赖？(y/n): ").lower()
-        if install == 'y':
-            for package in missing:
-                logger.info(f"正在安装 {package}...")
-                try:
-                    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-                    logger.info(f"{package} 安装成功")
-                except:
-                    logger.error(f"{package} 安装失败，请手动安装")
+    logger.info("检查依赖包...")
+    try:
+        for requirement in requirements:
+            package_name, required_version = parse_requirement(requirement)
+            current_version = get_installed_version(package_name)
+            
+            if current_version and required_version:
+                if check_version(current_version, required_version):
+                    logger.info(f"已安装 {package_name} {current_version} (满足要求 >={required_version})")
+                    continue
+                else:
+                    logger.info(f"更新 {package_name} {current_version} -> >={required_version}")
+            else:
+                logger.info(f"安装 {package_name} >={required_version if required_version else ''}")
+            
+            try:
+                subprocess.run([sys.executable, '-m', 'pip', 'install', requirement], 
+                             check=True, 
+                             capture_output=True,
+                             text=True)
+            except subprocess.CalledProcessError as e:
+                logger.error(f"安装 {requirement} 失败: {e.stderr}")
+                return False
+                
+        logger.info("所有依赖包安装成功")
+        return True
+    except Exception as e:
+        logger.error(f"安装依赖包过程出错: {e}")
+        return False
+
+def setup_environment():
+    """设置环境"""
+    try:
+        # 克隆或更新仓库
+        logger.info("检查仓库状态...")
+        repo_url = "https://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@github.com/1692M23/SPCNNet.git"
+        
+        if os.path.exists('SPCNNet'):
+            logger.info("仓库已存在，尝试更新...")
+            try:
+                # 切换到仓库目录
+                os.chdir('SPCNNet')
+                # 重置所有更改
+                subprocess.run(['git', 'reset', '--hard'], check=True)
+                # 拉取最新代码
+                subprocess.run(['git', 'pull'], check=True)
+                # 切回上级目录
+                os.chdir('..')
+                logger.info("仓库更新成功")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"更新仓库失败: {e}")
+                return False
         else:
-            logger.info("请手动安装缺失的依赖")
-            sys.exit(1)
+            logger.info("克隆新仓库...")
+            try:
+                subprocess.run(['git', 'clone', repo_url], check=True)
+                logger.info("仓库克隆成功")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"克隆仓库失败: {e}")
+                return False
+        
+        # 创建目录
+        create_directories()
 
-def check_csv_files():
-    """检查CSV文件是否存在"""
-    csv_files = ['C_FE.csv', 'MG_FE.csv', 'CA_FE.csv']
-    missing = [f for f in csv_files if not os.path.exists(f)]
-    
-    if missing:
-        logger.warning(f"缺少以下CSV文件: {', '.join(missing)}")
-        logger.info("请确保以下文件存在于当前目录:")
-        for csv in csv_files:
-            logger.info(f"- {csv}")
-        return False
-    else:
-        logger.info("CSV文件检查通过")
+        # 安装依赖
+        if not install_requirements():
+            return False
+
+        logger.info("环境设置完成")
         return True
 
-def check_fits_directory():
-    """检查FITS目录"""
-    if not os.path.exists('fits'):
-        logger.error("FITS目录不存在，将创建空目录")
-        os.makedirs('fits', exist_ok=True)
+    except Exception as e:
+        logger.error(f"环境设置失败: {e}")
         return False
-    
-    fits_files = [f for f in os.listdir('fits') 
-                 if f.endswith(('.fits', '.fits.gz', '.fit', '.fit.gz'))]
-    
-    if not fits_files:
-        logger.warning("FITS目录中没有发现FITS文件")
-        logger.info("请将FITS文件放入fits目录中")
-        return False
-    else:
-        logger.info(f"FITS目录中发现{len(fits_files)}个文件")
-        return True
 
-def main():
-    """主函数"""
-    logger.info("开始LAMOST光谱预处理环境设置")
-    
-    # 创建目录
-    create_directories()
-    
-    # 检查依赖
-    check_dependencies()
-    
-    # 检查CSV和FITS文件
-    csv_status = check_csv_files()
-    fits_status = check_fits_directory()
-    
-    if csv_status and fits_status:
-        logger.info("环境设置完成，可以运行preprocessdata7.py进行预处理")
+if __name__ == '__main__':
+    if setup_environment():
+        logger.info("环境设置成功完成")
     else:
-        logger.warning("环境设置不完整，请解决上述问题后再运行预处理程序")
-    
-    return 0
-
-if __name__ == "__main__":
-    sys.exit(main())
+        logger.error("环境设置失败")
+        sys.exit(1) 
