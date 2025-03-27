@@ -23,6 +23,7 @@ import json
 import traceback
 import re
 from sklearn.model_selection import KFold, train_test_split
+import random
 warnings.filterwarnings('ignore')  # 忽略不必要的警告
 
 # 判断是否在Colab环境中
@@ -2679,7 +2680,8 @@ def main():
     # 可视化几个示例光谱(可选)
     if len(filenames) > 0 and not low_memory_mode and input("是否可视化示例光谱? (y/n): ").lower() == 'y':
         print("正在可视化示例光谱...")
-        for i in range(min(3, len(filenames))):
+        sample_indices = random.sample(range(len(filenames)), min(3, len(filenames)))
+        for i in sample_indices:
             preprocessor.visualize_spectrum(filenames[i])
     
     print(f"预处理完成，总耗时: {time.time() - start_time:.2f}秒")
