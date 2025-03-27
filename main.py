@@ -572,7 +572,7 @@ def process_multiple_elements(csv_file, fits_dir, element_columns=None,
         
         logger.info(f"元素 {element} 数据集大小: 训练集:{X_train.shape}, 验证集:{X_val.shape}, 测试集:{X_test.shape}")
             
-            # 创建数据加载器
+        # 创建数据加载器
         train_loader = create_data_loaders(X_train, y_train, batch_size=batch_size)
         val_loader = create_data_loaders(X_val, y_val, batch_size=batch_size, shuffle=False)
         test_loader = create_data_loaders(X_test, y_test, batch_size=batch_size, shuffle=False)
@@ -993,12 +993,17 @@ def main():
             logger.error("加载数据失败，退出程序")
             return
         
-        # 创建数据加载器
-        train_loader, val_loader, test_loader = create_data_loaders(
+        # 创建数据加载器 - 修复解包错误
+        data_loader = create_data_loaders(
             spectra, labels, 
             batch_size=config.training_config['batch_size'],
             shuffle=True
         )
+        
+        # 使用同一个加载器用于训练、验证和测试
+        train_loader = data_loader
+        val_loader = data_loader
+        test_loader = data_loader
     
     if args.mode == 'train' or args.mode == 'all':
         # 训练模型
