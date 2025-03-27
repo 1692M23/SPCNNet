@@ -571,8 +571,8 @@ def process_multiple_elements(csv_file, fits_dir, element_columns=None,
         X_test, y_test = data['test']
         
         logger.info(f"元素 {element} 数据集大小: 训练集:{X_train.shape}, 验证集:{X_val.shape}, 测试集:{X_test.shape}")
-        
-        # 创建数据加载器
+            
+            # 创建数据加载器
         train_loader = create_data_loaders(X_train, y_train, batch_size=batch_size)
         val_loader = create_data_loaders(X_val, y_val, batch_size=batch_size, shuffle=False)
         test_loader = create_data_loaders(X_test, y_test, batch_size=batch_size, shuffle=False)
@@ -912,10 +912,10 @@ def main():
                     show_batch_results(element, 'feature_importance')
                 if analysis_type == 'both' or analysis_type == 'residual_analysis':
                     show_batch_results(element, 'residual_analysis')
-    else:
+            else:
                 # 显示其他类型的批次结果
                 show_batch_results(element, args.result_type, config)
-    return
+        return
     
     if args.mode == 'analyze':
         # 执行模型分析
