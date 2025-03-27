@@ -2032,34 +2032,47 @@ class LAMOSTPreprocessor:
                          (min(original_wavelength), max(original_wavelength)), 
                          absorption_lines, color='blue', label_name='Raw Spectrum')
         ax1.set_ylabel('Flux (relative)')
-        ax1.set_title(f"Raw Spectrum - {os.path.basename(spec_file)} - {spec_type} {obs_date}")
+        overall_title = f"Spectrum: {os.path.basename(spec_file)}"
+        ax1.set_title(overall_title)
+        
+        # 在第一个子图下方添加红移和观测日期信息
+        if z or obs_date:
+            info_text = ""
+            if z:
+                info_text += f"Star z={z} "
+            if obs_date:
+                info_text += f"{obs_date}"
+            ax1.text(0.02, -0.2, info_text, transform=ax1.transAxes, fontsize=9)
         
         # 如果是处理后的光谱，显示处理效果
         if processed:
-            # 去噪和红移校正
-            ax2 = plt.subplot(4, 1, 2, sharex=ax1)
-            plot_with_labels(ax2, wavelength_corrected, denoised_flux, 
-                            (min(wavelength_corrected), max(wavelength_corrected)), 
-                            absorption_lines, color='green', label_name='After Redshift Correction')
-            ax2.set_ylabel('Flux (relative)')
-            ax2.set_title("After Denoising and Redshift Correction")
+            # 校准、速度校正、去噪、红移校正和重采样后的结果
+            ax2 = plt.subplot(4, 1, 2)
+            plot_with_labels(ax2, wavelength_resampled, flux_resampled, 
+                            (min(wavelength_resampled), max(wavelength_resampled)), 
+                            absorption_lines, color='green', label_name='Calibrated, Velocity Corrected, Denoised, Redshift Corrected & Resampled')
+            ax2.set_ylabel('Flux')
+            ax2.set_title("Spectrum after Calibration, Velocity Correction, Denoising, Redshift Correction & Resampling")
             
-            # 重采样
+            # 连续谱归一化 - 这是第三张图
             ax3 = plt.subplot(4, 1, 3)
-            plot_with_labels(ax3, wavelength_resampled, flux_resampled, 
+            plot_with_labels(ax3, wavelength_resampled, flux_continuum, 
                             (min(wavelength_resampled), max(wavelength_resampled)), 
-                            absorption_lines, color='orange', label_name='After Resampling')
-            ax3.set_ylabel('Flux (relative)')
-            ax3.set_title("After Resampling")
+                            absorption_lines, color='purple', label_name='Continuum Normalized')
+            ax3.set_ylabel('Normalized Flux')
+            ax3.set_title("Spectrum after Continuum Normalization")
             
-            # 最终处理结果
+            # 二次去噪和最终归一化 - 这是第四张图
             ax4 = plt.subplot(4, 1, 4)
-            plot_with_labels(ax4, wavelength_resampled, spectrum, 
+            # 确保最终归一化到[0,1]范围
+            spectrum_normalized = np.clip(spectrum, 0, 1)
+            plot_with_labels(ax4, wavelength_resampled, spectrum_normalized, 
                             (min(wavelength_resampled), max(wavelength_resampled)), 
-                            absorption_lines, color='red', label_name='Final Normalized')
-            ax4.set_ylabel('Normalized Flux')
-            ax4.set_title("Final Normalized Result")
-            
+                            absorption_lines, color='red', label_name='Fully Processed')
+            ax4.set_ylabel('Final Normalized Flux')
+            ax4.set_title("Spectrum after Second Denoising and Final Normalization")
+            ax4.set_ylim(0, 1)  # 设置y轴范围为[0,1]
+        
         else:
             # 如果不是处理后光谱，则使用原始光谱进行处理并显示
             
@@ -2106,31 +2119,37 @@ class LAMOSTPreprocessor:
             
             spectrum = flux_normalized
             
-            # 显示处理过程
+            # 显示处理过程 - 调整为符合要求的格式
             ax2 = plt.subplot(4, 1, 2)
-            plot_with_labels(ax2, wavelength_corrected, flux_denoised, 
-                           (min(wavelength_corrected), max(wavelength_corrected)), 
-                           absorption_lines, color='green', label_name='After Denoise')
-            ax2.set_ylabel('Flux (relative)')
-            ax2.set_title("After Denoising")
+            # 校准、速度校正、去噪、红移校正和重采样后的结果
+            plot_with_labels(ax2, wavelength_resampled, flux_resampled, 
+                           (min(wavelength_resampled), max(wavelength_resampled)), 
+                           absorption_lines, color='green', label_name='Calibrated, Velocity Corrected, Denoised, Redshift Corrected & Resampled')
+            ax2.set_ylabel('Flux')
+            ax2.set_title("Spectrum after Calibration, Velocity Correction, Denoising, Redshift Correction & Resampling")
             
+            # 连续谱归一化后的光谱
             ax3 = plt.subplot(4, 1, 3)
-            plot_with_labels(ax3, wavelength_resampled, flux_resampled, 
+            plot_with_labels(ax3, wavelength_resampled, flux_continuum, 
                            (min(wavelength_resampled), max(wavelength_resampled)), 
-                           absorption_lines, color='orange', label_name='After Resampling')
-            ax3.set_ylabel('Flux (relative)')
-            ax3.set_title("After Resampling")
+                           absorption_lines, color='purple', label_name='Continuum Normalized')
+            ax3.set_ylabel('Normalized Flux')
+            ax3.set_title("Spectrum after Continuum Normalization")
             
+            # 二次去噪和最终归一化后的光谱
             ax4 = plt.subplot(4, 1, 4)
-            plot_with_labels(ax4, wavelength_resampled, spectrum, 
+            # 确保最终归一化到[0,1]范围
+            spectrum_normalized = np.clip(spectrum, 0, 1)
+            plot_with_labels(ax4, wavelength_resampled, spectrum_normalized, 
                            (min(wavelength_resampled), max(wavelength_resampled)), 
-                           absorption_lines, color='red', label_name='Final Normalized')
-            ax4.set_ylabel('Normalized Flux')
-            ax4.set_title("Final Normalized Result")
+                           absorption_lines, color='red', label_name='Fully Processed')
+            ax4.set_ylabel('Final Normalized Flux')
+            ax4.set_title("Spectrum after Second Denoising and Final Normalization")
+            ax4.set_ylim(0, 1)  # 设置y轴范围为[0,1]
         
         # 添加波长范围和处理信息
         if self.compute_common_range and len(self.processed_ranges) > 1:
-            range_description = f'Common Wavelength Range: {self.wavelength_range[0]:.2f}-{self.wavelength_range[1]:.2f} Å'
+            range_description = f'Wavelength Range: {self.wavelength_range[0]:.2f}-{self.wavelength_range[1]:.2f} Å'
         else:
             range_description = f'Wavelength Range: {self.wavelength_range[0]:.2f}-{self.wavelength_range[1]:.2f} Å'
         
@@ -2149,7 +2168,7 @@ class LAMOSTPreprocessor:
         
         plt.figtext(0.5, 0.01, info_text, ha='center', fontsize=10)
         
-        plt.tight_layout(pad=2.0)
+        plt.tight_layout(pad=2.0, rect=[0, 0.02, 1, 0.98])
         
         if save:
             output_file = os.path.join(self.output_dir, f"{os.path.basename(spec_file)}_visualization.png")
