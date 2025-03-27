@@ -1375,25 +1375,31 @@ class LAMOSTPreprocessor:
         # 处理每个元素的数据
         processed_records = 0
         for i, (df, element) in enumerate(zip(dataframes, ['C_FE', 'MG_FE', 'CA_FE'])):
-            # 检查是否已处理过这个元素
-            element_processed = any(item.get('element') == element for item in all_data) if all_data else False
+            # 统计已处理的元素记录数
+            element_records = sum(1 for item in all_data if item.get('element') == element)
+            # 元素的总记录数
+            element_total = len(df)
             
-            if not element_processed:
+            # 只有当元素的所有记录都已处理时，才认为该元素处理完成
+            if element_records >= element_total:
+                print(f"{element}数据已在之前的运行中处理完成 ({element_records}/{element_total}条记录)")
+                processed_records += element_records
+            else:
                 print(f"\n处理元素 {i+1}/{len(dataframes)}: {element}")
+                print(f"已处理: {element_records}/{element_total}条记录")
                 print(f"当前进度: [{processed_records/total_records:.2%}]")
                 
-                results = self.process_element_data(df, element)
+                # 如果元素已部分处理，从未处理的部分继续
+                start_idx = element_records
+                print(f"从索引{start_idx}继续处理...")
+                
+                results = self.process_element_data(df, element, start_idx=start_idx)
                 all_data.extend(results)
                 processed_records += len(results)
                 
                 # 更新总体进度
                 overall_progress = processed_records / total_records
                 print(f"总进度: [{overall_progress:.2%}] 已完成{processed_records}/{total_records}条记录")
-            else:
-                element_records = sum(1 for item in all_data if item.get('element') == element)
-                processed_records += element_records
-                print(f"{element}数据已在之前的运行中处理完成 ({element_records}条记录)")
-                print(f"总进度: [{processed_records/total_records:.2%}]")
             
             # 保存总进度
             with open(progress_file, 'wb') as f:
