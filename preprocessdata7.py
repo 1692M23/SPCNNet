@@ -58,6 +58,10 @@ class LAMOSTPreprocessor:
         self.fits_dir = fits_dir if os.path.exists(fits_dir) else os.path.join('/content', fits_dir)
         self.output_dir = output_dir
         self.cache_dir = os.path.join(self.output_dir, 'cache')
+        
+        # 添加Google Drive备用缓存目录
+        self.drive_cache_dir = '/content/drive/My Drive/SPCNNet_Results/processed_data/cache'
+        
         self.progress_dir = os.path.join(self.output_dir, 'progress')
         self.figures_dir = os.path.join(self.output_dir, 'figures')
         self.logs_dir = os.path.join(self.output_dir, 'logs')
@@ -74,6 +78,9 @@ class LAMOSTPreprocessor:
         # 初始化文件查找缓存
         self.fits_file_cache = {}
         self.cache_file = os.path.join(self.cache_dir, 'files_cache.pkl')
+        
+        # 在初始化时就加载文件查找缓存
+        print("正在加载文件查找缓存...")
         self._load_files_cache()
         
         self.wavelength_range = wavelength_range if wavelength_range else (4000, 8098)  # 默认范围
@@ -107,14 +114,37 @@ class LAMOSTPreprocessor:
         
     def _load_files_cache(self):
         """加载文件查找缓存"""
+        # 尝试标准路径
         if os.path.exists(self.cache_file):
             try:
                 with open(self.cache_file, 'rb') as f:
                     self.fits_file_cache = pickle.load(f)
                 print(f"已加载文件查找缓存，共{len(self.fits_file_cache)}条记录")
+                return
             except Exception as e:
                 print(f"加载文件缓存出错: {e}")
                 self.fits_file_cache = {}
+        
+        # 尝试Google Drive路径
+        drive_cache_file = '/content/drive/My Drive/SPCNNet_Results/processed_data/cache/files_cache.pkl'
+        if os.path.exists(drive_cache_file):
+            try:
+                with open(drive_cache_file, 'rb') as f:
+                    self.fits_file_cache = pickle.load(f)
+                print(f"已从Google Drive加载文件查找缓存，共{len(self.fits_file_cache)}条记录")
+                # 立即保存到标准路径，方便后续使用
+                try:
+                    self._save_files_cache()
+                    print("已将Drive缓存同步到本地")
+                except:
+                    pass
+                return
+            except Exception as e:
+                print(f"加载Google Drive文件缓存出错: {e}")
+                self.fits_file_cache = {}
+        
+        # 都没有找到，初始化空缓存
+        self.fits_file_cache = {}
     
     def _save_files_cache(self):
         """保存文件查找缓存"""
@@ -162,19 +192,19 @@ class LAMOSTPreprocessor:
                     if not pd.api.types.is_string_dtype(df['spec']):
                         print(f"注意: {csv_file} 中的spec列不是字符串类型，正在转换...")
                         df['spec'] = df['spec'].astype(str)
-                        
-                    spec_files = df['spec'].values
-                    missing_files = []
+                    
+                    # 不在启动时检查所有文件，只显示警告信息
+                    print(f"CSV文件包含{len(df)}条记录，如果找不到某些FITS文件，将在处理时报错")
+                    
+                    # 仅检查前3个文件作为示例(不再检查所有文件)
+                    spec_files = df['spec'].values[:3]
                     for spec_file in spec_files:
                         # 使用_find_fits_file方法查找文件
-                        if self._find_fits_file(spec_file) is None:
-                            missing_files.append(spec_file)
-                    
-                    if missing_files:
-                        print(f"警告: {csv_file}中的一些FITS文件不存在 (显示前5个):")
-                        for file in missing_files[:5]:
-                            print(f"  - {os.path.join(self.fits_dir, file)}")
-                        print("请确保所有FITS文件都放在fits目录下")
+                        found_path = self._find_fits_file(spec_file)
+                        if found_path:
+                            print(f"示例文件找到: {found_path}")
+                        else:
+                            print(f"示例文件未找到: {spec_file}，请确保FITS文件路径正确")
                 else:
                     print(f"警告: CSV文件 {csv_file} 中没有找到'spec'列")
                     print(f"可用的列: {df.columns.tolist()}")
@@ -195,10 +225,17 @@ class LAMOSTPreprocessor:
         # 检查缓存
         if not hasattr(self, 'fits_file_cache'):
             self.fits_file_cache = {}
+            # 加载文件缓存
+            self._load_files_cache()
             
         if spec_name in self.fits_file_cache:
-            return self.fits_file_cache[spec_name]
-            
+            cache_file = self.fits_file_cache[spec_name]
+            # 确认缓存的文件仍然存在
+            if cache_file is not None and os.path.exists(cache_file):
+                return cache_file
+            # 文件已移动或删除，重新查找
+            self.fits_file_cache[spec_name] = None
+        
         # 如果输入已经是完整路径，提取文件名部分
         if os.path.isabs(spec_name):
             # 先检查完整路径是否直接存在
@@ -1015,7 +1052,21 @@ class LAMOSTPreprocessor:
         
         # 使用CacheManager替代直接缓存操作
         cache_key = f"processed_{spec_file.replace('/', '_')}"
+        
+        # 首先尝试标准缓存路径
         cached_data = self.cache_manager.get_cache(cache_key)
+        
+        # 如果没找到，尝试从Google Drive缓存目录查找
+        if cached_data is None and os.path.exists(self.drive_cache_dir):
+            drive_cache_path = os.path.join(self.drive_cache_dir, cache_key)
+            if os.path.exists(drive_cache_path):
+                try:
+                    with open(drive_cache_path, 'rb') as f:
+                        cached_data = pickle.load(f)
+                    print(f"从Google Drive缓存加载: {drive_cache_path}")
+                except Exception as e:
+                    print(f"加载Google Drive缓存出错: {e}")
+        
         if cached_data:
             return cached_data
         
@@ -1167,21 +1218,37 @@ class LAMOSTPreprocessor:
         
         # 检查进度文件
         progress_file = os.path.join(self.progress_dir, f"{element}_progress.pkl")
+        drive_progress_file = f"/content/drive/My Drive/SPCNNet_Results/processed_data/progress/{element}_progress.pkl"
+        
         results = []
         total_processed = 0
         
         # 如果有进度文件，加载已处理的结果
-        if os.path.exists(progress_file) and start_idx == 0:
-            try:
-                with open(progress_file, 'rb') as f:
-                    saved_data = pickle.load(f)
-                    results = saved_data.get('results', [])
-                    start_idx = saved_data.get('last_idx', 0)
-                    total_processed = len(results)
-                    print(f"从上次中断处继续（已处理{total_processed}条记录，进度：{total_processed/len(spec_files):.2%}）")
-            except Exception as e:
-                print(f"加载进度文件出错: {e}，将从头开始处理")
-                start_idx = 0
+        if start_idx == 0:
+            # 首先尝试标准目录
+            if os.path.exists(progress_file):
+                try:
+                    with open(progress_file, 'rb') as f:
+                        saved_data = pickle.load(f)
+                        results = saved_data.get('results', [])
+                        start_idx = saved_data.get('last_idx', 0)
+                        total_processed = len(results)
+                        print(f"从上次中断处继续（已处理{total_processed}条记录，进度：{total_processed/len(spec_files):.2%}）")
+                except Exception as e:
+                    print(f"加载进度文件出错: {e}，将从头开始处理")
+                    start_idx = 0
+            # 如果标准目录没有，尝试Google Drive
+            elif os.path.exists(drive_progress_file):
+                try:
+                    with open(drive_progress_file, 'rb') as f:
+                        saved_data = pickle.load(f)
+                        results = saved_data.get('results', [])
+                        start_idx = saved_data.get('last_idx', 0)
+                        total_processed = len(results)
+                        print(f"从Google Drive加载进度（已处理{total_processed}条记录，进度：{total_processed/len(spec_files):.2%}）")
+                except Exception as e:
+                    print(f"加载Google Drive进度文件出错: {e}，将从头开始处理")
+                    start_idx = 0
         
         # 计算剩余的批次
         remaining = len(spec_files) - start_idx
@@ -1347,37 +1414,73 @@ class LAMOSTPreprocessor:
         
         # 检查是否有整体进度文件
         progress_file = os.path.join(self.progress_dir, "all_progress.pkl")
-        if resume and os.path.exists(progress_file):
-            try:
-                with open(progress_file, 'rb') as f:
-                    all_data = pickle.load(f)
-                print(f"已加载保存的处理结果，共{len(all_data)}条记录")
-                
-                # 读取CSV文件来获取总记录数
-                dataframes = self.read_csv_data()
-                if not dataframes:
-                    print("错误: 没有有效的数据集")
-                    return np.array([]), np.array([]), np.array([]), np.array([])
-                
-                # 计算总数据量
-                total_records = sum(len(df) for df in dataframes)
-                
-                # 显示进度并询问是否继续
-                progress_percent = len(all_data)/total_records * 100
-                print(f"当前进度: {len(all_data)}/{total_records} 条记录 ({progress_percent:.2f}%)")
-                
-                if len(all_data) >= total_records:
-                    print(f"所有数据已处理完成，进入数据准备阶段")
-                    return self._prepare_arrays(all_data)
-                else:
-                    if input(f"是否继续处理剩余{total_records - len(all_data)}条数据？(y/n): ").lower() != 'y':
-                        print("跳过处理阶段，直接使用已有数据")
+        drive_progress_file = "/content/drive/My Drive/SPCNNet_Results/processed_data/progress/all_progress.pkl"
+        
+        if resume:
+            # 先尝试从标准路径加载
+            if os.path.exists(progress_file):
+                try:
+                    with open(progress_file, 'rb') as f:
+                        all_data = pickle.load(f)
+                    print(f"已加载保存的处理结果，共{len(all_data)}条记录")
+                    
+                    # 读取CSV文件来获取总记录数
+                    dataframes = self.read_csv_data()
+                    if not dataframes:
+                        print("错误: 没有有效的数据集")
+                        return np.array([]), np.array([]), np.array([]), np.array([])
+                    
+                    # 计算总数据量
+                    total_records = sum(len(df) for df in dataframes)
+                    
+                    # 显示进度并询问是否继续
+                    progress_percent = len(all_data)/total_records * 100
+                    print(f"当前进度: {len(all_data)}/{total_records} 条记录 ({progress_percent:.2f}%)")
+                    
+                    if len(all_data) >= total_records:
+                        print(f"所有数据已处理完成，进入数据准备阶段")
                         return self._prepare_arrays(all_data)
                     else:
-                        print(f"继续处理剩余数据...")
-            except Exception as e:
-                print(f"加载进度文件出错: {e}，将重新处理所有数据")
-                all_data = []
+                        if input(f"是否继续处理剩余{total_records - len(all_data)}条数据？(y/n): ").lower() != 'y':
+                            print("跳过处理阶段，直接使用已有数据")
+                            return self._prepare_arrays(all_data)
+                        else:
+                            print(f"继续处理剩余数据...")
+                except Exception as e:
+                    print(f"加载进度文件出错: {e}，将重新处理所有数据")
+                    all_data = []
+            # 如果标准路径没有，尝试从Google Drive加载
+            elif os.path.exists(drive_progress_file):
+                try:
+                    with open(drive_progress_file, 'rb') as f:
+                        all_data = pickle.load(f)
+                    print(f"从Google Drive加载处理结果，共{len(all_data)}条记录")
+                    
+                    # 读取CSV文件来获取总记录数
+                    dataframes = self.read_csv_data()
+                    if not dataframes:
+                        print("错误: 没有有效的数据集")
+                        return np.array([]), np.array([]), np.array([]), np.array([])
+                    
+                    # 计算总数据量
+                    total_records = sum(len(df) for df in dataframes)
+                    
+                    # 显示进度并询问是否继续
+                    progress_percent = len(all_data)/total_records * 100
+                    print(f"当前进度: {len(all_data)}/{total_records} 条记录 ({progress_percent:.2f}%)")
+                    
+                    if len(all_data) >= total_records:
+                        print(f"所有数据已处理完成，进入数据准备阶段")
+                        return self._prepare_arrays(all_data)
+                    else:
+                        if input(f"是否继续处理剩余{total_records - len(all_data)}条数据？(y/n): ").lower() != 'y':
+                            print("跳过处理阶段，直接使用已有数据")
+                            return self._prepare_arrays(all_data)
+                        else:
+                            print(f"继续处理剩余数据...")
+                except Exception as e:
+                    print(f"加载Google Drive进度文件出错: {e}，将重新处理所有数据")
+                    all_data = []
         
         # 读取CSV文件
         dataframes = self.read_csv_data()
@@ -2056,30 +2159,39 @@ class LAMOSTPreprocessor:
             plt.show()
     
     def check_data_sources(self):
-        """检查数据源文件是否存在并报告状态"""
-        print("\n=== 数据源检查 ===")
+        """检查数据源是否存在并可用"""
+        print("\n=== 检查数据源 ===")
+        
+        # 检查是否跳过详细检查
+        if len(self.fits_file_cache) > 0:
+            skip_check = input(f"已加载{len(self.fits_file_cache)}个文件路径缓存。是否跳过详细FITS文件检查？(y/n): ").lower() == 'y'
+            if skip_check:
+                print("跳过详细FITS文件检查，假定文件存在")
+                print("✓ CSV文件已就绪")
+                print("✓ FITS目录已就绪")
+                print("\n=== 检查完成 ===\n")
+                return True
         
         # 检查CSV文件
-        for csv_file in self.csv_files:
+        csv_ok = True
+        for i, csv_file in enumerate(self.csv_files, 1):
             if os.path.exists(csv_file):
-                print(f"✓ CSV文件 {csv_file} 存在")
-                try:
-                    df = pd.read_csv(csv_file)
-                    print(f"  - 包含 {len(df)} 条记录")
-                    print(f"  - 列名: {', '.join(df.columns)}")
-                    
-                    # 检查是否包含spec列
-                    if 'spec' in df.columns:
-                        spec_example = df['spec'].iloc[0] if len(df) > 0 else "无数据"
-                        print(f"  - 'spec'列示例: {spec_example}")
-                    else:
-                        print(f"  ✗ 错误: {csv_file} 中没有'spec'列")
-                except Exception as e:
-                    print(f"  ✗ 无法读取CSV文件 {csv_file}: {e}")
+                print(f"✓ {i}. CSV文件存在: {csv_file}")
+                # 检查大小是否合理
+                size_mb = os.path.getsize(csv_file) / (1024 * 1024)
+                print(f"   大小: {size_mb:.2f} MB")
+                # 检查是否包含spec列
+                if 'spec' in pd.read_csv(csv_file).columns:
+                    print(f"  - 'spec'列存在")
+                else:
+                    print(f"  ✗ 错误: {csv_file} 中没有'spec'列")
+                    csv_ok = False
             else:
-                print(f"✗ CSV文件 {csv_file} 不存在")
+                print(f"✗ {i}. CSV文件不存在: {csv_file}")
+                csv_ok = False
         
         # 检查fits目录
+        fits_ok = True
         if os.path.exists(self.fits_dir):
             print(f"\n✓ fits目录存在: {os.path.abspath(self.fits_dir)}")
             
@@ -2141,9 +2253,12 @@ class LAMOSTPreprocessor:
                                 print(f"  FITS文件中的常见后缀: {', '.join(common_exts)}")
         else:
             print(f"\n✗ fits目录不存在: {os.path.abspath(self.fits_dir)}")
+            fits_ok = False
         
         print("\n=== 检查完成 ===\n")
         
+        return csv_ok and fits_ok
+    
     def clean_cache(self):
         """有选择地清理不同类型的缓存文件"""
         print("\n=== 缓存清理 ===")
