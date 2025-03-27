@@ -97,7 +97,7 @@ class LAMOSTPreprocessor:
             
         # 检查fits目录是否存在
         if not os.path.exists(fits_dir):
-            os.makedirs(fits_dir)
+            os.makedirs(fits_dir, exist_ok=True)
             print(f"警告: 创建了fits目录，请确保FITS文件放在 {os.path.abspath(fits_dir)} 目录下")
         else:
             print(f"已找到fits目录: {os.path.abspath(fits_dir)}")
@@ -1074,22 +1074,37 @@ class LAMOSTPreprocessor:
             
             # 返回处理后的光谱和标签，包括中间处理结果
             result = {
-                'spectrum': flux_normalized, 
-                'label': label, 
-                'filename': spec_file,
-                # 保存中间结果用于可视化
-                'original_wavelength': wavelength,
-                'original_flux': flux,
-                'wavelength_calibrated': wavelength_calibrated,
-                'wavelength_corrected': wavelength_corrected,
-                'denoised_flux': flux_denoised,
-                'wavelength_rest': wavelength_rest,
-                'wavelength_resampled': wavelength_resampled, 
-                'flux_resampled': flux_resampled,
-                'flux_continuum': flux_continuum,
-                'flux_denoised_second': flux_denoised_second,
-                'z': z  # 保存红移值
+                'data': flux_normalized,  # 将spectrum改为data
+                'metadata': {
+                    'label': label,
+                    'filename': spec_file,
+                    'element': '',  # 会在process_element_data方法中被设置
+                    # 保存中间结果用于可视化
+                    'original_wavelength': wavelength,
+                    'original_flux': flux,
+                    'wavelength_calibrated': wavelength_calibrated,
+                    'wavelength_corrected': wavelength_corrected,
+                    'denoised_flux': flux_denoised,
+                    'wavelength_rest': wavelength_rest,
+                    'wavelength_resampled': wavelength_resampled, 
+                    'flux_resampled': flux_resampled,
+                    'flux_continuum': flux_continuum,
+                    'flux_denoised_second': flux_denoised_second,
+                    'z': z  # 保存红移值
+                },
+                'validation_metrics': {
+                    'quality_metrics': {
+                        'snr': np.mean(flux_normalized) / np.std(flux_normalized) if np.std(flux_normalized) > 0 else 0,
+                        'wavelength_coverage': 1.0,  # 默认为完整覆盖
+                        'normalization_quality': 1.0  # 默认为良好质量
+                    }
+                }
             }
+            
+            # 为了保持向后兼容，添加旧字段
+            result['spectrum'] = result['data']
+            result['label'] = label
+            result['filename'] = spec_file
             
             # 使用CacheManager保存结果
             self.cache_manager.set_cache(cache_key, result)
@@ -1259,7 +1274,13 @@ class LAMOSTPreprocessor:
                     try:
                         result = job.get(timeout=30)  # 设置超时避免卡死
                         if result is not None:
-                            result['element'] = element
+                            # 设置元素信息
+                            if 'metadata' in result:
+                                result['metadata']['element'] = element
+                            else:
+                                # 兼容旧格式
+                                result['element'] = element
+                            
                             batch_results.append(result)
                             successful_count += 1
                         else:
@@ -1387,8 +1408,14 @@ class LAMOSTPreprocessor:
         spectrum_lengths = []
         
         for item in all_data:
+            # 获取光谱数据，支持新旧缓存结构
+            spectrum = None
+            if 'data' in item:
+                spectrum = item['data']
+            elif 'spectrum' in item:
+                spectrum = item['spectrum']
+            
             # 检查spectrum是否是有效的数组
-            spectrum = item.get('spectrum')
             if spectrum is not None and isinstance(spectrum, (list, np.ndarray)) and len(spectrum) > 0:
                 spectrum_lengths.append(len(spectrum))
                 valid_data.append(item)
@@ -1417,10 +1444,35 @@ class LAMOSTPreprocessor:
         
         # 转换为NumPy数组
         try:
-            X = np.array([item['spectrum'] for item in valid_data])
-            y = np.array([item['label'] for item in valid_data])
-            elements = np.array([item.get('element', '') for item in valid_data])
-            filenames = np.array([item['filename'] for item in valid_data])
+            # 支持新旧缓存结构
+            X = np.array([item.get('data', item.get('spectrum')) for item in valid_data])
+            
+            # 获取标签，支持新旧缓存结构
+            y_values = []
+            for item in valid_data:
+                if 'metadata' in item and 'label' in item['metadata']:
+                    y_values.append(item['metadata']['label'])
+                else:
+                    y_values.append(item.get('label'))
+            y = np.array(y_values)
+            
+            # 获取元素信息，支持新旧缓存结构
+            element_values = []
+            for item in valid_data:
+                if 'metadata' in item and 'element' in item['metadata']:
+                    element_values.append(item['metadata']['element'])
+                else:
+                    element_values.append(item.get('element', ''))
+            elements = np.array(element_values)
+            
+            # 获取文件名，支持新旧缓存结构
+            filename_values = []
+            for item in valid_data:
+                if 'metadata' in item and 'filename' in item['metadata']:
+                    filename_values.append(item['metadata']['filename'])
+                else:
+                    filename_values.append(item.get('filename', ''))
+            filenames = np.array(filename_values)
             
             print(f"成功创建数据数组: X形状={X.shape}, y形状={y.shape}")
         except ValueError as e:
@@ -1517,42 +1569,82 @@ class LAMOSTPreprocessor:
 
     
     def predict_abundance(self, fits_file, model):
-        """预测单个FITS文件的元素丰度"""
-        # 读取并预处理光谱
-        wavelength, flux, v_helio = self.read_fits_file(fits_file)
-        if wavelength is None or flux is None:
+        """使用已训练的模型预测单个光谱的丰度"""
+        # 处理光谱
+        result = self.process_single_spectrum(fits_file, 0.0)  # 使用占位符标签
+        if result is None:
+            print(f"无法处理文件: {fits_file}")
             return None
         
-        # 去噪
-        flux_denoised = self.denoise_spectrum(wavelength, flux)
+        # 获取处理后的光谱数据
+        spectrum = None
+        if 'data' in result:
+            spectrum = result['data']
+        elif 'spectrum' in result:
+            spectrum = result['spectrum']
         
-        # 视向速度校正
-        wavelength_corrected = self.correct_velocity(wavelength, flux_denoised, v_helio)
-        
-        # 重采样
-        wavelength_resampled, flux_resampled = self.resample_spectrum(wavelength_corrected, flux_denoised)
-        if wavelength_resampled is None or flux_resampled is None:
+        if spectrum is None:
+            print(f"无法获取光谱数据: {fits_file}")
             return None
+            
+        # 确保光谱是二维数组 (样本数, 特征数)
+        spectrum_array = np.array(spectrum).reshape(1, -1)
         
-        # 归一化
-        flux_normalized = self.normalize_spectrum(flux_resampled)
-        if flux_normalized is None:
+        # 进行预测
+        try:
+            prediction = model.predict(spectrum_array)
+            print(f"预测结果: {prediction[0]}")
+            return prediction[0]
+        except Exception as e:
+            print(f"预测时出错: {e}")
             return None
-        
-        # 准备模型输入
-        X_input = np.expand_dims(flux_normalized, axis=0)
-        
-        # 使用模型预测
-        prediction = model.predict(X_input)
-        
-        return prediction[0]
     
     def visualize_spectrum(self, spec_file, processed=True, save=True):
-        """可视化原始光谱和处理后的光谱，展示四个处理阶段"""
-        wavelength, flux, v_helio = self.read_fits_file(spec_file)
-        if wavelength is None or flux is None:
-            print(f"无法读取光谱文件: {spec_file}")
-            return
+        """可视化单个光谱，原始光谱或处理后的光谱"""
+        if processed:
+            # 检查是否有缓存
+            cache_key = f"processed_{spec_file.replace('/', '_')}"
+            cached_data = self.cache_manager.get_cache(cache_key)
+            
+            if cached_data is None:
+                # 如果没有缓存，处理光谱
+                print(f"没有找到处理后的光谱缓存，重新处理: {spec_file}")
+                processed_data = self.process_single_spectrum(spec_file, 0.0)  # 使用占位符标签
+                if processed_data is None:
+                    print(f"无法处理文件: {spec_file}")
+                    return
+            else:
+                processed_data = cached_data
+                
+            # 提取数据，支持新旧缓存结构
+            if 'metadata' in processed_data:
+                metadata = processed_data['metadata']
+                original_wavelength = metadata.get('original_wavelength')
+                original_flux = metadata.get('original_flux')
+                wavelength_calibrated = metadata.get('wavelength_calibrated')
+                wavelength_corrected = metadata.get('wavelength_corrected')
+                wavelength_rest = metadata.get('wavelength_rest')
+                denoised_flux = metadata.get('denoised_flux')
+                wavelength_resampled = metadata.get('wavelength_resampled')
+                flux_resampled = metadata.get('flux_resampled')
+                flux_continuum = metadata.get('flux_continuum')
+                flux_denoised_second = metadata.get('flux_denoised_second')
+                z = metadata.get('z', 0)
+                spectrum = processed_data.get('data')
+            else:
+                # 兼容旧格式
+                original_wavelength = processed_data.get('original_wavelength')
+                original_flux = processed_data.get('original_flux')
+                wavelength_calibrated = processed_data.get('wavelength_calibrated')
+                wavelength_corrected = processed_data.get('wavelength_corrected')
+                wavelength_rest = processed_data.get('wavelength_rest')
+                denoised_flux = processed_data.get('denoised_flux')
+                wavelength_resampled = processed_data.get('wavelength_resampled')
+                flux_resampled = processed_data.get('flux_resampled')
+                flux_continuum = processed_data.get('flux_continuum')
+                flux_denoised_second = processed_data.get('flux_denoised_second')
+                z = processed_data.get('z', 0)
+                spectrum = processed_data.get('spectrum')
         
         # 设置字体和图形样式
         plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial']
@@ -1564,7 +1656,6 @@ class LAMOSTPreprocessor:
         # 获取光谱类型和观测日期信息（如果有）
         spec_type = ""
         obs_date = ""
-        z = 0  # 初始化红移值
         try:
             file_path = self._get_file_extension(spec_file)
             with fits.open(file_path, ignore_missing_end=True) as hdul:
@@ -1776,106 +1867,126 @@ class LAMOSTPreprocessor:
         
         # 显示原始光谱
         ax1 = plt.subplot(4, 1, 1)
-        plot_with_labels(ax1, wavelength, flux, 
-                         (min(wavelength), max(wavelength)), 
+        plot_with_labels(ax1, original_wavelength, original_flux, 
+                         (min(original_wavelength), max(original_wavelength)), 
                          absorption_lines, color='blue', label_name='Raw Spectrum')
         ax1.set_ylabel('Flux (relative)')
-        ax1.set_title(f'Spectrum: {os.path.basename(spec_file)}')
-        # 将图例放在右上角
-        ax1.legend(loc='upper right')
+        ax1.set_title(f"Raw Spectrum - {os.path.basename(spec_file)} - {spec_type} {obs_date}")
         
-        # 添加光谱类型和观测信息
-        if spec_type or obs_date:
-            info_text = f"{spec_type} {'   ' if spec_type and obs_date else ''} {obs_date}"
-            ax1.annotate(info_text, xy=(0.02, 0.05), xycoords='axes fraction', fontsize=9)
-        
+        # 如果是处理后的光谱，显示处理效果
         if processed:
-            # 处理光谱 - 进行所有处理步骤
+            # 去噪和红移校正
+            ax2 = plt.subplot(4, 1, 2, sharex=ax1)
+            plot_with_labels(ax2, wavelength_corrected, denoised_flux, 
+                            (min(wavelength_corrected), max(wavelength_corrected)), 
+                            absorption_lines, color='green', label_name='After Redshift Correction')
+            ax2.set_ylabel('Flux (relative)')
+            ax2.set_title("After Denoising and Redshift Correction")
+            
+            # 重采样
+            ax3 = plt.subplot(4, 1, 3)
+            plot_with_labels(ax3, wavelength_resampled, flux_resampled, 
+                            (min(wavelength_resampled), max(wavelength_resampled)), 
+                            absorption_lines, color='orange', label_name='After Resampling')
+            ax3.set_ylabel('Flux (relative)')
+            ax3.set_title("After Resampling")
+            
+            # 最终处理结果
+            ax4 = plt.subplot(4, 1, 4)
+            plot_with_labels(ax4, wavelength_resampled, spectrum, 
+                            (min(wavelength_resampled), max(wavelength_resampled)), 
+                            absorption_lines, color='red', label_name='Final Normalized')
+            ax4.set_ylabel('Normalized Flux')
+            ax4.set_title("Final Normalized Result")
+            
+        else:
+            # 如果不是处理后光谱，则使用原始光谱进行处理并显示
             
             # 1. 波长校正
-            wavelength_calibrated = self.correct_wavelength(wavelength, flux)
+            wavelength_calibrated = self.correct_wavelength(original_wavelength, original_flux)
+            print(f"波长校正后: 波长范围{wavelength_calibrated[0]}~{wavelength_calibrated[-1]}")
+            
+            # 从FITS文件读取视向速度
+            v_helio = self.read_fits_file(spec_file).get('v_helio', 0)
             
             # 2. 视向速度校正
-            wavelength_corrected = self.correct_velocity(wavelength_calibrated, flux, v_helio)
+            wavelength_corrected = self.correct_velocity(wavelength_calibrated, original_flux, v_helio)
+            print(f"视向速度校正后: 波长范围{wavelength_corrected[0]}~{wavelength_corrected[-1]}")
             
             # 3. 去噪
-            flux_denoised = self.denoise_spectrum(wavelength_corrected, flux)
+            flux_denoised = self.denoise_spectrum(wavelength_corrected, original_flux)
+            if flux_denoised is None:
+                print(f"去噪{spec_file}失败")
+                return
             
             # 4. 红移校正
             wavelength_rest = self.correct_redshift(wavelength_corrected, flux_denoised, z)
+            print(f"红移校正后: 波长范围{wavelength_rest[0]}~{wavelength_rest[-1]}")
             
             # 5. 重采样
+            print(f"重采样到波长范围: {self.wavelength_range}, 点数={self.n_points}")
             wavelength_resampled, flux_resampled = self.resample_spectrum(wavelength_rest, flux_denoised)
+            if wavelength_resampled is None or flux_resampled is None:
+                print(f"重采样{spec_file}失败")
+                return
             
-            if wavelength_resampled is not None and flux_resampled is not None:
-                # 第二张图: 显示处理后的光谱到重采样阶段
-                ax2 = plt.subplot(4, 1, 2)
-                plot_with_labels(ax2, wavelength_resampled, flux_resampled, 
-                                 (min(wavelength_resampled), max(wavelength_resampled)), 
-                                 absorption_lines, color='green', 
-                                 label_name='Calibrated, Velocity Corrected, Denoised, Redshift Corrected & Resampled')
-                ax2.set_ylabel('Flux')
-                ax2.set_title('Spectrum after Calibration, Velocity Correction, Denoising, Redshift Correction & Resampling')
-                # 将图例放在右上角
-                ax2.legend(loc='upper right')
-                
-                # 6. 连续谱归一化 (第三张图)
-                flux_continuum = self.normalize_continuum(wavelength_resampled, flux_resampled)
-                
-                ax3 = plt.subplot(4, 1, 3)
-                plot_with_labels(ax3, wavelength_resampled, flux_continuum,
-                                 (min(wavelength_resampled), max(wavelength_resampled)),
-                                 absorption_lines, color='purple',
-                                 label_name='Continuum Normalized')
-                ax3.set_ylabel('Normalized Flux')
-                ax3.set_title('Spectrum after Continuum Normalization')
-                # 将图例放在右上角
-                ax3.legend(loc='upper right')
-                
-                # 7. 二次去噪 + 8. 最终归一化 (最大最小值归一化)
-                flux_denoised_second = self.denoise_spectrum_second(wavelength_resampled, flux_continuum)
-                flux_normalized = self.normalize_spectrum(flux_denoised_second)
-                
-                # 第四张图: 显示最终处理后的光谱
-                ax4 = plt.subplot(4, 1, 4)
-                plot_with_labels(ax4, wavelength_resampled, flux_normalized,
-                                 (min(wavelength_resampled), max(wavelength_resampled)),
-                                 absorption_lines, color='red',
-                                 label_name='Fully Processed')
-                ax4.set_ylabel('Final Normalized Flux')
-                ax4.set_title('Spectrum after Second Denoising and Final Normalization')
-                # 将图例放在右上角
-                ax4.legend(loc='upper right')
-                
-                # 设置y轴范围为0-1，确保最终归一化图的y轴范围固定
-                ax4.set_ylim(0, 1)
-                
-                # 添加说明文本
-                # 检查是否使用了公有波长范围
-                if self.compute_common_range and len(self.processed_ranges) > 1:
-                    w_min, w_max = self.wavelength_range
-                    range_description = f'Common Wavelength Range: {w_min:.2f}-{w_max:.2f} Å'
-                else:
-                    w_min, w_max = self.wavelength_range
-                    range_description = f'Wavelength Range: {w_min:.2f}-{w_max:.2f} Å'
-                
-                # 检查是否使用对数步长
-                if hasattr(self, 'log_step') and self.log_step:
-                    step_description = f'Log Step: {self.log_step} dex'
-                else:
-                    step_description = f'Points: {len(wavelength_resampled)}'
-                
-                # 添加红移信息
-                z_description = f'Redshift: z = {z}' if z else ''
-                
-                if z_description:
-                    plt.figtext(0.5, 0.01, 
-                            f'{range_description}, {step_description}, {z_description}', 
-                            ha='center', fontsize=10)
-                else:
-                    plt.figtext(0.5, 0.01, 
-                            f'{range_description}, {step_description}', 
-                            ha='center', fontsize=10)
+            # 6. 连续谱归一化
+            flux_continuum = self.normalize_continuum(wavelength_resampled, flux_resampled)
+            
+            # 7. 二次去噪
+            flux_denoised_second = self.denoise_spectrum_second(wavelength_resampled, flux_continuum)
+            
+            # 8. 最终归一化 (最大最小值归一化)
+            print(f"对流量进行最终归一化")
+            flux_normalized = self.normalize_spectrum(flux_denoised_second)
+            if flux_normalized is None:
+                print(f"归一化{spec_file}失败")
+                return
+            
+            spectrum = flux_normalized
+            
+            # 显示处理过程
+            ax2 = plt.subplot(4, 1, 2)
+            plot_with_labels(ax2, wavelength_corrected, flux_denoised, 
+                           (min(wavelength_corrected), max(wavelength_corrected)), 
+                           absorption_lines, color='green', label_name='After Denoise')
+            ax2.set_ylabel('Flux (relative)')
+            ax2.set_title("After Denoising")
+            
+            ax3 = plt.subplot(4, 1, 3)
+            plot_with_labels(ax3, wavelength_resampled, flux_resampled, 
+                           (min(wavelength_resampled), max(wavelength_resampled)), 
+                           absorption_lines, color='orange', label_name='After Resampling')
+            ax3.set_ylabel('Flux (relative)')
+            ax3.set_title("After Resampling")
+            
+            ax4 = plt.subplot(4, 1, 4)
+            plot_with_labels(ax4, wavelength_resampled, spectrum, 
+                           (min(wavelength_resampled), max(wavelength_resampled)), 
+                           absorption_lines, color='red', label_name='Final Normalized')
+            ax4.set_ylabel('Normalized Flux')
+            ax4.set_title("Final Normalized Result")
+        
+        # 添加波长范围和处理信息
+        if self.compute_common_range and len(self.processed_ranges) > 1:
+            range_description = f'Common Wavelength Range: {self.wavelength_range[0]:.2f}-{self.wavelength_range[1]:.2f} Å'
+        else:
+            range_description = f'Wavelength Range: {self.wavelength_range[0]:.2f}-{self.wavelength_range[1]:.2f} Å'
+        
+        # 检查是否使用对数步长
+        if hasattr(self, 'log_step') and self.log_step:
+            step_description = f'Log Step: {self.log_step} dex'
+        else:
+            step_description = f'Points: {len(wavelength_resampled)}'
+        
+        # 添加红移信息
+        z_description = f'Redshift: z = {z}' if z else ''
+        
+        info_text = f'{range_description}, {step_description}'
+        if z_description:
+            info_text += f', {z_description}'
+        
+        plt.figtext(0.5, 0.01, info_text, ha='center', fontsize=10)
         
         plt.tight_layout(pad=2.0)
         
