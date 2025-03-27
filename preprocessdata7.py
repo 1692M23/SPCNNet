@@ -1962,7 +1962,13 @@ class LAMOSTPreprocessor:
             if os.path.exists(csv_file):
                 df = pd.read_csv(csv_file)
                 if 'spec' in df.columns:
+                    # 确保spec列的类型为字符串
+                    if not pd.api.types.is_string_dtype(df['spec']):
+                        print(f"注意: {csv_file} 中的spec列不是字符串类型，正在转换...")
+                        df['spec'] = df['spec'].astype(str)
+                    
                     for spec in df['spec'].values[:5]:  # 只取前5个测试
+                        spec = str(spec)  # 确保类型为字符串
                         if spec not in test_files:
                             test_files.append(spec)
         
@@ -1988,6 +1994,9 @@ class LAMOSTPreprocessor:
         # 测试文件路径查找
         print("\n文件查找测试:")
         for spec in test_files:
+            # 再次确保spec是字符串类型
+            spec = str(spec)
+            
             print(f"测试: {spec}")
             # 直接路径测试
             direct_path = os.path.join(self.fits_dir, spec)
@@ -2021,6 +2030,8 @@ class LAMOSTPreprocessor:
         print("\n清除缓存后重新测试:")
         self.extension_cache = {}
         for spec in test_files[:1]:  # 只测试第一个
+            # 确保spec是字符串类型
+            spec = str(spec)
             print(f"重新测试: {spec}")
             found_path = self._find_fits_file(spec)
             if found_path:
