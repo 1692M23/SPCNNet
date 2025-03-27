@@ -53,17 +53,9 @@ class LAMOSTPreprocessor:
                  memory_limit=0.7,  # 内存使用限制(占总内存比例)
                  low_memory_mode=False):  # 低内存模式
         
-        # 初始化基本参数
-        self.csv_files = csv_files if isinstance(csv_files, list) else [csv_files]
+        self.csv_files = csv_files
         self.fits_dir = fits_dir
         self.output_dir = output_dir
-        self.cache_dir = os.path.join(output_dir, 'cache')
-        self.progress_dir = os.path.join(output_dir, 'progress')
-        
-        # 创建文件查找缓存
-        self.find_cache_file = os.path.join(self.cache_dir, 'find_cache.json')
-        self.find_cache = self._load_find_cache()
-        
         self.wavelength_range = wavelength_range if wavelength_range else (4000, 8098)  # 默认范围
         self.n_points = n_points
         self.log_step = log_step
@@ -93,6 +85,16 @@ class LAMOSTPreprocessor:
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
             
+        # 进度记录目录
+        self.progress_dir = os.path.join(output_dir, 'progress')
+        if not os.path.exists(self.progress_dir):
+            os.makedirs(self.progress_dir)
+            
+        # 缓存目录
+        self.cache_dir = os.path.join(output_dir, 'cache')
+        if not os.path.exists(self.cache_dir):
+            os.makedirs(self.cache_dir)
+            
         # 检查fits目录是否存在
         if not os.path.exists(fits_dir):
             os.makedirs(fits_dir, exist_ok=True)
@@ -101,7 +103,7 @@ class LAMOSTPreprocessor:
             print(f"已找到fits目录: {os.path.abspath(fits_dir)}")
             fits_count = len(glob.glob(os.path.join(fits_dir, "*")))
             print(f"该目录中有 {fits_count} 个文件")
-        
+            
         # 后缀缓存，避免重复查找
         self.extension_cache = {}
         
@@ -109,68 +111,6 @@ class LAMOSTPreprocessor:
         
         self.cache_manager = CacheManager(cache_dir=os.path.join(output_dir, 'cache'))
         
-    def _load_find_cache(self):
-        """加载文件查找缓存"""
-        if os.path.exists(self.find_cache_file):
-            try:
-                with open(self.find_cache_file, 'r') as f:
-                    return json.load(f)
-            except Exception as e:
-                print(f"加载查找缓存出错: {e}")
-        return {}
-
-    def _save_find_cache(self):
-        """保存文件查找缓存"""
-        try:
-            os.makedirs(os.path.dirname(self.find_cache_file), exist_ok=True)
-            with open(self.find_cache_file, 'w') as f:
-                json.dump(self.find_cache, f)
-        except Exception as e:
-            print(f"保存查找缓存出错: {e}")
-
-    def _find_fits_file(self, spec_name):
-        """查找FITS文件，使用缓存加速"""
-        # 检查缓存
-        if spec_name in self.find_cache:
-            cached_path = self.find_cache[spec_name]
-            if os.path.exists(cached_path):
-                return cached_path
-            else:
-                # 如果缓存的路径不存在，从缓存中删除
-                del self.find_cache[spec_name]
-
-        # 原有的查找逻辑
-        found_path = None
-        
-        # 尝试直接路径
-        direct_path = os.path.join(self.fits_dir, spec_name)
-        if os.path.exists(direct_path):
-            found_path = direct_path
-        else:
-            # 尝试不同的扩展名
-            for ext in ['.fits', '.fits.gz', '.fit', '.fit.gz']:
-                test_path = direct_path + ext
-                if os.path.exists(test_path):
-                    found_path = test_path
-                    break
-                    
-            # 如果还没找到，尝试子目录
-            if not found_path:
-                for root, _, files in os.walk(self.fits_dir):
-                    for file in files:
-                        if file.startswith(spec_name) and file.endswith(('.fits', '.fits.gz', '.fit', '.fit.gz')):
-                            found_path = os.path.join(root, file)
-                            break
-                    if found_path:
-                        break
-
-        # 保存到缓存
-        if found_path:
-            self.find_cache[spec_name] = found_path
-            self._save_find_cache()
-
-        return found_path
-    
     def read_csv_data(self):
         """读取CSV文件并返回DataFrame列表"""
         dataframes = []
@@ -233,6 +173,88 @@ class LAMOSTPreprocessor:
                 traceback.print_exc()
         
         return dataframes
+    
+    def _find_fits_file(self, spec_name):
+        """查找匹配的fits文件，处理嵌套目录和命名差异"""
+        # 确保spec_name是字符串类型
+        spec_name = str(spec_name)
+        
+        # 检查缓存
+        if not hasattr(self, 'fits_file_cache'):
+            self.fits_file_cache = {}
+            
+        if spec_name in self.fits_file_cache:
+            return self.fits_file_cache[spec_name]
+            
+        # 如果输入已经是完整路径，提取文件名部分
+        if os.path.isabs(spec_name):
+            # 先检查完整路径是否直接存在
+            if os.path.exists(spec_name) and os.path.isfile(spec_name):
+                print(f"找到绝对路径文件: {spec_name}")
+                self.fits_file_cache[spec_name] = spec_name
+                return spec_name
+                
+            # 如果完整路径不存在，提取文件名
+            base_name = os.path.basename(spec_name)
+        else:
+            # 相对路径情况下
+            base_name = spec_name
+        
+        # 记录日志
+        print(f"查找文件: {spec_name}, 基础名称: {base_name}")
+        
+        # 首先尝试直接在fits目录下按完整路径匹配
+        direct_path = os.path.join(self.fits_dir, spec_name)
+        if os.path.exists(direct_path) and os.path.isfile(direct_path):
+            print(f"直接匹配成功: {direct_path}")
+            self.fits_file_cache[spec_name] = direct_path
+            return direct_path
+        
+        # 尝试直接在fits目录下按基础名称匹配（常规后缀）
+        for ext in ['', '.fits', '.fits.gz', '.fit', '.fit.gz']:
+            path = os.path.join(self.fits_dir, base_name + ext)
+            if os.path.exists(path) and os.path.isfile(path):
+                print(f"基础名称匹配成功: {path}")
+                self.fits_file_cache[spec_name] = path
+                return path
+        
+        # 进行递归搜索，处理嵌套目录
+        for root, dirs, files in os.walk(self.fits_dir):
+            for file in files:
+                # 检查文件名是否匹配（忽略大小写）
+                if base_name.lower() in file.lower():
+                    found_path = os.path.join(root, file)
+                    print(f"部分名称匹配成功: {found_path}")
+                    self.fits_file_cache[spec_name] = found_path
+                    return found_path
+                
+                # 尝试去除可能的后缀后再比较
+                file_base = file.lower()
+                for ext in ['.fits', '.fits.gz', '.fit', '.fit.gz']:
+                    if file_base.endswith(ext):
+                        file_base = file_base[:-len(ext)]
+                        break
+                
+                if base_name.lower() == file_base:
+                    found_path = os.path.join(root, file)
+                    print(f"去除后缀后匹配成功: {found_path}")
+                    self.fits_file_cache[spec_name] = found_path
+                    return found_path
+                
+                # 尝试更模糊的匹配方式
+                # 移除路径分隔符，便于匹配跨目录文件
+                clean_base_name = base_name.replace('/', '_').replace('\\', '_')
+                clean_file_base = file_base.replace('/', '_').replace('\\', '_')
+                
+                if clean_base_name.lower() in clean_file_base or clean_file_base in clean_base_name.lower():
+                    found_path = os.path.join(root, file)
+                    print(f"模糊匹配成功: {found_path}")
+                    self.fits_file_cache[spec_name] = found_path
+                    return found_path
+        
+        # 如果以上都没找到，返回None
+        print(f"未找到匹配文件: {spec_name}")
+        return None
     
     def _get_file_extension(self, fits_file):
         """获取文件完整路径，使用缓存避免重复查找"""
@@ -1314,10 +1336,28 @@ class LAMOSTPreprocessor:
                     all_data = pickle.load(f)
                 print(f"已加载保存的处理结果，共{len(all_data)}条记录")
                 
-                # 是否继续处理
-                if input("是否继续处理剩余数据？(y/n): ").lower() != 'y':
-                    # 直接跳到数据转换步骤
+                # 读取CSV文件来获取总记录数
+                dataframes = self.read_csv_data()
+                if not dataframes:
+                    print("错误: 没有有效的数据集")
+                    return np.array([]), np.array([]), np.array([]), np.array([])
+                
+                # 计算总数据量
+                total_records = sum(len(df) for df in dataframes)
+                
+                # 显示进度并询问是否继续
+                progress_percent = len(all_data)/total_records * 100
+                print(f"当前进度: {len(all_data)}/{total_records} 条记录 ({progress_percent:.2f}%)")
+                
+                if len(all_data) >= total_records:
+                    print(f"所有数据已处理完成，进入数据准备阶段")
                     return self._prepare_arrays(all_data)
+                else:
+                    if input(f"是否继续处理剩余{total_records - len(all_data)}条数据？(y/n): ").lower() != 'y':
+                        print("跳过处理阶段，直接使用已有数据")
+                        return self._prepare_arrays(all_data)
+                    else:
+                        print(f"继续处理剩余数据...")
             except Exception as e:
                 print(f"加载进度文件出错: {e}，将重新处理所有数据")
                 all_data = []
@@ -2090,8 +2130,6 @@ class LAMOSTPreprocessor:
                             os.remove(file)
                         except Exception:
                             pass
-                    # 清除文件查找缓存
-                    self.find_cache = {}
                     print("缓存清理完成")
 
     def check_and_fix_file_paths(self):
