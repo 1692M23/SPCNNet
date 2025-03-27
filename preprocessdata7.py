@@ -1137,7 +1137,7 @@ class LAMOSTPreprocessor:
                     results = saved_data.get('results', [])
                     start_idx = saved_data.get('last_idx', 0)
                     total_processed = len(results)
-                    print(f"从上次中断处继续（已处理{total_processed}条记录）")
+                    print(f"从上次中断处继续（已处理{total_processed}条记录，进度：{total_processed/len(spec_files):.2%}）")
             except Exception as e:
                 print(f"加载进度文件出错: {e}，将从头开始处理")
                 start_idx = 0
@@ -1272,9 +1272,11 @@ class LAMOSTPreprocessor:
             results.extend(batch_results)
             total_processed += successful_count
             
-            # 输出当前批次统计
+            # 输出当前批次统计和整体进度
+            overall_progress = (total_processed / len(spec_files)) * 100
             if len(batch_specs) > 0:
                 print(f"批次 {batch_idx+1}/{num_batches}: 成功 {successful_count}/{len(batch_specs)} 个文件")
+                print(f"总进度: [{overall_progress:.2f}%] {total_processed}/{len(spec_files)} 已完成")
                 if len(failed_specs) > 0 and len(failed_specs) < 5:
                     print(f"失败文件示例: {failed_specs}")
             
@@ -1282,8 +1284,9 @@ class LAMOSTPreprocessor:
             if batch_idx % 5 == 0 or batch_idx == num_batches - 1:
                 with open(progress_file, 'wb') as f:
                     pickle.dump({'results': results, 'last_idx': current_end}, f)
+                print(f"✓ 进度已保存 [{overall_progress:.2f}%]")
         
-        print(f"成功处理{total_processed}/{len(spec_files)}条{element}光谱数据")
+        print(f"成功处理{total_processed}/{len(spec_files)}条{element}光谱数据 (完成率: {total_processed/len(spec_files):.2%})")
         return results
     
     def process_all_data(self, resume=True):
@@ -1313,30 +1316,65 @@ class LAMOSTPreprocessor:
             print("错误: 没有有效的数据集")
             return np.array([]), np.array([]), np.array([]), np.array([])
         
+        # 计算总数据量
+        total_records = sum(len(df) for df in dataframes)
+        print(f"总数据量: {total_records}条记录")
+        
         # 处理每个元素的数据
+        processed_records = 0
         for i, (df, element) in enumerate(zip(dataframes, ['C_FE', 'MG_FE', 'CA_FE'])):
             # 检查是否已处理过这个元素
             element_processed = any(item.get('element') == element for item in all_data) if all_data else False
             
             if not element_processed:
+                print(f"\n处理元素 {i+1}/{len(dataframes)}: {element}")
+                print(f"当前进度: [{processed_records/total_records:.2%}]")
+                
                 results = self.process_element_data(df, element)
                 all_data.extend(results)
+                processed_records += len(results)
+                
+                # 更新总体进度
+                overall_progress = processed_records / total_records
+                print(f"总进度: [{overall_progress:.2%}] 已完成{processed_records}/{total_records}条记录")
             else:
-                print(f"{element}数据已在之前的运行中处理完成")
+                element_records = sum(1 for item in all_data if item.get('element') == element)
+                processed_records += element_records
+                print(f"{element}数据已在之前的运行中处理完成 ({element_records}条记录)")
+                print(f"总进度: [{processed_records/total_records:.2%}]")
             
             # 保存总进度
             with open(progress_file, 'wb') as f:
                 pickle.dump(all_data, f)
                 
+            # 输出阶段性统计
+            elapsed_time = time.time() - start_time
+            records_per_second = processed_records / elapsed_time if elapsed_time > 0 else 0
             print(f"当前已处理总数据量: {len(all_data)}条")
+            print(f"处理速度: {records_per_second:.2f}条/秒")
+            
+            # 估计剩余时间
+            if processed_records < total_records and records_per_second > 0:
+                remaining_records = total_records - processed_records
+                estimated_time = remaining_records / records_per_second
+                hours, remainder = divmod(estimated_time, 3600)
+                minutes, seconds = divmod(remainder, 60)
+                print(f"预计剩余时间: {int(hours)}小时 {int(minutes)}分钟 {int(seconds)}秒")
             
             # 检查内存使用情况
             self.check_memory_usage()
         
         # 如果没有处理到任何数据
         if not all_data:
-            print("警告: 没有成功处理任何光谱数据!")
+            print("错误: 没有处理到任何有效数据，请检查fits文件路径和CSV文件")
             return np.array([]), np.array([]), np.array([]), np.array([])
+        
+        # 输出最终统计
+        elapsed_time = time.time() - start_time
+        hours, remainder = divmod(elapsed_time, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        print(f"\n处理完成! 总耗时: {int(hours)}小时 {int(minutes)}分钟 {int(seconds)}秒")
+        print(f"处理记录: {len(all_data)}/{total_records} ({len(all_data)/total_records:.2%})")
         
         # 转换为NumPy数组并返回
         return self._prepare_arrays(all_data)
