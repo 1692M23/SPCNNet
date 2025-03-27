@@ -867,4 +867,67 @@ def analyze_model_performance(self, element, train_loader, val_loader, test_load
    d. 正则化实验：调整权重衰减
    e. 模型深度实验：调整残差块数量
    f. 特征维度实验：调整通道数
-""" 
+"""
+
+# 从main中复制train_and_evaluate_model函数定义
+def train_and_evaluate_model(train_loader, val_loader, test_loader, element, config):
+    """
+    训练和评估模型的主函数
+    """
+    # 创建模型
+    model = SpectralResCNN(config.model_config['input_size']).to(config.training_config['device'])
+    
+    # 设置超参数
+    hyperparams = {
+        'lr': config.training_config['lr'],
+        'weight_decay': config.training_config['weight_decay'],
+        'epochs': config.training_config['num_epochs'],
+        'patience': config.training_config['early_stopping_patience']
+    }
+    
+    # 训练模型
+    train_losses, val_losses = train_model(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        element=element,
+        config=config
+    )
+    
+    # 获取最佳验证损失
+    best_val_loss = min(val_losses) if val_losses else float('inf')
+    
+    # 加载最佳模型
+    best_model = load_trained_model(config.model_config['input_size'], element, config)
+    
+    # 在测试集上评估
+    test_metrics = evaluate_model(best_model, test_loader, config.training_config['device'])
+    
+    # 分析模型性能（特征重要性和残差）
+    if hasattr(config, 'analysis_config') and config.analysis_config.get('enabled', False):
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"开始对{element}模型进行性能分析...")
+        
+        # 获取分析配置
+        batch_size = config.analysis_config.get('batch_size', 32)
+        save_batch_results = config.analysis_config.get('batch_results', {}).get('save_batch_results', True)
+        
+        try:
+            from model_analysis import analyze_model_performance
+            analysis_results = analyze_model_performance(
+                best_model,
+                element,
+                train_loader,
+                val_loader,
+                test_loader,
+                config.training_config['device'],
+                config.model_config['input_size'],
+                batch_size=batch_size,
+                save_batch_results=save_batch_results
+            )
+            logger.info(f"{element}模型性能分析完成, 结果保存在results目录")
+        except ImportError:
+            logger.warning("无法导入model_analysis模块，跳过性能分析")
+    
+    return best_model, best_val_loss, test_metrics 

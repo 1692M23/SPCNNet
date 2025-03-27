@@ -5,7 +5,7 @@ import torch
 from sklearn.model_selection import ParameterGrid
 from utils import ProgressManager
 import config
-from model import train_and_evaluate_model
+from main import train_and_evaluate_model
 
 # 设置logger
 logger = logging.getLogger(__name__)
