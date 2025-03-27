@@ -122,9 +122,9 @@ class LAMOSTPreprocessor:
                 
                 # 尝试从可能的目录中查找
                 possible_dirs = ['/content', '/content/drive/My Drive', '/content/SPCNNet']
-                for pd in possible_dirs:
-                    if os.path.exists(pd):
-                        possible_path = os.path.join(pd, os.path.basename(csv_file))
+                for posdir in possible_dirs:
+                    if os.path.exists(posdir):
+                        possible_path = os.path.join(posdir, os.path.basename(csv_file))
                         if os.path.exists(possible_path):
                             print(f"找到可用的CSV文件: {possible_path}")
                             csv_file = possible_path
