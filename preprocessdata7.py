@@ -271,16 +271,16 @@ class LAMOSTPreprocessor:
     
     def _get_file_extension(self, fits_file):
         """获取文件完整路径，使用缓存避免重复查找"""
-        if fits_file in self.extension_cache:
-            return self.extension_cache[fits_file]
+        if fits_file in self.fits_file_cache:
+            return self.fits_file_cache[fits_file]
             
         # 查找实际文件路径
         file_path = self._find_fits_file(fits_file)
         if file_path:
-            self.extension_cache[fits_file] = file_path
+            self.fits_file_cache[fits_file] = file_path
             return file_path
         else:
-            self.extension_cache[fits_file] = None
+            self.fits_file_cache[fits_file] = None
             return None
     
     def read_fits_file(self, fits_file):
@@ -2145,19 +2145,163 @@ class LAMOSTPreprocessor:
         print("\n=== 检查完成 ===\n")
         
     def clean_cache(self):
-        """清理缓存文件"""
-        if os.path.exists(self.cache_dir):
-            cache_files = glob.glob(os.path.join(self.cache_dir, "*"))
-            if cache_files:
-                print(f"发现{len(cache_files)}个缓存文件")
-                if input("是否清理缓存? (y/n): ").lower() == 'y':
-                    for file in tqdm(cache_files, desc="清理缓存"):
+        """有选择地清理不同类型的缓存文件"""
+        print("\n=== 缓存清理 ===")
+        cache_options = {
+            '1': '文件查找缓存 (FITS文件位置)',
+            '2': '预处理结果缓存 (所有处理好的光谱)',
+            '3': '进度文件 (处理进度记录)',
+            '4': '选择性清除预处理步骤缓存',
+            '5': '所有缓存',
+            '0': '退出'
+        }
+        
+        while True:
+            print("\n请选择要清理的缓存类型:")
+            for key, value in cache_options.items():
+                print(f"{key}. {value}")
+            
+            choice = input("请输入选项(0-5): ").strip()
+            
+            if choice == '0':
+                print("退出缓存清理")
+                break
+                
+            elif choice == '1':
+                # 文件查找缓存
+                files_cache_path = self.cache_file
+                if os.path.exists(files_cache_path):
+                    try:
+                        with open(files_cache_path, 'rb') as f:
+                            cache_data = pickle.load(f)
+                            cache_size = len(cache_data) if isinstance(cache_data, dict) else 0
+                        print(f"发现文件查找缓存: {files_cache_path}")
+                        print(f"缓存包含 {cache_size} 个FITS文件位置记录")
+                        if input("确认清理? (y/n): ").lower() == 'y':
+                            os.remove(files_cache_path)
+                            print("✓ 文件查找缓存已清理")
+                            # 重置内存中的缓存
+                            self.fits_file_cache = {}
+                    except Exception as e:
+                        print(f"读取文件查找缓存失败: {e}")
+                else:
+                    print("未发现文件查找缓存")
+            
+            elif choice == '2':
+                # 预处理结果缓存
+                cache_files = glob.glob(os.path.join(self.cache_dir, "*"))
+                cache_files = [f for f in cache_files if os.path.basename(f) != os.path.basename(self.cache_file)]
+                
+                if cache_files:
+                    print(f"发现 {len(cache_files)} 个预处理缓存文件")
+                    if input("确认清理所有预处理结果缓存? (y/n): ").lower() == 'y':
+                        for file in tqdm(cache_files, desc="清理预处理缓存"):
+                            try:
+                                os.remove(file)
+                            except Exception as e:
+                                print(f"清理文件 {file} 失败: {e}")
+                        print("✓ 所有预处理缓存已清理")
+                else:
+                    print("未发现预处理缓存文件")
+            
+            elif choice == '3':
+                # 进度文件
+                progress_files = glob.glob(os.path.join(self.progress_dir, "*_progress.pkl"))
+                all_progress = os.path.join(self.progress_dir, "all_progress.pkl")
+                if os.path.exists(all_progress):
+                    progress_files.append(all_progress)
+                    
+                if progress_files:
+                    print(f"\n发现 {len(progress_files)} 个进度文件:")
+                    for file in progress_files:
+                        print(f"  - {os.path.basename(file)}")
+                    if input("确认清理所有进度文件? (y/n): ").lower() == 'y':
+                        for file in tqdm(progress_files, desc="清理进度文件"):
+                            try:
+                                os.remove(file)
+                            except Exception as e:
+                                print(f"清理文件 {file} 失败: {e}")
+                        print("✓ 所有进度文件已清理")
+                else:
+                    print("未发现进度文件")
+            
+            elif choice == '4':
+                # 选择性清除预处理步骤
+                print("\n可选的预处理步骤:")
+                steps = {
+                    '1': '波长校正和视向速度校正',
+                    '2': '去噪和红移校正',
+                    '3': '重采样',
+                    '4': '连续谱归一化',
+                    '5': '二次去噪',
+                    '6': '最终归一化',
+                    '0': '返回上级菜单'
+                }
+                
+                for key, value in steps.items():
+                    print(f"{key}. {value}")
+                
+                step_choice = input("请选择要清除的预处理步骤(0-6): ").strip()
+                
+                if step_choice == '0':
+                    continue
+                    
+                if step_choice in steps:
+                    # 检查存在的缓存文件
+                    cache_files = glob.glob(os.path.join(self.cache_dir, "*"))
+                    cache_files = [f for f in cache_files if os.path.basename(f) != os.path.basename(self.cache_file)]
+                    
+                    if cache_files:
+                        print(f"发现 {len(cache_files)} 个缓存文件")
+                        print("清除预处理步骤会删除所有缓存文件，使系统在下次运行时重新生成所有步骤")
+                        
+                        if input(f"确认删除缓存以重新执行'{steps[step_choice]}'? (y/n): ").lower() == 'y':
+                            for file in tqdm(cache_files, desc=f"清除缓存"):
+                                try:
+                                    os.remove(file)
+                                except Exception as e:
+                                    print(f"清理文件 {file} 失败: {e}")
+                            print("✓ 所有预处理缓存已清理")
+                            print(f"下次运行时将重新执行'{steps[step_choice]}'及其后续步骤")
+                    else:
+                        print("未发现预处理缓存文件")
+                else:
+                    print("无效的选择")
+            
+            elif choice == '5':
+                # 清除所有缓存
+                if input("确认清除所有缓存? 这将删除所有文件查找缓存、预处理结果和进度文件 (y/n): ").lower() == 'y':
+                    # 文件查找缓存
+                    if os.path.exists(self.cache_file):
+                        try:
+                            os.remove(self.cache_file)
+                            self.fits_file_cache = {}
+                        except Exception as e:
+                            print(f"清理文件查找缓存失败: {e}")
+                    
+                    # 预处理结果缓存
+                    cache_files = glob.glob(os.path.join(self.cache_dir, "*"))
+                    for file in tqdm(cache_files, desc="清理预处理缓存"):
                         try:
                             os.remove(file)
-                        except Exception:
-                            pass
-                    print("缓存清理完成")
-
+                        except Exception as e:
+                            print(f"清理文件 {file} 失败: {e}")
+                    
+                    # 进度文件
+                    progress_files = glob.glob(os.path.join(self.progress_dir, "*"))
+                    for file in tqdm(progress_files, desc="清理进度文件"):
+                        try:
+                            os.remove(file)
+                        except Exception as e:
+                            print(f"清理文件 {file} 失败: {e}")
+                    
+                    print("✓ 所有缓存已清理")
+            
+            else:
+                print("无效的选择，请重新输入")
+                
+        print("\n=== 缓存清理完成 ===\n")
+    
     def check_and_fix_file_paths(self):
         """检查并修复文件路径问题"""
         print("\n=== 路径问题诊断 ===")
@@ -2234,7 +2378,7 @@ class LAMOSTPreprocessor:
         
         # 清除缓存并重新测试
         print("\n清除缓存后重新测试:")
-        self.extension_cache = {}
+        self.fits_file_cache = {}
         for spec in test_files[:1]:  # 只测试第一个
             # 确保spec是字符串类型
             spec = str(spec)
