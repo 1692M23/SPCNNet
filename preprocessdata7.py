@@ -53,9 +53,29 @@ class LAMOSTPreprocessor:
                  memory_limit=0.7,  # 内存使用限制(占总内存比例)
                  low_memory_mode=False):  # 低内存模式
         
-        self.csv_files = csv_files
-        self.fits_dir = fits_dir
+        # 设置文件路径
+        self.csv_files = [csv_file if os.path.exists(csv_file) else os.path.join('/content', csv_file) for csv_file in csv_files]
+        self.fits_dir = fits_dir if os.path.exists(fits_dir) else os.path.join('/content', fits_dir)
         self.output_dir = output_dir
+        self.cache_dir = os.path.join(self.output_dir, 'cache')
+        self.progress_dir = os.path.join(self.output_dir, 'progress')
+        self.figures_dir = os.path.join(self.output_dir, 'figures')
+        self.logs_dir = os.path.join(self.output_dir, 'logs')
+        self.model_dir = os.path.join(self.output_dir, 'models')
+        self.prediction_output_dir = os.path.join(self.output_dir, 'predictions')
+        self.cache_enabled = True
+        
+        # 创建所有必要的目录
+        for directory in [self.output_dir, self.cache_dir, self.progress_dir, 
+                          self.figures_dir, self.logs_dir, self.model_dir, 
+                          self.prediction_output_dir]:
+            os.makedirs(directory, exist_ok=True)
+        
+        # 初始化文件查找缓存
+        self.fits_file_cache = {}
+        self.cache_file = os.path.join(self.cache_dir, 'files_cache.pkl')
+        self._load_files_cache()
+        
         self.wavelength_range = wavelength_range if wavelength_range else (4000, 8098)  # 默认范围
         self.n_points = n_points
         self.log_step = log_step
@@ -81,36 +101,29 @@ class LAMOSTPreprocessor:
             
         print(f"设置最大工作进程数: {self.max_workers}")
         
-        # 创建输出目录
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-            
-        # 进度记录目录
-        self.progress_dir = os.path.join(output_dir, 'progress')
-        if not os.path.exists(self.progress_dir):
-            os.makedirs(self.progress_dir)
-            
-        # 缓存目录
-        self.cache_dir = os.path.join(output_dir, 'cache')
-        if not os.path.exists(self.cache_dir):
-            os.makedirs(self.cache_dir)
-            
-        # 检查fits目录是否存在
-        if not os.path.exists(fits_dir):
-            os.makedirs(fits_dir, exist_ok=True)
-            print(f"警告: 创建了fits目录，请确保FITS文件放在 {os.path.abspath(fits_dir)} 目录下")
-        else:
-            print(f"已找到fits目录: {os.path.abspath(fits_dir)}")
-            fits_count = len(glob.glob(os.path.join(fits_dir, "*")))
-            print(f"该目录中有 {fits_count} 个文件")
-            
-        # 后缀缓存，避免重复查找
-        self.extension_cache = {}
-        
         self.low_memory_mode = low_memory_mode
         
         self.cache_manager = CacheManager(cache_dir=os.path.join(output_dir, 'cache'))
         
+    def _load_files_cache(self):
+        """加载文件查找缓存"""
+        if os.path.exists(self.cache_file):
+            try:
+                with open(self.cache_file, 'rb') as f:
+                    self.fits_file_cache = pickle.load(f)
+                print(f"已加载文件查找缓存，共{len(self.fits_file_cache)}条记录")
+            except Exception as e:
+                print(f"加载文件缓存出错: {e}")
+                self.fits_file_cache = {}
+    
+    def _save_files_cache(self):
+        """保存文件查找缓存"""
+        try:
+            with open(self.cache_file, 'wb') as f:
+                pickle.dump(self.fits_file_cache, f)
+        except Exception as e:
+            print(f"保存文件缓存出错: {e}")
+    
     def read_csv_data(self):
         """读取CSV文件并返回DataFrame列表"""
         dataframes = []
@@ -1267,6 +1280,8 @@ class LAMOSTPreprocessor:
                 # 如果内存紧张，先保存当前进度
                 with open(progress_file, 'wb') as f:
                     pickle.dump({'results': results, 'last_idx': current_start}, f)
+                # 保存文件查找缓存
+                self._save_files_cache()
                 print("内存使用率高，已保存进度，可以安全退出程序")
                 
                 # 询问是否继续
@@ -1318,6 +1333,8 @@ class LAMOSTPreprocessor:
             if batch_idx % 5 == 0 or batch_idx == num_batches - 1:
                 with open(progress_file, 'wb') as f:
                     pickle.dump({'results': results, 'last_idx': current_end}, f)
+                # 保存文件查找缓存
+                self._save_files_cache()
                 print(f"✓ 进度已保存 [{overall_progress:.2f}%]")
         
         print(f"成功处理{total_processed}/{len(spec_files)}条{element}光谱数据 (完成率: {total_processed/len(spec_files):.2%})")
@@ -1433,6 +1450,9 @@ class LAMOSTPreprocessor:
         minutes, seconds = divmod(remainder, 60)
         print(f"\n处理完成! 总耗时: {int(hours)}小时 {int(minutes)}分钟 {int(seconds)}秒")
         print(f"处理记录: {len(all_data)}/{total_records} ({len(all_data)/total_records:.2%})")
+        
+        # 保存文件缓存
+        self._save_files_cache()
         
         # 转换为NumPy数组并返回
         return self._prepare_arrays(all_data)
