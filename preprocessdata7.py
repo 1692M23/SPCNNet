@@ -7,7 +7,7 @@ from sklearn.model_selection import train_test_split, KFold
 from scipy import signal, interpolate
 from multiprocessing import Pool, cpu_count
 import time
-from tqdm import tqdm
+from tqdm import tqdm, trange
 import matplotlib.pyplot as plt
 import gc  # 垃圾回收
 import psutil  # 系统资源监控
@@ -18,6 +18,11 @@ import zipfile  # 用于解压文件
 import sys  # 用于检测环境
 import shutil
 from utils import CacheManager
+import concurrent.futures
+import json
+import traceback
+import re
+from sklearn.model_selection import KFold, train_test_split
 warnings.filterwarnings('ignore')  # 忽略不必要的警告
 
 # 判断是否在Colab环境中
@@ -112,41 +117,95 @@ class LAMOSTPreprocessor:
         for csv_file in self.csv_files:
             if not os.path.exists(csv_file):
                 print(f"错误: 找不到CSV文件 {csv_file}")
-                continue
+                print(f"当前工作目录: {os.getcwd()}")
+                print(f"尝试查找的完整路径: {os.path.abspath(csv_file)}")
                 
-            df = pd.read_csv(csv_file)
-            dataframes.append(df)
-            print(f"已加载{csv_file}，共{len(df)}条记录")
-            
-            # 检查spec列中的文件是否存在
-            if 'spec' in df.columns:
-                spec_files = df['spec'].values
-                missing_files = []
-                for spec_file in spec_files:
-                    # 使用_find_fits_file方法查找文件
-                    if self._find_fits_file(spec_file) is None:
-                        missing_files.append(spec_file)
+                # 尝试从可能的目录中查找
+                possible_dirs = ['/content', '/content/drive/My Drive', '/content/SPCNNet']
+                for pd in possible_dirs:
+                    if os.path.exists(pd):
+                        possible_path = os.path.join(pd, os.path.basename(csv_file))
+                        if os.path.exists(possible_path):
+                            print(f"找到可用的CSV文件: {possible_path}")
+                            csv_file = possible_path
+                            break
+                        
+                if not os.path.exists(csv_file):
+                    # 如果还是没找到，列出当前目录的文件
+                    print("当前目录中的文件:")
+                    for f in os.listdir():
+                        print(f"  - {f}")
+                    continue
                 
-                if missing_files:
-                    print(f"警告: {csv_file}中的一些FITS文件不存在 (显示前5个):")
-                    for file in missing_files[:5]:
-                        print(f"  - {os.path.join(self.fits_dir, file)}")
-                    print("请确保所有FITS文件都放在fits目录下")
+            print(f"读取CSV文件: {csv_file}")
+            try:
+                df = pd.read_csv(csv_file)
+                print(f"成功加载{csv_file}，共{len(df)}条记录")
+                print(f"列名: {', '.join(df.columns)}")
+                
+                # 检查spec列中的文件是否存在
+                if 'spec' in df.columns:
+                    # 确保spec列的类型为字符串
+                    if not pd.api.types.is_string_dtype(df['spec']):
+                        print(f"注意: {csv_file} 中的spec列不是字符串类型，正在转换...")
+                        df['spec'] = df['spec'].astype(str)
+                        
+                    spec_files = df['spec'].values
+                    missing_files = []
+                    for spec_file in spec_files:
+                        # 使用_find_fits_file方法查找文件
+                        if self._find_fits_file(spec_file) is None:
+                            missing_files.append(spec_file)
+                    
+                    if missing_files:
+                        print(f"警告: {csv_file}中的一些FITS文件不存在 (显示前5个):")
+                        for file in missing_files[:5]:
+                            print(f"  - {os.path.join(self.fits_dir, file)}")
+                        print("请确保所有FITS文件都放在fits目录下")
+                else:
+                    print(f"警告: CSV文件 {csv_file} 中没有找到'spec'列")
+                    print(f"可用的列: {df.columns.tolist()}")
+                
+                dataframes.append(df)
+            except Exception as e:
+                print(f"读取CSV文件 {csv_file} 出错: {e}")
+                import traceback
+                traceback.print_exc()
         
         return dataframes
     
     def _find_fits_file(self, spec_name):
         """查找匹配的fits文件，处理嵌套目录和命名差异"""
+        # 确保spec_name是字符串类型
+        spec_name = str(spec_name)
+        
         # 如果输入已经是完整路径，提取文件名部分
         if os.path.isabs(spec_name):
+            # 先检查完整路径是否直接存在
+            if os.path.exists(spec_name) and os.path.isfile(spec_name):
+                print(f"找到绝对路径文件: {spec_name}")
+                return spec_name
+                
+            # 如果完整路径不存在，提取文件名
             base_name = os.path.basename(spec_name)
         else:
+            # 相对路径情况下
             base_name = spec_name
         
-        # 首先尝试直接匹配（常规后缀）
+        # 记录日志
+        print(f"查找文件: {spec_name}, 基础名称: {base_name}")
+        
+        # 首先尝试直接在fits目录下按完整路径匹配
+        direct_path = os.path.join(self.fits_dir, spec_name)
+        if os.path.exists(direct_path) and os.path.isfile(direct_path):
+            print(f"直接匹配成功: {direct_path}")
+            return direct_path
+        
+        # 尝试直接在fits目录下按基础名称匹配（常规后缀）
         for ext in ['', '.fits', '.fits.gz', '.fit', '.fit.gz']:
             path = os.path.join(self.fits_dir, base_name + ext)
             if os.path.exists(path) and os.path.isfile(path):
+                print(f"基础名称匹配成功: {path}")
                 return path
         
         # 进行递归搜索，处理嵌套目录
@@ -155,6 +214,7 @@ class LAMOSTPreprocessor:
                 # 检查文件名是否匹配（忽略大小写）
                 if base_name.lower() in file.lower():
                     found_path = os.path.join(root, file)
+                    print(f"部分名称匹配成功: {found_path}")
                     return found_path
                 
                 # 尝试去除可能的后缀后再比较
@@ -166,9 +226,21 @@ class LAMOSTPreprocessor:
                 
                 if base_name.lower() == file_base:
                     found_path = os.path.join(root, file)
+                    print(f"去除后缀后匹配成功: {found_path}")
+                    return found_path
+                
+                # 尝试更模糊的匹配方式
+                # 移除路径分隔符，便于匹配跨目录文件
+                clean_base_name = base_name.replace('/', '_').replace('\\', '_')
+                clean_file_base = file_base.replace('/', '_').replace('\\', '_')
+                
+                if clean_base_name.lower() in clean_file_base or clean_file_base in clean_base_name.lower():
+                    found_path = os.path.join(root, file)
+                    print(f"模糊匹配成功: {found_path}")
                     return found_path
         
         # 如果以上都没找到，返回None
+        print(f"未找到匹配文件: {spec_name}")
         return None
     
     def _get_file_extension(self, fits_file):
@@ -907,7 +979,14 @@ class LAMOSTPreprocessor:
             return flux
     
     def process_single_spectrum(self, spec_file, label):
-        """处理单个光谱数据"""
+        """处理单个光谱"""
+        # 确保spec_file是字符串类型
+        spec_file = str(spec_file)
+        
+        # 检查参数合法性
+        if spec_file is None:
+            raise ValueError("spec_file不能为None")
+        
         # 使用CacheManager替代直接缓存操作
         cache_key = f"processed_{spec_file.replace('/', '_')}"
         cached_data = self.cache_manager.get_cache(cache_key)
@@ -1035,6 +1114,11 @@ class LAMOSTPreprocessor:
     def process_element_data(self, df, element, start_idx=0):
         """处理单个元素的数据，支持从指定位置继续处理"""
         print(f"处理{element}数据...")
+        
+        # 确保spec列为字符串类型
+        if 'spec' in df.columns and not pd.api.types.is_string_dtype(df['spec']):
+            print(f"注意: {element}_FE.csv 中的spec列不是字符串类型，正在转换...")
+            df['spec'] = df['spec'].astype(str)
         
         # 获取光谱文件名和标签
         spec_files = df['spec'].values
@@ -1827,6 +1911,11 @@ class LAMOSTPreprocessor:
                     if os.path.exists(csv_file):
                         df = pd.read_csv(csv_file)
                         if 'spec' in df.columns and len(df) > 0:
+                            # 检查spec列的数据类型并转换为字符串
+                            if not pd.api.types.is_string_dtype(df['spec']):
+                                print(f"\n  警告: {csv_file} 中的spec列不是字符串类型，正在转换...")
+                                df['spec'] = df['spec'].astype(str)
+                            
                             spec_examples = df['spec'].iloc[:5].tolist()
                             print(f"\n  检查 {csv_file} 中的spec值是否匹配fits文件:")
                             
@@ -1945,6 +2034,16 @@ def main():
     """主函数"""
     start_time = time.time()
     
+    # 处理命令行参数
+    import argparse
+    parser = argparse.ArgumentParser(description="LAMOST光谱数据预处理工具")
+    parser.add_argument('--csv_files', type=str, nargs='+', help='CSV文件路径列表')
+    parser.add_argument('--fits_dir', type=str, default='fits', help='FITS文件目录')
+    parser.add_argument('--output_dir', type=str, default='processed_data', help='输出目录路径')
+    parser.add_argument('--low_memory_mode', action='store_true', help='启用低内存模式')
+    
+    args = parser.parse_args()
+    
     # 设置基础路径
     base_path = '/content' if IN_COLAB else os.path.abspath('.')
     print(f"基础路径: {base_path}")
@@ -1956,17 +2055,30 @@ def main():
           f"使用率 {mem_info.percent}%")
     
     # 检测内存情况，自动决定是否使用低内存模式
-    low_memory_mode = mem_info.percent > 80
+    low_memory_mode = args.low_memory_mode or mem_info.percent > 80
     
-    if low_memory_mode:
+    if low_memory_mode and not args.low_memory_mode:
         print("检测到系统内存不足，自动启用低内存模式")
         user_choice = input("是否启用低内存模式? 这将减少内存使用但处理速度会变慢 (y/n): ").lower()
         low_memory_mode = user_choice == 'y'
     
     # 构建路径
-    csv_files = [os.path.join(base_path, f) for f in ['C_FE.csv', 'MG_FE.csv', 'CA_FE.csv']]
-    fits_dir = os.path.join(base_path, 'fits')
-    output_dir = os.path.join(base_path, 'processed_data')
+    if args.csv_files:
+        # 使用命令行参数提供的CSV文件路径
+        csv_files = args.csv_files
+        print(f"使用命令行参数提供的CSV文件: {csv_files}")
+    else:
+        # 使用默认CSV文件路径
+        csv_files = [os.path.join(base_path, f) for f in ['C_FE.csv', 'MG_FE.csv', 'CA_FE.csv']]
+        print(f"使用默认CSV文件路径: {csv_files}")
+    
+    fits_dir = args.fits_dir
+    if not os.path.isabs(fits_dir):
+        fits_dir = os.path.join(base_path, fits_dir)
+    
+    output_dir = args.output_dir
+    if not os.path.isabs(output_dir):
+        output_dir = os.path.join(base_path, output_dir)
     
     # 展示路径信息
     print(f"CSV文件路径: {csv_files}")
@@ -1980,8 +2092,10 @@ def main():
     
     # 检测FITS文件是否有效
     print("\n=== 检查FITS文件有效性 ===")
-    fits_files = [os.path.join(fits_dir, f) for f in os.listdir(fits_dir) 
-                 if f.endswith(('.fits', '.fits.gz', '.fit', '.fit.gz'))]
+    fits_files = []
+    if os.path.exists(fits_dir):
+        fits_files = [os.path.join(fits_dir, f) for f in os.listdir(fits_dir) 
+                    if f.endswith(('.fits', '.fits.gz', '.fit', '.fit.gz'))]
     
     if not fits_files:
         print("警告：找不到任何FITS文件！")
