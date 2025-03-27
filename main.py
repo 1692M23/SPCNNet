@@ -1009,42 +1009,87 @@ def main():
         # 训练模型
         for i, element in enumerate(elements):
             logger.info(f"训练 {element} 元素丰度预测模型")
-            element_label = labels[:, element_indices[i]] if element_indices else None
+            # 确保element_label是张量
+            if element_indices is not None:
+                # 从标签中提取特定元素的值
+                element_label = labels[:, element_indices[i]]
+                # 转换为张量
+                element_label_tensor = torch.FloatTensor(element_label)
+            else:
+                # 如果没有元素索引，使用与spectra相同长度的零张量
+                element_label_tensor = torch.zeros(spectra.shape[0])
+                logger.warning(f"无法找到元素 {element} 的索引，使用零张量作为标签")
+            
+            # 确保spectra也是张量
+            if not isinstance(spectra, torch.Tensor):
+                spectra_tensor = torch.FloatTensor(spectra)
+            else:
+                spectra_tensor = spectra
+                
+            # 创建数据加载器
             train_loader_element = DataLoader(
-                TensorDataset(spectra, element_label),
+                TensorDataset(spectra_tensor, element_label_tensor),
                 batch_size=config.training_config['batch_size'],
                 shuffle=True
             )
             val_loader_element = DataLoader(
-                TensorDataset(spectra, element_label),
+                TensorDataset(spectra_tensor, element_label_tensor),
                 batch_size=config.training_config['batch_size'],
                 shuffle=False
             )
-            train_and_evaluate_model(train_loader_element, val_loader_element, element, config)
+            # 训练和评估模型
+            try:
+                train_and_evaluate_model(train_loader_element, val_loader_element, test_loader, element, config)
+            except Exception as e:
+                logger.error(f"训练元素 {element} 时出错: {str(e)}")
+                continue
     
     if args.mode == 'tune' or args.mode == 'all':
         # 超参数调优
         for i, element in enumerate(elements):
             logger.info(f"为 {element} 元素进行超参数调优")
-            element_label = labels[:, element_indices[i]] if element_indices else None
+            # 确保element_label是张量
+            if element_indices is not None:
+                # 从标签中提取特定元素的值
+                element_label = labels[:, element_indices[i]]
+                # 转换为张量
+                element_label_tensor = torch.FloatTensor(element_label)
+            else:
+                # 如果没有元素索引，使用与spectra相同长度的零张量
+                element_label_tensor = torch.zeros(spectra.shape[0])
+                logger.warning(f"无法找到元素 {element} 的索引，使用零张量作为标签")
+            
+            # 确保spectra也是张量
+            if not isinstance(spectra, torch.Tensor):
+                spectra_tensor = torch.FloatTensor(spectra)
+            else:
+                spectra_tensor = spectra
+                
+            # 创建数据加载器
             train_loader_element = DataLoader(
-                TensorDataset(spectra, element_label),
+                TensorDataset(spectra_tensor, element_label_tensor),
                 batch_size=config.training_config['batch_size'],
                 shuffle=True
             )
             val_loader_element = DataLoader(
-                TensorDataset(spectra, element_label),
+                TensorDataset(spectra_tensor, element_label_tensor),
                 batch_size=config.training_config['batch_size'],
                 shuffle=False
             )
-            hyperparameter_tuning(
-                element, 
-                train_loader_element, 
-                val_loader_element, 
-                device=config.training_config['device'],
-                batch_size_hyperopt=args.batch_size_hyperopt,
-                batches_per_round=args.batches_per_round
-            )
+            
+            # 执行超参数调优
+            try:
+                hyperparameter_tuning(
+                    element, 
+                    train_loader_element, 
+                    val_loader_element, 
+                    device=config.training_config['device'],
+                    batch_size_hyperopt=args.batch_size_hyperopt,
+                    batches_per_round=args.batches_per_round
+                )
+            except Exception as e:
+                logger.error(f"调优元素 {element} 时出错: {str(e)}")
+                continue
     
     if args.mode == 'test' or args.mode == 'all':
         # 测试模型
