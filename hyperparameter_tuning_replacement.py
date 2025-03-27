@@ -5,7 +5,7 @@ import torch
 from sklearn.model_selection import ParameterGrid
 from utils import ProgressManager
 import config
-from main import train_and_evaluate_model
+from model import train_and_evaluate_model
 
 # 设置logger
 logger = logging.getLogger(__name__)
@@ -139,13 +139,32 @@ def hyperparameter_tuning(element, train_loader, val_loader, grid=None, device=N
             
             # 训练模型
             try:
+                # 临时保存原始配置
+                original_lr = config.training_config['lr']
+                original_weight_decay = config.training_config['weight_decay']
+                original_epochs = config.training_config['num_epochs']
+                original_patience = config.training_config['early_stopping_patience']
+                
+                # 应用当前超参数
+                config.training_config['lr'] = current_params.get('lr', original_lr)
+                config.training_config['weight_decay'] = current_params.get('weight_decay', original_weight_decay)
+                config.training_config['num_epochs'] = current_params.get('num_epochs', original_epochs)
+                config.training_config['early_stopping_patience'] = current_params.get('patience', original_patience)
+                
+                # 训练并评估模型
                 _, val_loss, _ = train_and_evaluate_model(
-                    f"{element}_tune_{i}",
-                    train_loader,
-                    val_loader,
-                    hyperparams=current_params,
-                    device=device
+                    train_loader=train_loader,
+                    val_loader=val_loader,
+                    test_loader=val_loader,  # 在调优阶段，可以使用验证集作为测试集
+                    element=f"{element}_tune_{i}",
+                    config=config
                 )
+                
+                # 恢复原始配置
+                config.training_config['lr'] = original_lr
+                config.training_config['weight_decay'] = original_weight_decay
+                config.training_config['num_epochs'] = original_epochs
+                config.training_config['early_stopping_patience'] = original_patience
                 
                 # 更新最佳参数
                 if val_loss < best_val_loss:
