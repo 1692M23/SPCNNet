@@ -303,7 +303,9 @@ def train(model, train_loader, val_loader, config, device, element, resume_from=
     logger = logging.getLogger('model')
     
     # 设置优化器和学习率调度器
-    optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
+    optimizer = optim.Adam(model.parameters(), 
+                          lr=config.training_config['learning_rate'], 
+                          weight_decay=config.training_config['weight_decay'])
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
     
     # 设置损失函数
@@ -311,7 +313,7 @@ def train(model, train_loader, val_loader, config, device, element, resume_from=
     
     # 设置早停
     best_val_loss = float('inf')
-    patience = config['early_stopping_patience']
+    patience = config.training_config['early_stopping_patience']
     patience_counter = 0
     
     # 训练记录
@@ -334,7 +336,7 @@ def train(model, train_loader, val_loader, config, device, element, resume_from=
     for param in model.fc.parameters():
         param.requires_grad = False
     
-    for epoch in range(start_epoch, config['epochs']):
+    for epoch in range(start_epoch, config.training_config['num_epochs']):
         model.train()
         total_loss = 0
         batch_count = 0
@@ -413,14 +415,14 @@ def train(model, train_loader, val_loader, config, device, element, resume_from=
         param.requires_grad = True
     
     # 重置优化器和学习率
-    optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'] * 0.1, weight_decay=config['weight_decay'])
+    optimizer = optim.Adam(model.parameters(), lr=config.training_config['learning_rate'] * 0.1, weight_decay=config.training_config['weight_decay'])
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2)
     
     # 重置早停
     best_val_loss = float('inf')
     patience_counter = 0
     
-    for epoch in range(config['epochs']):
+    for epoch in range(config.training_config['num_epochs']):
         model.train()
         total_loss = 0
         batch_count = 0
