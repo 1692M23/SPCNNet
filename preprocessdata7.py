@@ -160,26 +160,8 @@ class LAMOSTPreprocessor:
         dataframes = []
         for csv_file in self.csv_files:
             if not os.path.exists(csv_file):
-                print(f"错误: 找不到CSV文件 {csv_file}")
-                print(f"当前工作目录: {os.getcwd()}")
-                print(f"尝试查找的完整路径: {os.path.abspath(csv_file)}")
-                
-                # 尝试从可能的目录中查找
-                possible_dirs = ['/content', '/content/drive/My Drive', '/content/SPCNNet']
-                for posdir in possible_dirs:
-                    if os.path.exists(posdir):
-                        possible_path = os.path.join(posdir, os.path.basename(csv_file))
-                        if os.path.exists(possible_path):
-                            print(f"找到可用的CSV文件: {possible_path}")
-                            csv_file = possible_path
-                            break
-                        
-                if not os.path.exists(csv_file):
-                    # 如果还是没找到，列出当前目录的文件
-                    print("当前目录中的文件:")
-                    for f in os.listdir():
-                        print(f"  - {f}")
-                    continue
+                print(f"注意: 找不到CSV文件 {csv_file}，跳过")
+                continue
                 
             print(f"读取CSV文件: {csv_file}")
             try:
@@ -197,7 +179,7 @@ class LAMOSTPreprocessor:
                     # 不在启动时检查所有文件，只显示警告信息
                     print(f"CSV文件包含{len(df)}条记录，如果找不到某些FITS文件，将在处理时报错")
                     
-                    # 仅检查前3个文件作为示例(不再检查所有文件)
+                    # 仅检查前3个文件作为示例
                     spec_files = df['spec'].values[:3]
                     for spec_file in spec_files:
                         # 使用_find_fits_file方法查找文件
@@ -1424,29 +1406,6 @@ class LAMOSTPreprocessor:
                     with open(progress_file, 'rb') as f:
                         all_data = pickle.load(f)
                     print(f"已加载保存的处理结果，共{len(all_data)}条记录")
-                    
-                    # 读取CSV文件来获取总记录数
-                    dataframes = self.read_csv_data()
-                    if not dataframes:
-                        print("错误: 没有有效的数据集")
-                        return np.array([]), np.array([]), np.array([]), np.array([])
-                    
-                    # 计算总数据量
-                    total_records = sum(len(df) for df in dataframes)
-                    
-                    # 显示进度并询问是否继续
-                    progress_percent = len(all_data)/total_records * 100
-                    print(f"当前进度: {len(all_data)}/{total_records} 条记录 ({progress_percent:.2f}%)")
-                    
-                    if len(all_data) >= total_records:
-                        print(f"所有数据已处理完成，进入数据准备阶段")
-                        return self._prepare_arrays(all_data)
-                    else:
-                        if input(f"是否继续处理剩余{total_records - len(all_data)}条数据？(y/n): ").lower() != 'y':
-                            print("跳过处理阶段，直接使用已有数据")
-                            return self._prepare_arrays(all_data)
-                        else:
-                            print(f"继续处理剩余数据...")
                 except Exception as e:
                     print(f"加载进度文件出错: {e}，将重新处理所有数据")
                     all_data = []
@@ -1456,29 +1415,6 @@ class LAMOSTPreprocessor:
                     with open(drive_progress_file, 'rb') as f:
                         all_data = pickle.load(f)
                     print(f"从Google Drive加载处理结果，共{len(all_data)}条记录")
-                    
-                    # 读取CSV文件来获取总记录数
-                    dataframes = self.read_csv_data()
-                    if not dataframes:
-                        print("错误: 没有有效的数据集")
-                        return np.array([]), np.array([]), np.array([]), np.array([])
-                    
-                    # 计算总数据量
-                    total_records = sum(len(df) for df in dataframes)
-                    
-                    # 显示进度并询问是否继续
-                    progress_percent = len(all_data)/total_records * 100
-                    print(f"当前进度: {len(all_data)}/{total_records} 条记录 ({progress_percent:.2f}%)")
-                    
-                    if len(all_data) >= total_records:
-                        print(f"所有数据已处理完成，进入数据准备阶段")
-                        return self._prepare_arrays(all_data)
-                    else:
-                        if input(f"是否继续处理剩余{total_records - len(all_data)}条数据？(y/n): ").lower() != 'y':
-                            print("跳过处理阶段，直接使用已有数据")
-                            return self._prepare_arrays(all_data)
-                        else:
-                            print(f"继续处理剩余数据...")
                 except Exception as e:
                     print(f"加载Google Drive进度文件出错: {e}，将重新处理所有数据")
                     all_data = []
@@ -1488,10 +1424,6 @@ class LAMOSTPreprocessor:
         if not dataframes:
             print("错误: 没有有效的数据集")
             return np.array([]), np.array([]), np.array([]), np.array([])
-        
-        # 计算总数据量
-        total_records = sum(len(df) for df in dataframes)
-        print(f"总数据量: {total_records}条记录")
         
         # 处理每个元素的数据
         processed_records = 0
@@ -1508,7 +1440,7 @@ class LAMOSTPreprocessor:
             else:
                 print(f"\n处理元素 {i+1}/{len(dataframes)}: {element}")
                 print(f"已处理: {element_records}/{element_total}条记录")
-                print(f"当前进度: [{processed_records/total_records:.2%}]")
+                print(f"当前进度: [{element_records/element_total:.2%}]")
                 
                 # 如果元素已部分处理，从未处理的部分继续
                 start_idx = element_records
@@ -1516,11 +1448,11 @@ class LAMOSTPreprocessor:
                 
                 results = self.process_element_data(df, element, start_idx=start_idx)
                 all_data.extend(results)
-                processed_records += len(results)
+                processed_records = len(results)  # 只计算当前元素的处理记录
                 
-                # 更新总体进度
-                overall_progress = processed_records / total_records
-                print(f"总进度: [{overall_progress:.2%}] 已完成{processed_records}/{total_records}条记录")
+                # 更新进度
+                progress = processed_records / element_total
+                print(f"进度: [{progress:.2%}] 已完成{processed_records}/{element_total}条记录")
             
             # 保存总进度
             with open(progress_file, 'wb') as f:
@@ -1529,12 +1461,12 @@ class LAMOSTPreprocessor:
             # 输出阶段性统计
             elapsed_time = time.time() - start_time
             records_per_second = processed_records / elapsed_time if elapsed_time > 0 else 0
-            print(f"当前已处理总数据量: {len(all_data)}条")
+            print(f"当前已处理数据量: {processed_records}条")
             print(f"处理速度: {records_per_second:.2f}条/秒")
             
             # 估计剩余时间
-            if processed_records < total_records and records_per_second > 0:
-                remaining_records = total_records - processed_records
+            if processed_records < element_total and records_per_second > 0:
+                remaining_records = element_total - processed_records
                 estimated_time = remaining_records / records_per_second
                 hours, remainder = divmod(estimated_time, 3600)
                 minutes, seconds = divmod(remainder, 60)
@@ -1553,7 +1485,7 @@ class LAMOSTPreprocessor:
         hours, remainder = divmod(elapsed_time, 3600)
         minutes, seconds = divmod(remainder, 60)
         print(f"\n处理完成! 总耗时: {int(hours)}小时 {int(minutes)}分钟 {int(seconds)}秒")
-        print(f"处理记录: {len(all_data)}/{total_records} ({len(all_data)/total_records:.2%})")
+        print(f"处理记录: {len(all_data)}条")
         
         # 保存文件缓存
         self._save_files_cache()
