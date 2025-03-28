@@ -15,10 +15,11 @@ from torch.utils.data import TensorDataset, DataLoader
 import matplotlib.pyplot as plt
 from sklearn.model_selection import ParameterGrid
 import pandas as pd
+import glob
 
 # 导入自定义模块
 import config
-from model import SpectralResCNN, SpectralResCNNEnsemble, train_model, evaluate_model, load_trained_model
+from model import SpectralResCNN, SpectralResCNNEnsemble, train, evaluate_model, load_trained_model
 from evaluation import evaluate_all_elements, plot_predictions_vs_true, plot_metrics_comparison
 from utils import CacheManager, ProgressManager, ask_clear_cache, setup_analysis_directories
 from multi_element_processor import MultiElementProcessor
@@ -292,7 +293,7 @@ def train_and_evaluate_model(train_loader, val_loader, test_loader, element, con
     }
     
     # 训练模型
-    train_losses, val_losses = train_model(
+    train_losses, val_losses = train(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
@@ -520,11 +521,11 @@ def visualize_training(element, train_metrics, val_metrics, output_dir=None):
     
     # 绘制损失曲线
     plt.figure(figsize=(10, 6))
-    plt.plot(train_metrics['loss'], label='训练损失')
-    plt.plot(val_metrics['loss'], label='验证损失')
-    plt.title(f'{element} 训练过程')
+    plt.plot(train_metrics['loss'], label='Training Loss')
+    plt.plot(val_metrics['loss'], label='Validation Loss')
+    plt.title(f'Training Process for {element}')
     plt.xlabel('Epoch')
-    plt.ylabel('损失')
+    plt.ylabel('Loss')
     plt.legend()
     plt.grid(True, alpha=0.3)
     
@@ -534,9 +535,9 @@ def visualize_training(element, train_metrics, val_metrics, output_dir=None):
     
     # 绘制MAE曲线
     plt.figure(figsize=(10, 6))
-    plt.plot(train_metrics['mae'], label='训练MAE')
-    plt.plot(val_metrics['mae'], label='验证MAE')
-    plt.title(f'{element} 训练过程')
+    plt.plot(train_metrics['mae'], label='Training MAE')
+    plt.plot(val_metrics['mae'], label='Validation MAE')
+    plt.title(f'Training Process for {element}')
     plt.xlabel('Epoch')
     plt.ylabel('MAE')
     plt.legend()
@@ -617,46 +618,86 @@ def process_element(element, config=None):
         dropout_rate=dropout_rate
     ).to(config['training']['device'])
     
-    # 训练模型
-    train_losses, val_losses = train_model(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        element=element,
-        config=config
-    )
+    # 检查是否存在检查点可以恢复训练
+    device = config['training']['device']
+    resume_from = None
+    checkpoint_pattern = os.path.join(config['model_config']['model_dir'], f'checkpoint_{element}_epoch*.pth')
+    checkpoints = glob.glob(checkpoint_pattern)
+    
+    if checkpoints:
+        # 找到最新的检查点
+        latest_checkpoint = max(checkpoints, key=os.path.getctime)
+        logger.info(f"找到最新检查点: {latest_checkpoint}，尝试恢复训练")
+        resume_from = latest_checkpoint
+    
+    # 训练模型，使用新的train函数和参数
+    try:
+        from model import train
+        train_losses, val_losses = train(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            element=element,
+            config=config,
+            device=device,
+            resume_from=resume_from
+        )
+    except Exception as e:
+        logger.error(f"训练 {element} 模型时出错: {str(e)}")
+        # 尝试使用旧的训练函数作为备用
+        logger.warning("尝试使用旧的train_model函数作为备用")
+        from model import train_model
+        train_losses, val_losses = train_model(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            element=element,
+            config=config
+        )
     
     # 评估模型（如果有测试集）
     test_metrics = None
     if test_loader:
+        # 加载最佳模型进行评估
+        best_model_path = os.path.join(config['model_config']['model_dir'], f'best_model_{element}.pth')
+        if os.path.exists(best_model_path):
+            try:
+                logger.info(f"加载最佳模型进行评估: {best_model_path}")
+                checkpoint = torch.load(best_model_path, map_location=device)
+                model.load_state_dict(checkpoint['model_state_dict'])
+            except Exception as e:
+                logger.error(f"加载最佳模型失败: {str(e)}")
+                
         test_metrics = evaluate_model(model, test_loader, config['training']['device'])
         logger.info(f"{element} 测试集评估结果: {test_metrics}")
         
         # 添加模型性能分析
         if config.get('analysis', {}).get('perform_analysis', False):
             logger.info(f"开始对{element}模型进行性能分析...")
-            analysis_results = analyze_model_performance(
-                model,
-                element,
-                train_loader,
-                val_loader,
-                test_loader,
-                config['training']['device'],
-                config['model_config']['input_size']
-            )
-            logger.info(f"{element}模型性能分析完成, 结果保存在results目录")
+            try:
+                from model_analysis import analyze_model_performance
+                output_dir = os.path.join(config['output_config']['results_dir'], f'analysis_{element}')
+                os.makedirs(output_dir, exist_ok=True)
+                
+                analysis_results = analyze_model_performance(
+                    model=model,
+                    data_loader=test_loader,
+                    element=element,
+                    device=device,
+                    batch_id=None,
+                    save_feature_importance=True,
+                    save_batch_results=True,
+                    output_dir=output_dir
+                )
+                logger.info(f"{element}模型性能分析完成, 结果保存在{output_dir}目录")
+            except Exception as e:
+                logger.error(f"模型性能分析失败: {str(e)}")
     
-    # 保存到缓存
-    cache_key = f"model_{element}"
-    cache_manager.set_cache(cache_key, {
-        'model': model,
+    return {
         'train_losses': train_losses,
         'val_losses': val_losses,
-        'metrics': test_metrics,
-        'hyperparams': hyperparams
-    })
-    
-    return model, test_metrics
+        'test_metrics': test_metrics
+    }
 
 def process_multiple_elements(csv_file, fits_dir, element_columns=None, 
                              test_size=0.2, val_size=0.1, batch_size=32, 
@@ -1422,13 +1463,7 @@ def main():
             
             # 训练和评估模型
             try:
-                train_and_evaluate_model(
-                    train_loader=train_loader_element,
-                    val_loader=val_loader_element,
-                    test_loader=test_loader_element,
-                    element=element,
-                    config=config
-                )
+                process_element(element, config)
             except Exception as e:
                 logger.error(f"训练元素 {element} 时出错: {str(e)}")
                 import traceback

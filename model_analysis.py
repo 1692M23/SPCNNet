@@ -179,650 +179,408 @@ def get_feature_explanation(wavelength, element):
     else:
         return "此波长区域可能包含多种元素的混合贡献，或受连续谱形状影响"
 
-def analyze_feature_importance(model, data_loader, device, element, input_size=4096, top_n=30, 
-                             batch_size=None, batch_id=None, save_batch_results=True):
+def analyze_feature_importance(model, data_loader, device, element, 
+                              batch_id=None, save_results=True, output_dir='results/feature_importance'):
     """
-    分析特征重要性，识别对预测结果最重要的光谱波长区域
-    兼容preprocessdata7.py的数据格式
-    
-    参数:
-        model: 训练好的模型
-        data_loader: 数据加载器或数据集
-        device: 计算设备
-        element: 元素名称
-        input_size: 输入大小
-        top_n: 要显示的顶部特征数量
-        batch_size: 批量大小，用于批处理
-        batch_id: 批次ID，用于批处理
-        save_batch_results: 是否保存批处理结果
-        
-    返回:
-        dict: 特征重要性结果
+    分析模型对输入特征的重要性
     """
-    # 记录开始时间，用于计算处理时间
-    start_time = time.time()
+    if not hasattr(model, 'fc_layers'):
+        logger.warning(f"Model does not have fc_layers attribute, using alternative method for feature importance")
     
-    # 如果输入是数据加载器，直接使用；否则创建数据加载器
-    if not isinstance(data_loader, DataLoader):
-        if isinstance(data_loader, tuple) and len(data_loader) >= 2:
-            # 假设是(X, y)形式的数据
-            X, y = data_loader[0], data_loader[1]
-            
-            # 确保X形状正确
-            if len(X.shape) == 2:
-                # [n_samples, n_features] -> [n_samples, 1, n_features]
-                X = np.expand_dims(X, 1)
-            elif len(X.shape) == 3 and X.shape[1] != 1:
-                # 确保通道维度在第二维
-                X = np.transpose(X, (0, 2, 1)) if X.shape[2] == 1 else X
-                
-            # 创建数据集和加载器
-            dataset = TensorDataset(torch.FloatTensor(X), torch.FloatTensor(y))
-            data_loader = DataLoader(dataset, batch_size=batch_size or 32, shuffle=False)
-        else:
-            raise ValueError("无法从提供的数据创建数据加载器")
+    # 准备保存分析结果的目录
+    os.makedirs(output_dir, exist_ok=True)
     
-    # 设置批处理目录和跟踪器
-    if save_batch_results:
-        # 确保目录存在
-        batch_dir = os.path.join('results', 'feature_importance', f'{element}_batch_results')
-        os.makedirs(batch_dir, exist_ok=True)
+    # 存储每个特征的重要性分数
+    importances = []
     
-        # 创建批次跟踪器
-        batch_tracker = BatchTracker(element, "feature_importance")
+    # 原始参考预测
+    reference_predictions = []
     
-        # 如果没有指定批次ID，获取下一个可用ID
-        if batch_id is None:
-            batch_id = batch_tracker.get_next_batch_id()
-    
-    # 计算特征重要性
+    # 遍历数据加载器中的数据
     model.eval()
-    all_importances = []
     
-    with torch.no_grad():
-        for batch_idx, (data, target) in enumerate(data_loader):
-            data, target = data.to(device), target.to(device)
-            
-            # 如果我们只处理特定批次且当前不是目标批次，跳过
-            if batch_size is not None and batch_id is not None and batch_idx != batch_id:
-                continue
-            
-            # 获取一个批次的数据
-            batch_data = data.detach().cpu().numpy()
-            batch_target = target.detach().cpu().numpy()
-            
-            # 对每个样本计算特征重要性
-            batch_importances = []
-            
-            for i in range(min(len(batch_data), 50)):  # 限制计算样本数以提高效率
-                sample = batch_data[i]
-                sample_tensor = torch.FloatTensor(sample).unsqueeze(0).to(device)
-                
-                # 计算基线预测
-                baseline_output = model(sample_tensor)
-                baseline_value = baseline_output.item()
-                
-                # 计算每个波长区域的重要性
-                importances = np.zeros(sample.shape[-1])
-                
-                # 使用滑动窗口遮挡不同的区域
-                window_size = 50  # 窗口大小
-                stride = 25       # 滑动步长
-                
-                for start in range(0, sample.shape[-1] - window_size + 1, stride):
-                    end = start + window_size
-                    # 创建遮挡后的样本
-                    masked_sample = sample.copy()
-                    masked_sample[0, start:end] = 0  # 遮挡该区域
-                    
-                    masked_tensor = torch.FloatTensor(masked_sample).unsqueeze(0).to(device)
-                    masked_output = model(masked_tensor)
-                    masked_value = masked_output.item()
-                    
-                    # 计算区域重要性（预测变化的绝对值）
-                    importance = abs(baseline_value - masked_value)
-                    
-                    # 将重要性分配给该区域的所有波长点
-                    importances[start:end] += importance
-                
-                batch_importances.append(importances)
-            
-            # 平均该批次的特征重要性
-            if batch_importances:
-                mean_importances = np.mean(batch_importances, axis=0)
-                all_importances.append(mean_importances)
-                
-                # 如果只处理特定批次，或者需要保存批处理结果，生成该批次的结果
-                if (batch_size is not None and batch_id is not None) or save_batch_results:
-                    # 获取最重要的波长区域
-                    top_indices = np.argsort(mean_importances)[-top_n:][::-1]
-                    
-                    # 估计波长范围
-                    try:
-                        # 尝试导入preprocessdata7
-                        import importlib
-                        pp7 = importlib.import_module('preprocessdata7')
-                        if hasattr(pp7, 'LAMOSTPreprocessor'):
-                            preprocessor = pp7.LAMOSTPreprocessor()
-                            if hasattr(preprocessor, 'get_wavelength_range'):
-                                wavelength_min, wavelength_max = preprocessor.get_wavelength_range()
-                            else:
-                                # 使用估计值
-                                wavelength_min, wavelength_max = 3800, 9000
-                        else:
-                            wavelength_min, wavelength_max = 3800, 9000
-                    except:
-                        # 默认LAMOST波长范围估计值
-                        wavelength_min, wavelength_max = 3800, 9000
-                    
-                    # 估计每个索引对应的波长
-                    wavelengths = np.linspace(wavelength_min, wavelength_max, input_size)
-                    
-                    # 绘制特征重要性图
-                    plt.figure(figsize=(12, 6))
-                    plt.subplot(2, 1, 1)
-                    plt.plot(mean_importances, alpha=0.7)
-                    plt.title(f'元素 {element} 特征重要性分析（批次 {batch_id or batch_idx+1}）')
-                    plt.xlabel('波长索引')
-                    plt.ylabel('重要性')
-                    plt.grid(True, alpha=0.3)
-                    
-                    plt.subplot(2, 1, 2)
-                    plt.plot(mean_importances, alpha=0.3, color='gray')
-                    plt.bar(top_indices, mean_importances[top_indices], alpha=0.7, color='red')
-                    plt.title(f'顶部 {top_n} 特征重要性')
-                    plt.xlabel('波长索引')
-                    plt.ylabel('重要性')
-                    plt.grid(True, alpha=0.3)
-                    
-                    plt.tight_layout()
-                    
-                    # 保存图表
-                    plot_path = os.path.join(batch_dir, f'batch_{batch_id or batch_idx+1}_feature_importance.png')
-                    plt.savefig(plot_path, dpi=300)
-                    plt.close()
-                    
-                    # 保存解释文件
-                    explanation_path = os.path.join(batch_dir, f'batch_{batch_id or batch_idx+1}_explanation.txt')
-                    with open(explanation_path, 'w') as f:
-                        f.write(f"元素 {element} 批次 {batch_id or batch_idx+1} 的特征重要性分析\n")
-                        f.write("=" * 50 + "\n\n")
-                        f.write("最重要的波长区域及其可能对应的光谱特征：\n\n")
-                        
-                        for i, idx in enumerate(top_indices):
-                            wavelength = wavelengths[idx]
-                            feature_explanation = get_feature_explanation(wavelength, element)
-                            f.write(f"{i+1}. 波长索引 {idx} (估计波长: {wavelength:.2f} Å):\n")
-                            f.write(f"   重要性得分: {mean_importances[idx]:.6f}\n")
-                            f.write(f"   可能特征: {feature_explanation}\n\n")
-                    
-                    # 如果启用批处理结果保存，记录该批次的结果
-                    if save_batch_results:
-                        # 创建批次结果记录
-                        max_importance = np.max(mean_importances)
-                        # 检查max_importance是否为NaN
-                        if np.isnan(max_importance):
-                            logger.warning(f"批次 {batch_id or batch_idx+1} 的特征重要性为NaN，可能需要检查数据或模型")
-                            max_importance = 0.0  # 使用默认值代替NaN
-                            
-                        batch_result = {
-                            'batch_id': batch_id or batch_idx+1,
-                            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-                            'num_samples': len(batch_data),
-                            'top_feature_wavelength': float(wavelengths[top_indices[0]]) if len(top_indices) > 0 else 0.0,
-                            'top_feature_importance': float(max_importance),
-                            'top_feature_name': identify_spectral_feature(wavelengths[top_indices[0]], element) if len(top_indices) > 0 else "未知",
-                            'top_wavelengths': wavelengths[top_indices].tolist(),
-                            'top_importance': mean_importances[top_indices].tolist(),
-                            'processing_time': time.time() - start_time
-                        }
-                        
-                        # 添加到批次跟踪器
-                        batch_tracker.add_batch_result(batch_result)
-                        
-                        try:
-                            # 生成趋势图
-                            if len(batch_tracker.tracking_df) > 1:
-                                batch_tracker.generate_trend_plots()
-                                
-                            # 生成批次摘要
-                            batch_tracker.generate_batch_summary()
-                        except Exception as e:
-                            logger.error(f"生成批次趋势图或摘要时出错: {str(e)}")
-                    
-                    # 如果只处理特定批次，完成后返回
-                    if batch_size is not None and batch_id is not None:
-                        return {
-                            'batch_id': batch_id,
-                            'feature_importance': mean_importances,
-                            'top_indices': top_indices.tolist(),
-                            'top_wavelengths': wavelengths[top_indices].tolist(),
-                            'top_importance': mean_importances[top_indices].tolist(),
-                            'max_importance': float(max_importance),
-                            'plot_path': plot_path,
-                            'explanation_path': explanation_path
-                        }
-    
-    # 如果我们处理了所有批次，计算总体特征重要性
-    if all_importances:
-        mean_importances = np.mean(all_importances, axis=0)
-        top_indices = np.argsort(mean_importances)[-top_n:][::-1]
+    try:
+        # 收集一些样本用于特征重要性分析
+        samples = []
+        labels = []
         
-        # 绘制总体特征重要性图
-        plt.figure(figsize=(12, 6))
-        plt.subplot(2, 1, 1)
-        plt.plot(mean_importances, alpha=0.7)
-        plt.title(f'元素 {element} 特征重要性分析（总体）')
-        plt.xlabel('波长索引')
-        plt.ylabel('重要性')
-        plt.grid(True, alpha=0.3)
-        
-        plt.subplot(2, 1, 2)
-        plt.plot(mean_importances, alpha=0.3, color='gray')
-        plt.bar(top_indices, mean_importances[top_indices], alpha=0.7, color='red')
-        plt.title(f'顶部 {top_n} 特征重要性')
-        plt.xlabel('波长索引')
-        plt.ylabel('重要性')
-        plt.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        
-        # 保存图表
-        plot_dir = os.path.join('results', 'feature_importance')
-        os.makedirs(plot_dir, exist_ok=True)
-        plot_path = os.path.join(plot_dir, f'{element}_feature_importance.png')
-        plt.savefig(plot_path, dpi=300)
-        plt.close()
-        
-        # 估计波长范围
-        try:
-            # 尝试导入preprocessdata7
-            import importlib
-            pp7 = importlib.import_module('preprocessdata7')
-            if hasattr(pp7, 'LAMOSTPreprocessor'):
-                preprocessor = pp7.LAMOSTPreprocessor()
-                if hasattr(preprocessor, 'get_wavelength_range'):
-                    wavelength_min, wavelength_max = preprocessor.get_wavelength_range()
+        with torch.no_grad():
+            for data, target in data_loader:
+                # 只收集少量样本以加快分析速度
+                if len(samples) < 50:  # 使用50个样本进行分析
+                    # 检查并处理数据中的NaN
+                    data_np = data.cpu().numpy()
+                    if np.isnan(data_np).any():
+                        # 用均值填充NaN
+                        feature_means = np.nanmean(data_np, axis=0)
+                        nan_mask = np.isnan(data_np)
+                        for i in range(data_np.shape[0]):
+                            sample_nan_mask = nan_mask[i]
+                            if sample_nan_mask.any():
+                                data_np[i][sample_nan_mask] = feature_means[sample_nan_mask]
+                        data = torch.tensor(data_np, dtype=torch.float32)
+                    
+                    samples.append(data)
+                    labels.append(target)
                 else:
-                    # 使用估计值
-                    wavelength_min, wavelength_max = 3800, 9000
-            else:
-                wavelength_min, wavelength_max = 3800, 9000
-        except:
-            # 默认LAMOST波长范围估计值
-            wavelength_min, wavelength_max = 3800, 9000
+                    break
         
-        # 估计每个索引对应的波长
-        wavelengths = np.linspace(wavelength_min, wavelength_max, input_size)
+        if not samples:
+            logger.error("No samples collected for feature importance analysis")
+            return None
         
-        # 保存总体解释文件
-        explanation_path = os.path.join(plot_dir, f'{element}_feature_explanation.txt')
-        with open(explanation_path, 'w') as f:
-            f.write(f"元素 {element} 特征重要性分析\n")
-            f.write("=" * 50 + "\n\n")
-            f.write("最重要的波长区域及其可能对应的光谱特征：\n\n")
+        # 合并样本
+        X = torch.cat(samples, dim=0).to(device)
+        y_true = torch.cat(labels, dim=0).to(device)
+        
+        # 获取输入特征数量
+        n_features = X.shape[1]
+        
+        # 获取参考预测
+        with torch.no_grad():
+            reference_output = model(X).cpu().numpy()
+        
+        # 对每个特征执行排列重要性
+        feature_importances = []
+        
+        for feature_idx in range(n_features):
+            try:
+                # 创建特征排列
+                X_permuted = X.clone()
+                permutation = torch.randperm(X.shape[0])
+                X_permuted[:, feature_idx] = X[permutation, feature_idx]
+                
+                # 获取排列后的预测
+                with torch.no_grad():
+                    permuted_output = model(X_permuted).cpu().numpy()
+                
+                # 计算预测变化
+                mse_increase = np.mean((permuted_output - reference_output) ** 2)
+                feature_importances.append(mse_increase)
+            except Exception as e:
+                logger.warning(f"Error analyzing feature {feature_idx}: {str(e)}")
+                feature_importances.append(0.0)
+        
+        # 标准化特征重要性
+        if max(feature_importances) > 0:
+            feature_importances = [f / max(feature_importances) for f in feature_importances]
+        
+        # 找出最重要的特征
+        top_n = 10
+        importances_with_idx = sorted([(i, importance) for i, importance in enumerate(feature_importances)], 
+                                      key=lambda x: x[1], reverse=True)
+        top_features = importances_with_idx[:top_n]
+        
+        # 找出最重要特征的索引和重要性
+        top_importance = top_features[0][1] if top_features else 0
+        top_index = top_features[0][0] if top_features else -1
+        
+        # 创建图表
+        if save_results:
+            batch_str = f"_batch_{batch_id}" if batch_id is not None else ""
             
-            for i, idx in enumerate(top_indices):
-                wavelength = wavelengths[idx]
-                feature_explanation = get_feature_explanation(wavelength, element)
-                f.write(f"{i+1}. 波长索引 {idx} (估计波长: {wavelength:.2f} Å):\n")
-                f.write(f"   重要性得分: {mean_importances[idx]:.6f}\n")
-                f.write(f"   可能特征: {feature_explanation}\n\n")
-        
-        # 检查并处理NaN值
-        max_importance = np.max(mean_importances)
-        if np.isnan(max_importance):
-            logger.warning(f"元素 {element} 的总体特征重要性为NaN，返回零值")
-            max_importance = 0.0
+            plt.figure(figsize=(12, 8))
+            plt.bar(range(len(feature_importances)), feature_importances, alpha=0.7)
+            plt.xlabel('Feature Index')
+            plt.ylabel('Importance')
+            plt.title(f'Feature Importance for {element}')
+            plt.grid(True)
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, f'{element}{batch_str}_feature_importance.png'))
+            plt.close()
+            
+            # 突出显示最重要的特征
+            plt.figure(figsize=(12, 8))
+            plt.bar(range(len(feature_importances)), feature_importances, alpha=0.3, color='gray')
+            plt.bar([x[0] for x in top_features], [x[1] for x in top_features], alpha=0.7, color='red')
+            plt.xlabel('Feature Index')
+            plt.ylabel('Importance')
+            plt.title(f'Top {top_n} Most Important Features')
+            plt.grid(True)
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, f'{element}{batch_str}_top_features.png'))
+            plt.close()
+            
+            # 保存特征重要性报告
+            report_path = os.path.join(output_dir, f'{element}{batch_str}_feature_importance.txt')
+            with open(report_path, 'w') as f:
+                f.write(f"Feature Importance Analysis for {element}\n")
+                f.write("=" * 50 + "\n\n")
+                f.write(f"Total features analyzed: {len(feature_importances)}\n\n")
+                
+                f.write("Top 10 Important Features:\n")
+                for i, (idx, importance) in enumerate(top_features):
+                    f.write(f"{i+1}. Feature {idx}: {importance:.6f}\n")
+                
+                f.write("\nFeature Importance Statistics:\n")
+                f.write(f"Mean importance: {np.mean(feature_importances):.6f}\n")
+                f.write(f"Median importance: {np.median(feature_importances):.6f}\n")
+                f.write(f"Max importance: {np.max(feature_importances):.6f}\n")
+                f.write(f"Min importance: {np.min(feature_importances):.6f}\n")
         
         return {
-            'feature_importance': mean_importances,
-            'top_indices': top_indices.tolist(),
-            'top_wavelengths': wavelengths[top_indices].tolist(),
-            'top_importance': mean_importances[top_indices].tolist(),
-            'max_importance': float(max_importance),
-            'plot_path': plot_path,
-            'explanation_path': explanation_path
+            'importances': feature_importances,
+            'top_features': top_features,
+            'top_importance': top_importance,
+            'top_index': top_index
         }
-    else:
-        logger.warning(f"未收集到任何有效的特征重要性数据")
+    
+    except Exception as e:
+        logger.error(f"Error in feature importance analysis: {str(e)}")
         return None
 
-def analyze_residuals(model, test_loader, device, element, batch_size=None, batch_id=None, save_batch_results=True):
-    """分析模型预测残差，评估模型在不同元素丰度区间的表现
-    
-    Args:
-        model: 模型
-        test_loader: 测试数据加载器
-        device: 设备
-        element: 元素名称
-        batch_size: 批处理大小，默认为None（使用全部数据）
-        batch_id: 批次ID，默认为None（自动分配）
-        save_batch_results: 是否保存批处理结果
-        
-    Returns:
-        包含结果文件路径的字典
+def analyze_residuals(model, data_loader, device, element, 
+                   batch_id=None, save_results=True, output_dir='results/residual_analysis'):
     """
-    # 获取配置
-    if batch_size is None and hasattr(analysis_config, 'batch_size'):
-        batch_size = analysis_config.get('batch_size', 32)
-    
-    # 创建批次跟踪器
-    if save_batch_results:
-        batch_tracker = BatchTracker(element, "residual_analysis")
-        if batch_id is None:
-            batch_id = batch_tracker.get_next_batch_id()
-    
-    # 创建结果目录
-    results_dir = os.path.join("results", "residual_analysis")
-    batch_results_dir = os.path.join(results_dir, f"{element}_batch_results")
-    
-    if save_batch_results:
-        os.makedirs(batch_results_dir, exist_ok=True)
-    
-    os.makedirs(results_dir, exist_ok=True)
-    
-    # 开始计时
-    start_time = time.time()
-    
-    # 收集真实值和预测值
+    分析模型预测的残差
+    """
     model.eval()
-    all_targets = []
-    all_predictions = []
-    
-    logger.info(f"开始分析{element}模型残差 (批次 {batch_id})...")
-    
-    # 计算处理的样本数量
-    num_samples_processed = 0
+    all_true = []
+    all_pred = []
     
     with torch.no_grad():
-        for i, (spectra, targets) in enumerate(test_loader):
-            # 如果设置了批处理大小，只处理指定数量的批次
-            if batch_size is not None and i >= batch_size:
-                break
+        for data, target in data_loader:
+            data, target = data.to(device), target.to(device)
+            
+            # 处理输入数据中的NaN值
+            data_np = data.cpu().numpy()
+            has_nan = np.isnan(data_np).any()
+            if has_nan:
+                logger.warning(f"Input data contains NaN values, attempting to replace with mean")
+                # 计算每个特征的均值，忽略NaN值
+                feature_means = np.nanmean(data_np, axis=0)
+                # 用均值替换NaN值
+                nan_mask = np.isnan(data_np)
+                for i in range(data_np.shape[0]):
+                    sample_nan_mask = nan_mask[i]
+                    if sample_nan_mask.any():
+                        data_np[i][sample_nan_mask] = feature_means[sample_nan_mask]
                 
-            spectra = spectra.to(device)
-            targets = targets.numpy()
+                # 将处理后的数据转回tensor
+                data = torch.tensor(data_np, dtype=torch.float32).to(device)
             
-            predictions = model(spectra).cpu().numpy()
-            
-            all_targets.append(targets)
-            all_predictions.append(predictions)
-            
-            num_samples_processed += len(spectra)
+            # 模型预测
+            try:
+                output = model(data)
+                
+                # 收集真实值和预测值
+                all_true.extend(target.cpu().numpy().flatten())
+                all_pred.extend(output.cpu().numpy().flatten())
+            except Exception as e:
+                logger.error(f"Error during residual analysis prediction: {str(e)}")
+                continue
     
-    # 计算处理时间
-    processing_time = time.time() - start_time
+    # 转换为numpy数组
+    y_true = np.array(all_true)
+    y_pred = np.array(all_pred)
     
-    if not all_targets or not all_predictions:
-        logger.error(f"未收集到任何数据，无法进行残差分析")
-        return None
+    # 过滤NaN值
+    valid_mask = ~np.isnan(y_true) & ~np.isnan(y_pred)
+    if not valid_mask.all():
+        logger.warning(f"Found {(~valid_mask).sum()} NaN values in true or predicted values, filtering them out")
+        y_true = y_true[valid_mask]
+        y_pred = y_pred[valid_mask]
     
-    # 合并数据
-    y_true = np.concatenate(all_targets)
-    y_pred = np.concatenate(all_predictions)
+    # 如果没有有效数据，返回空结果
+    if len(y_true) == 0 or len(y_pred) == 0:
+        logger.error("No valid data for residual analysis")
+        return {
+            'rmse': float('nan'),
+            'mae': float('nan'),
+            'r2': float('nan'),
+            'residual_mean': float('nan'),
+            'residual_std': float('nan'),
+            'residual_max': float('nan'),
+            'residual_min': float('nan')
+        }
     
     # 计算残差
-    residuals = y_true - y_pred
+    residuals = y_pred - y_true
     
     # 计算评估指标
-    from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-    mae = mean_absolute_error(y_true, y_pred)
-    r2 = r2_score(y_true, y_pred)
-    
-    residual_mean = np.mean(residuals)
-    residual_std = np.std(residuals)
-    
-    # 创建残差散点图
-    plt.figure(figsize=(14, 10))
-    
-    # 添加批次信息到标题
-    batch_info = f" (批次 {batch_id})" if batch_id is not None else ""
-    
-    # 真实值vs预测值散点图
-    ax1 = plt.subplot(2, 2, 1)
-    ax1.scatter(y_true, y_pred, alpha=0.5)
-    
-    # 添加对角线
-    min_val = min(np.min(y_true), np.min(y_pred))
-    max_val = max(np.max(y_true), np.max(y_pred))
-    ax1.plot([min_val, max_val], [min_val, max_val], 'r--')
-    
-    ax1.set_title(f'{element}元素真实值vs预测值{batch_info}')
-    ax1.set_xlabel('真实值')
-    ax1.set_ylabel('预测值')
-    
-    # 给图添加R²和RMSE说明
-    ax1.text(0.05, 0.95, f'R² = {r2:.4f}\nRMSE = {rmse:.4f}\nMAE = {mae:.4f}', 
-             transform=ax1.transAxes, fontsize=10,
-             verticalalignment='top', bbox=dict(boxstyle='round', alpha=0.1))
-    
-    # 残差散点图
-    ax2 = plt.subplot(2, 2, 2)
-    ax2.scatter(y_true, residuals, alpha=0.5)
-    ax2.axhline(y=0, color='r', linestyle='--')
-    
-    ax2.set_title(f'{element}元素残差分布{batch_info}')
-    ax2.set_xlabel('真实值')
-    ax2.set_ylabel('残差 (真实值 - 预测值)')
-    
-    # 残差分布直方图
-    ax3 = plt.subplot(2, 2, 3)
-    ax3.hist(residuals, bins=30, alpha=0.7, color='skyblue', edgecolor='black')
-    ax3.axvline(x=0, color='r', linestyle='--')
-    
-    ax3.set_title(f'{element}元素残差直方图{batch_info}')
-    ax3.set_xlabel('残差')
-    ax3.set_ylabel('频数')
-    
-    # 添加正态分布拟合曲线
-    from scipy.stats import norm
-    x = np.linspace(min(residuals), max(residuals), 100)
-    y = norm.pdf(x, residual_mean, residual_std) * len(residuals) * (max(residuals) - min(residuals)) / 30
-    ax3.plot(x, y, 'r-', linewidth=2)
-    
-    # 给图添加残差统计信息
-    ax3.text(0.05, 0.95, f'均值 = {residual_mean:.4f}\n标准差 = {residual_std:.4f}', 
-             transform=ax3.transAxes, fontsize=10,
-             verticalalignment='top', bbox=dict(boxstyle='round', alpha=0.1))
-    
-    # QQ图（用于检查残差的正态性）
-    ax4 = plt.subplot(2, 2, 4)
-    from scipy.stats import probplot
-    probplot(residuals, plot=ax4)
-    
-    ax4.set_title(f'{element}元素残差Q-Q图{batch_info}')
-    
-    plt.tight_layout()
-    
-    # 保存图像
-    if save_batch_results and batch_id is not None:
-        # 保存到批次目录
-        output_path = os.path.join(batch_results_dir, f"batch_{batch_id}_residual_analysis.png")
-    else:
-        # 保存到主目录
-        output_path = os.path.join(results_dir, f"{element}_residual_analysis.png")
-    
-    plt.savefig(output_path, dpi=300)
-    plt.close()
-    
-    # 保存预测结果
-    if save_batch_results and batch_id is not None:
-        predictions_file = os.path.join(batch_results_dir, f"batch_{batch_id}_predictions.csv")
-    else:
-        predictions_file = os.path.join(results_dir, f"{element}_predictions.csv")
-    
-    predictions_df = pd.DataFrame({
-        'true_value': y_true.flatten(),
-        'predicted_value': y_pred.flatten(),
-        'residual': residuals.flatten()
-    })
-    
-    predictions_df.to_csv(predictions_file, index=False)
-    
-    # 生成残差分析报告
-    if save_batch_results and batch_id is not None:
-        report_path = os.path.join(batch_results_dir, f"batch_{batch_id}_residual_report.txt")
-    else:
-        report_path = os.path.join(results_dir, f"{element}_residual_report.txt")
-    
-    with open(report_path, 'w') as f:
-        # 添加批次信息
-        f.write(f"## {element}元素丰度预测残差分析报告")
-        if batch_id is not None:
-            f.write(f" (批次 {batch_id})\n\n")
-        else:
-            f.write("\n\n")
-            
-        f.write("### 性能指标\n")
-        f.write(f"RMSE (均方根误差): {rmse:.6f}\n")
-        f.write(f"MAE (平均绝对误差): {mae:.6f}\n")
-        f.write(f"R² (决定系数): {r2:.6f}\n\n")
+    try:
+        mse = np.mean((y_pred - y_true) ** 2)
+        rmse = np.sqrt(mse)
+        mae = np.mean(np.abs(y_pred - y_true))
         
-        f.write("### 残差统计\n")
-        f.write(f"样本数: {len(residuals)}\n")
-        f.write(f"残差均值: {residual_mean:.6f}\n")
-        f.write(f"残差标准差: {residual_std:.6f}\n")
-        f.write(f"残差最小值: {np.min(residuals):.6f}\n")
-        f.write(f"残差最大值: {np.max(residuals):.6f}\n")
-        f.write(f"残差中位数: {np.median(residuals):.6f}\n\n")
+        # 使用手动计算的R²，避免使用sklearn可能出现的问题
+        ss_total = np.sum((y_true - np.mean(y_true)) ** 2)
+        ss_residual = np.sum((y_true - y_pred) ** 2)
+        r2 = 1 - (ss_residual / ss_total if ss_total > 0 else 0)
         
-        # 检查残差是否接近正态分布
-        from scipy.stats import shapiro
-        try:
-            # 对大样本，随机抽取1000个样本进行检验
-            test_sample = residuals if len(residuals) < 1000 else np.random.choice(residuals, 1000, replace=False)
-            stat, p = shapiro(test_sample)
-            f.write("### 残差正态性检验 (Shapiro-Wilk测试)\n")
-            f.write(f"统计量: {stat:.6f}\n")
-            f.write(f"p值: {p:.6f}\n")
-            f.write(f"结论: {'残差可能服从正态分布' if p > 0.05 else '残差可能不服从正态分布'}\n\n")
-        except Exception as e:
-            f.write(f"无法进行正态性检验: {str(e)}\n\n")
-        
-        # 添加批次处理信息
-        f.write("### 批次处理信息\n")
-        f.write(f"处理时间: {processing_time:.2f}秒\n")
-        f.write(f"处理样本数: {num_samples_processed}\n")
-        f.write(f"分析时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-    
-    # 如果启用了批处理结果跟踪，则更新跟踪数据
-    if save_batch_results:
-        # 准备批次结果数据
-        batch_result = {
-            'batch_id': batch_id,
-            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-            'num_samples': num_samples_processed,
-            'rmse': rmse,
-            'mae': mae,
-            'r2': r2,
-            'residual_mean': residual_mean,
-            'residual_std': residual_std,
-            'processing_time': processing_time
+        residual_mean = np.mean(residuals)
+        residual_std = np.std(residuals)
+        residual_max = np.max(residuals)
+        residual_min = np.min(residuals)
+    except Exception as e:
+        logger.error(f"Error calculating residual metrics: {str(e)}")
+        return {
+            'rmse': float('nan'),
+            'mae': float('nan'),
+            'r2': float('nan'),
+            'residual_mean': float('nan'),
+            'residual_std': float('nan'),
+            'residual_max': float('nan'),
+            'residual_min': float('nan')
         }
-        
-        # 更新批次跟踪
-        batch_tracker.add_batch_result(batch_result)
-        
-        # 更新趋势图
-        if len(batch_tracker.tracking_df) > 1:
-            batch_tracker.generate_trend_plots()
-            
-        # 更新批次摘要
-        batch_tracker.generate_batch_summary()
     
-    results = {
-        'plot': output_path,
-        'report': report_path,
-        'predictions': predictions_file,
-        'metrics': {
-            'rmse': rmse, 
-            'mae': mae, 
-            'r2': r2,
-            'residual_mean': residual_mean,
-            'residual_std': residual_std
-        }
+    # 保存结果
+    if save_results:
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # 批次ID信息
+        batch_str = f"_batch_{batch_id}" if batch_id is not None else ""
+        
+        # 残差分析图
+        plt.figure(figsize=(10, 6))
+        plt.scatter(y_true, residuals, alpha=0.6)
+        plt.axhline(y=0, color='r', linestyle='--')
+        plt.xlabel('True Values')
+        plt.ylabel('Residuals')
+        plt.title(f'Residual Analysis for {element}')
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'{element}{batch_str}_residuals.png'))
+        plt.close()
+        
+        # 残差直方图
+        plt.figure(figsize=(10, 6))
+        plt.hist(residuals, bins=30, alpha=0.7)
+        plt.axvline(x=0, color='r', linestyle='--')
+        plt.axvline(x=residual_mean, color='g', linestyle='-')
+        plt.xlabel('Residual Value')
+        plt.ylabel('Frequency')
+        plt.title(f'Residual Distribution for {element} (Mean: {residual_mean:.4f}, Std: {residual_std:.4f})')
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'{element}{batch_str}_residual_hist.png'))
+        plt.close()
+        
+        # 真实值vs预测值散点图
+        plt.figure(figsize=(10, 6))
+        plt.scatter(y_true, y_pred, alpha=0.6)
+        
+        # 添加完美预测线
+        min_val = min(np.min(y_true), np.min(y_pred))
+        max_val = max(np.max(y_true), np.max(y_pred))
+        plt.plot([min_val, max_val], [min_val, max_val], 'r--')
+        
+        plt.xlabel('True Values')
+        plt.ylabel('Predicted Values')
+        plt.title(f'True vs Predicted for {element} (RMSE: {rmse:.4f}, R²: {r2:.4f})')
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'{element}{batch_str}_prediction.png'))
+        plt.close()
+        
+        # 保存指标结果
+        with open(os.path.join(output_dir, f'{element}{batch_str}_metrics.txt'), 'w') as f:
+            f.write(f"Residual Analysis Results for {element}\n")
+            f.write("=" * 50 + "\n")
+            f.write(f"RMSE: {rmse:.6f}\n")
+            f.write(f"MAE: {mae:.6f}\n")
+            f.write(f"R²: {r2:.6f}\n")
+            f.write(f"Residual Mean: {residual_mean:.6f}\n")
+            f.write(f"Residual Std: {residual_std:.6f}\n")
+            f.write(f"Residual Max: {residual_max:.6f}\n")
+            f.write(f"Residual Min: {residual_min:.6f}\n")
+    
+    # 返回指标
+    return {
+        'rmse': rmse,
+        'mae': mae,
+        'r2': r2,
+        'residual_mean': residual_mean,
+        'residual_std': residual_std,
+        'residual_max': residual_max,
+        'residual_min': residual_min
     }
-    
-    logger.info(f"{element}模型残差分析完成 (批次 {batch_id})，结果保存在{output_path}")
-    return results
 
 def analyze_model_performance(model, element, train_loader, val_loader, test_loader, device, 
-                           input_size=4096, batch_size=None, save_batch_results=True):
-    """对训练好的模型进行全面性能分析
-    
-    Args:
-        model: 模型
-        element: 元素名称
-        train_loader: 训练数据加载器
-        val_loader: 验证数据加载器
-        test_loader: 测试数据加载器
-        device: 设备
-        input_size: 输入大小
-        batch_size: 批处理大小
-        save_batch_results: 是否保存批处理结果
-        
-    Returns:
-        包含分析结果的字典
+                              save_feature_importance=True, 
+                              save_batch_results=True,
+                              batch_id=None,
+                              batch_size=None,
+                              output_dir='results',
+                              ):
     """
-    # 获取配置
-    if batch_size is None and hasattr(analysis_config, 'batch_size'):
-        batch_size = analysis_config.get('batch_size', 32)
+    对模型性能进行全面分析
+    """
+    os.makedirs("results/feature_importance", exist_ok=True)
+    os.makedirs("results/residual_analysis", exist_ok=True)
     
-    # 创建基本结果目录
-    os.makedirs(os.path.join("results", "feature_importance"), exist_ok=True)
-    os.makedirs(os.path.join("results", "residual_analysis"), exist_ok=True)
+    logger.info(f"Starting feature importance analysis for {element} model...")
+    importance_results = analyze_feature_importance(model, val_loader, device, element,
+                                                  batch_id=batch_id,
+                                                  save_results=save_batch_results)
     
-    # 如果启用了批处理结果，创建批处理结果目录
-    if save_batch_results:
-        batch_dirs = setup_batch_directories(element)
+    logger.info(f"Starting residual analysis for {element} model...")
+    residual_analysis = analyze_residuals(model, test_loader, device, element,
+                                          batch_id=batch_id,
+                                          save_results=save_batch_results)
+    
+    logger.info(f"{element} model analysis completed, results saved in {output_dir} directory")
+    
+    # 合并结果
+    combined_metrics = {}
+    
+    # 添加残差分析的指标
+    if residual_analysis:
+        combined_metrics.update({
+            'rmse': residual_analysis.get('rmse', float('nan')),
+            'mae': residual_analysis.get('mae', float('nan')),
+            'r2': residual_analysis.get('r2', float('nan')),
+            'residual_mean': residual_analysis.get('residual_mean', float('nan')),
+            'residual_std': residual_analysis.get('residual_std', float('nan'))
+        })
+    
+    # 添加特征重要性分析的指标
+    if importance_results:
+        combined_metrics.update({
+            'top_feature_importance': importance_results.get('top_importance', float('nan')),
+            'top_feature_index': importance_results.get('top_index', -1)
+        })
+    
+    # 生成综合报告
+    summary_path = os.path.join(output_dir, f"{element}_performance_summary.txt")
+    with open(summary_path, 'w') as f:
+        f.write(f"Performance Analysis Summary for {element}\n")
+        f.write("=" * 50 + "\n\n")
+        
+        f.write("Metrics:\n")
+        for metric, value in combined_metrics.items():
+            if isinstance(value, float):
+                f.write(f"{metric}: {value:.6f}\n")
+            else:
+                f.write(f"{metric}: {value}\n")
+        
+        f.write("\nAnalysis Files:\n")
+        if residual_analysis:
+            f.write("Residual Analysis:\n")
+            f.write(f"- RMSE: {residual_analysis.get('rmse', 'N/A'):.6f}\n")
+            f.write(f"- MAE: {residual_analysis.get('mae', 'N/A'):.6f}\n")
+            f.write(f"- R²: {residual_analysis.get('r2', 'N/A'):.6f}\n")
+        
+        if importance_results:
+            f.write("\nFeature Importance Analysis:\n")
+            if 'top_features' in importance_results:
+                top_features = importance_results['top_features']
+                f.write("Top Features:\n")
+                for idx, imp in top_features:
+                    f.write(f"- Feature {idx}: {imp:.6f}\n")
     
     results = {}
-    batch_id = None
+    results['summary'] = summary_path
+    results['metrics'] = combined_metrics
     
-    if save_batch_results:
-        # 创建批次跟踪器并获取下一个批次ID
-        fi_tracker = BatchTracker(element, "feature_importance")
-        ra_tracker = BatchTracker(element, "residual_analysis")
-        batch_id = fi_tracker.get_next_batch_id()
-        
-        # 确保两个跟踪器使用相同的批次ID
-        if ra_tracker.get_next_batch_id() != batch_id:
-            logger.warning(f"特征重要性和残差分析的批次ID不同，使用特征重要性的批次ID: {batch_id}")
+    # 输出结果摘要
+    logger.info(f"Performance analysis for {element} completed")
+    if residual_analysis:
+        logger.info(f"RMSE for {element}: {residual_analysis.get('rmse', 'N/A'):.4f}")
+        logger.info(f"R² for {element}: {residual_analysis.get('r2', 'N/A'):.4f}")
     
-    # 分析特征重要性
-    logger.info(f"开始分析{element}模型的特征重要性...")
-    feature_importance_path = analyze_feature_importance(model, val_loader, device, element, 
-                                                       input_size=input_size, 
-                                                       batch_size=batch_size,
-                                                       batch_id=batch_id,
-                                                       save_batch_results=save_batch_results)
-    results['feature_importance_path'] = feature_importance_path
+    logger.info(f"{element} model analysis completed, results saved in {output_dir} directory")
     
-    # 分析残差
-    logger.info(f"开始分析{element}模型的残差...")
-    residual_analysis = analyze_residuals(model, test_loader, device, element,
-                                        batch_size=batch_size,
-                                        batch_id=batch_id,
-                                        save_batch_results=save_batch_results)
-    results['residual_analysis'] = residual_analysis
-    
-    # 如果启用了批处理结果跟踪，添加批次信息到结果
-    if save_batch_results:
-        results['batch_id'] = batch_id
-        results['feature_importance_tracker'] = fi_tracker
-        results['residual_analysis_tracker'] = ra_tracker
-        
-        # 显示批次结果
-        logger.info(f"批次 {batch_id} 分析完成")
-        logger.info(f"生成的特征重要性图: {feature_importance_path}")
-        if residual_analysis:
-            logger.info(f"生成的残差分析图: {residual_analysis['plot']}")
-            logger.info(f"元素 {element} 的RMSE: {residual_analysis['metrics']['rmse']:.4f}")
-            logger.info(f"元素 {element} 的R²: {residual_analysis['metrics']['r2']:.4f}")
-    
-    logger.info(f"{element}模型分析完成，结果保存在results目录")
     return results
 
 # 批次结果目录结构
@@ -943,7 +701,7 @@ class BatchTracker:
             # 绘制特征重要性趋势
             plt.subplot(2, 1, 1)
             plt.plot(self.tracking_df['batch_id'], self.tracking_df['top_feature_importance'], 'o-')
-            plt.title(f'{self.element}特征重要性趋势')
+            plt.title(f'Feature Importance Trend for {self.element}')
             plt.xlabel('批次ID')
             plt.ylabel('顶级特征重要性分数')
             plt.grid(True, alpha=0.3)
@@ -951,7 +709,7 @@ class BatchTracker:
             # 绘制处理时间趋势
             plt.subplot(2, 1, 2)
             plt.plot(self.tracking_df['batch_id'], self.tracking_df['processing_time'], 'o-')
-            plt.title('处理时间趋势')
+            plt.title('Processing Time Trend')
             plt.xlabel('批次ID')
             plt.ylabel('处理时间 (秒)')
             plt.grid(True, alpha=0.3)
@@ -961,7 +719,7 @@ class BatchTracker:
             plt.subplot(2, 2, 1)
             plt.plot(self.tracking_df['batch_id'], self.tracking_df['rmse'], 'o-', label='RMSE')
             plt.plot(self.tracking_df['batch_id'], self.tracking_df['mae'], 's-', label='MAE')
-            plt.title(f'{self.element}误差指标趋势')
+            plt.title(f'Error Metrics Trend for {self.element}')
             plt.xlabel('批次ID')
             plt.ylabel('误差值')
             plt.legend()
@@ -970,7 +728,7 @@ class BatchTracker:
             # 绘制R²趋势
             plt.subplot(2, 2, 2)
             plt.plot(self.tracking_df['batch_id'], self.tracking_df['r2'], 'o-')
-            plt.title('R²趋势')
+            plt.title('R² Trend')
             plt.xlabel('批次ID')
             plt.ylabel('R²')
             plt.grid(True, alpha=0.3)
@@ -979,7 +737,7 @@ class BatchTracker:
             plt.subplot(2, 2, 3)
             plt.plot(self.tracking_df['batch_id'], self.tracking_df['residual_mean'], 'o-')
             plt.axhline(0, color='r', linestyle='--', alpha=0.3)
-            plt.title('残差均值趋势')
+            plt.title('Residual Mean Trend')
             plt.xlabel('批次ID')
             plt.ylabel('残差均值')
             plt.grid(True, alpha=0.3)
@@ -987,7 +745,7 @@ class BatchTracker:
             # 绘制残差标准差趋势
             plt.subplot(2, 2, 4)
             plt.plot(self.tracking_df['batch_id'], self.tracking_df['residual_std'], 'o-')
-            plt.title('残差标准差趋势')
+            plt.title('Residual Standard Deviation Trend')
             plt.xlabel('批次ID')
             plt.ylabel('标准差')
             plt.grid(True, alpha=0.3)
