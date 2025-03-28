@@ -1386,9 +1386,18 @@ def main():
                 if isinstance(element_indices, dict) and element in element_indices:
                     # 从标签中提取特定元素的值
                     element_idx = element_indices[element]
-                    element_label = train_data[1][:, element_idx]
-                    val_element_label = val_data[1][:, element_idx]
-                    test_element_label = test_data[1][:, element_idx]
+        
+                    # 修改标签提取逻辑，处理1D和2D数组
+                    if len(train_data[1].shape) == 1:
+                    # 如果是1D数组，直接使用原始标签
+                        element_label = train_data[1]
+                        val_element_label = val_data[1]
+                        test_element_label = test_data[1]
+                    else:
+                        # 如果是2D数组，则使用索引
+                        element_label = train_data[1][:, element_idx]
+                        val_element_label = val_data[1][:, element_idx]
+                        test_element_label = test_data[1][:, element_idx]
                     
                     # 创建特定元素的数据加载器
                     train_loader_element = create_data_loaders(train_data[0], element_label,
