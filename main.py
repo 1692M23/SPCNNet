@@ -562,7 +562,7 @@ def process_element(element, config=None, tune_hyperparams=False):
     处理单个元素的训练过程
     """
     try:
-        from model import train, train_model  # 将导入移到函数开始
+        from model import train  # 只导入train函数
         
         # 设置设备
         device = config.training_config['device'] if config else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -587,28 +587,16 @@ def process_element(element, config=None, tune_hyperparams=False):
             if os.path.exists(resume_path):
                 resume_from = resume_path
         
-        try:
-            # 首先尝试使用新的train函数
-            train_losses, val_losses = train(
-                model=model,
-                train_loader=train_loader,
-                val_loader=val_loader,
-                element=element,
-                config=config,
-                device=device,
-                resume_from=resume_from
-            )
-        except Exception as e:
-            logger.warning(f"使用新的train函数失败: {str(e)}")
-            logger.warning("尝试使用旧的train_model函数作为备用")
-            # 使用旧的train_model函数作为备用
-            train_losses, val_losses = train_model(
-                model=model,
-                train_loader=train_loader,
-                val_loader=val_loader,
-                element=element,
-                config=config
-            )
+        # 训练模型
+        train_losses, val_losses = train(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            element=element,
+            config=config,
+            device=device,
+            resume_from=resume_from
+        )
         
         # 评估模型（如果有测试集）
         test_metrics = None
