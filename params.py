@@ -20,14 +20,54 @@ class SpectralDataset(Dataset):
 
 # 加载数据函数
 def load_data(file_path):
-    """加载预处理好的光谱数据"""
+    """加载预处理好的光谱数据，兼容preprocessdata7.py格式"""
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"找不到数据文件: {file_path}")
     
-    data = np.load(file_path)
-    X = data['spectra'] if 'spectra' in data else data['X']
-    y = data['labels'] if 'labels' in data else data['y']
-    return X, y
+    data = np.load(file_path, allow_pickle=True)
+    
+    # 支持preprocessdata7.py输出的不同键名
+    try:
+        # 尝试不同的关键字来获取数据
+        if 'X' in data:
+            X = data['X']
+        elif 'spectra' in data:
+            X = data['spectra']
+        elif 'flux' in data:
+            X = data['flux']
+        else:
+            # 尝试使用第一个键，如果没有特定的键
+            first_key = list(data.keys())[0]
+            print(f"无法找到标准特征键名，使用第一个可用键: {first_key}")
+            X = data[first_key]
+        
+        # 获取标签
+        if 'y' in data:
+            y = data['y']
+        elif 'labels' in data:
+            y = data['labels']
+        elif 'abundance' in data:
+            y = data['abundance']
+        else:
+            # 尝试使用第二个键
+            keys = list(data.keys())
+            if len(keys) > 1:
+                second_key = keys[1]
+                print(f"无法找到标准标签键名，使用第二个可用键: {second_key}")
+                y = data[second_key]
+            else:
+                raise KeyError("无法找到光谱或标签数据")
+        
+        print(f"成功加载数据: X形状={X.shape}, y形状={y.shape}")
+        return X, y
+    except KeyError as e:
+        # 如果发生错误，尝试加载替代键
+        print(f"加载数据时出错: {e}")
+        print("可用键:", list(data.keys()))
+        raise e
+    except Exception as e:
+        print(f"加载数据失败: {e}")
+        raise e
 
 # 定义SPCNNet模型（保持CNN+残差模块不变）
 class SPCNNet(nn.Module):

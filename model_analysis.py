@@ -8,6 +8,7 @@ from scipy.signal import find_peaks
 import pandas as pd
 import time
 from config import analysis_config
+from torch.utils.data import DataLoader, TensorDataset
 
 # 设置日志
 logger = logging.getLogger(__name__)
@@ -180,245 +181,285 @@ def get_feature_explanation(wavelength, element):
 
 def analyze_feature_importance(model, data_loader, device, element, input_size=4096, top_n=30, 
                              batch_size=None, batch_id=None, save_batch_results=True):
-    """分析光谱波长区域对预测的重要性并可视化解释
+    """
+    分析特征重要性，识别对预测结果最重要的光谱波长区域
+    兼容preprocessdata7.py的数据格式
     
-    Args:
-        model: 模型
-        data_loader: 数据加载器
-        device: 设备
+    参数:
+        model: 训练好的模型
+        data_loader: 数据加载器或数据集
+        device: 计算设备
         element: 元素名称
         input_size: 输入大小
-        top_n: 显示前N个重要特征
-        batch_size: 批处理大小，默认为None（使用全部数据）
-        batch_id: 批次ID，默认为None（自动分配）
+        top_n: 要显示的顶部特征数量
+        batch_size: 批量大小，用于批处理
+        batch_id: 批次ID，用于批处理
         save_batch_results: 是否保存批处理结果
         
-    Returns:
-        特征重要性图的保存路径
+    返回:
+        dict: 特征重要性结果
     """
-    # 获取配置
-    if batch_size is None and hasattr(analysis_config, 'batch_size'):
-        batch_size = analysis_config.get('batch_size', 32)
+    # 如果输入是数据加载器，直接使用；否则创建数据加载器
+    if not isinstance(data_loader, DataLoader):
+        if isinstance(data_loader, tuple) and len(data_loader) >= 2:
+            # 假设是(X, y)形式的数据
+            X, y = data_loader[0], data_loader[1]
+            
+            # 确保X形状正确
+            if len(X.shape) == 2:
+                # [n_samples, n_features] -> [n_samples, 1, n_features]
+                X = np.expand_dims(X, 1)
+            elif len(X.shape) == 3 and X.shape[1] != 1:
+                # 确保通道维度在第二维
+                X = np.transpose(X, (0, 2, 1)) if X.shape[2] == 1 else X
+                
+            # 创建数据集和加载器
+            dataset = TensorDataset(torch.FloatTensor(X), torch.FloatTensor(y))
+            data_loader = DataLoader(dataset, batch_size=batch_size or 32, shuffle=False)
+        else:
+            raise ValueError("无法从提供的数据创建数据加载器")
     
-    # 创建批次跟踪器
+    # 设置批处理目录和跟踪器
     if save_batch_results:
+        # 确保目录存在
+        batch_dir = os.path.join('results', 'feature_importance', f'{element}_batch_results')
+        os.makedirs(batch_dir, exist_ok=True)
+        
+        # 创建批次跟踪器
         batch_tracker = BatchTracker(element, "feature_importance")
+        
+        # 如果没有指定批次ID，获取下一个可用ID
         if batch_id is None:
             batch_id = batch_tracker.get_next_batch_id()
     
-    # 创建结果目录
-    results_dir = os.path.join("results", "feature_importance")
-    batch_results_dir = os.path.join(results_dir, f"{element}_batch_results")
-    
-    if save_batch_results:
-        os.makedirs(batch_results_dir, exist_ok=True)
-    
-    os.makedirs(results_dir, exist_ok=True)
-    
-    # 开始计时
-    start_time = time.time()
-    
-    # 收集特征梯度
+    # 计算特征重要性
     model.eval()
-    wavelengths = np.linspace(3800, 9000, input_size)  # 根据实际波长范围调整
-    feature_importance = np.zeros(input_size)
+    all_importances = []
     
-    logger.info(f"开始计算{element}的特征重要性 (批次 {batch_id})...")
-    
-    # 计算处理的样本数量
-    num_samples_processed = 0
-    
-    try:
-        for i, (spectra, targets) in enumerate(data_loader):
-            # 如果设置了批处理大小，只处理指定数量的批次
-            if batch_size is not None and i >= batch_size:
-                break
+    with torch.no_grad():
+        for batch_idx, (data, target) in enumerate(data_loader):
+            data, target = data.to(device), target.to(device)
+            
+            # 如果我们只处理特定批次且当前不是目标批次，跳过
+            if batch_size is not None and batch_id is not None and batch_idx != batch_id:
+                continue
+            
+            # 获取一个批次的数据
+            batch_data = data.detach().cpu().numpy()
+            batch_target = target.detach().cpu().numpy()
+            
+            # 对每个样本计算特征重要性
+            batch_importances = []
+            
+            for i in range(min(len(batch_data), 50)):  # 限制计算样本数以提高效率
+                sample = batch_data[i]
+                sample_tensor = torch.FloatTensor(sample).unsqueeze(0).to(device)
                 
-            spectra = spectra.to(device).requires_grad_(True)
-            outputs = model(spectra)
-            
-            # 计算每个特征的梯度
-            for j in range(min(len(targets), 10)):  # 使用部分样本进行分析
-                model.zero_grad()
-                if j < len(outputs):
-                    outputs[j].backward(retain_graph=(j < min(len(targets), 10)-1))
-                    if spectra.grad is not None:
-                        grad_data = spectra.grad[j, 0].cpu().numpy()
-                        feature_importance += np.abs(grad_data)
-            
-            num_samples_processed += len(spectra)
-    except Exception as e:
-        logger.error(f"计算特征重要性时出错: {str(e)}")
-        
-        # 尝试替代方法 - 扰动分析
-        logger.info("尝试使用扰动分析方法...")
-        feature_importance = np.zeros(input_size)
-        num_samples_processed = 0
-        
-        with torch.no_grad():
-            for i, (spectra, targets) in enumerate(data_loader):
-                # 如果设置了批处理大小，只处理指定数量的批次
-                if batch_size is not None and i >= batch_size:
-                    break
+                # 计算基线预测
+                baseline_output = model(sample_tensor)
+                baseline_value = baseline_output.item()
+                
+                # 计算每个波长区域的重要性
+                importances = np.zeros(sample.shape[-1])
+                
+                # 使用滑动窗口遮挡不同的区域
+                window_size = 50  # 窗口大小
+                stride = 25       # 滑动步长
+                
+                for start in range(0, sample.shape[-1] - window_size + 1, stride):
+                    end = start + window_size
+                    # 创建遮挡后的样本
+                    masked_sample = sample.copy()
+                    masked_sample[0, start:end] = 0  # 遮挡该区域
                     
-                spectra = spectra.to(device)
-                baseline = model(spectra).cpu().numpy()
-                
-                # 每次扰动一组特征
-                for j in range(0, input_size, 20):
-                    end_idx = min(j + 20, input_size)
-                    perturbed = spectra.clone()
-                    perturbed[:, 0, j:end_idx] *= 0.8  # 将该区域减少20%
-                    perturbed_output = model(perturbed).cpu().numpy()
+                    masked_tensor = torch.FloatTensor(masked_sample).unsqueeze(0).to(device)
+                    masked_output = model(masked_tensor)
+                    masked_value = masked_output.item()
                     
-                    # 计算输出变化
-                    delta = np.abs(perturbed_output - baseline).mean(axis=0)
-                    feature_importance[j:end_idx] = delta
+                    # 计算区域重要性（预测变化的绝对值）
+                    importance = abs(baseline_value - masked_value)
+                    
+                    # 将重要性分配给该区域的所有波长点
+                    importances[start:end] += importance
                 
-                num_samples_processed += len(spectra)
-                break  # 只使用一个批次
-    
-    # 计算处理时间
-    processing_time = time.time() - start_time
-    
-    # 平滑重要性得分并归一化
-    from scipy.ndimage import gaussian_filter1d
-    smoothed_importance = gaussian_filter1d(feature_importance, sigma=5)
-    normalized_importance = smoothed_importance / np.max(smoothed_importance)
-    
-    # 找出顶部重要区域
-    try:
-        peaks = find_peaks(normalized_importance, height=0.3, distance=20)[0]
-        top_peaks = sorted([(p, normalized_importance[p]) for p in peaks], 
-                          key=lambda x: x[1], reverse=True)[:top_n]
-    except Exception as e:
-        logger.error(f"查找峰值时出错: {str(e)}")
-        # 如果找不到峰值，就直接选择最高的点
-        indices = np.argsort(normalized_importance)[-top_n:]
-        top_peaks = [(idx, normalized_importance[idx]) for idx in indices]
-    
-    # 获取顶级特征
-    if len(top_peaks) > 0:
-        top_feature_idx, top_feature_importance = top_peaks[0]
-        top_feature_wavelength = wavelengths[top_feature_idx]
-        top_feature_name = identify_spectral_feature(top_feature_wavelength, element)
-    else:
-        top_feature_idx, top_feature_importance = 0, 0
-        top_feature_wavelength = 0
-        top_feature_name = "未知"
-    
-    # 创建可视化和解释
-    plt.figure(figsize=(12, 10))
-    
-    # 上图：光谱与重要性
-    ax1 = plt.subplot(2, 1, 1)
-    ax1.plot(wavelengths, normalized_importance, 'r-', alpha=0.7, label='特征重要性')
-    
-    # 添加已知元素吸收线标记
-    element_lines = get_element_absorption_lines(element)
-    for line_name, line_wavelength in element_lines.items():
-        closest_idx = np.argmin(np.abs(wavelengths - line_wavelength))
-        if normalized_importance[closest_idx] > 0.2:
-            ax1.axvline(line_wavelength, color='blue', linestyle='--', alpha=0.5)
-            ax1.text(line_wavelength, 0.8, line_name, rotation=90, fontsize=8)
-    
-    # 添加批次信息到标题
-    if batch_id is not None:
-        ax1.set_title(f'{element}元素丰度预测的光谱特征重要性 (批次 {batch_id})')
-    else:
-        ax1.set_title(f'{element}元素丰度预测的光谱特征重要性')
-        
-    ax1.set_xlabel('波长 (Å)')
-    ax1.set_ylabel('重要性分数')
-    ax1.legend()
-    
-    # 下图：Top-N重要区域详细信息表格
-    ax2 = plt.subplot(2, 1, 2)
-    ax2.axis('off')
-    table_data = []
-    header = ['波长区域 (Å)', '重要性分数', '可能对应的光谱特征']
-    
-    for peak_idx, importance in top_peaks:
-        wave = wavelengths[peak_idx]
-        feature_name = identify_spectral_feature(wave, element)
-        table_data.append([f"{wave:.2f}", f"{importance:.4f}", feature_name])
-    
-    table = ax2.table(cellText=table_data, colLabels=header, 
-                     loc='center', cellLoc='center', colWidths=[0.3, 0.2, 0.5])
-    table.auto_set_font_size(False)
-    table.set_fontsize(9)
-    table.scale(1, 1.5)
-    
-    plt.tight_layout()
-    
-    # 保存图像
-    if save_batch_results and batch_id is not None:
-        # 保存到批次目录
-        output_path = os.path.join(batch_results_dir, f"batch_{batch_id}_feature_importance.png")
-    else:
-        # 保存到主目录
-        output_path = os.path.join(results_dir, f"{element}_feature_importance.png")
-        
-    plt.savefig(output_path, dpi=300)
-    plt.close()
-    
-    # 生成解释性报告
-    if save_batch_results and batch_id is not None:
-        report_path = os.path.join(batch_results_dir, f"batch_{batch_id}_explanation.txt")
-    else:
-        report_path = os.path.join(results_dir, f"{element}_explanation.txt")
-        
-    with open(report_path, 'w') as f:
-        # 添加批次信息
-        if batch_id is not None:
-            f.write(f"## {element}元素丰度预测的关键光谱特征解释 (批次 {batch_id})\n\n")
-        else:
-            f.write(f"## {element}元素丰度预测的关键光谱特征解释\n\n")
+                batch_importances.append(importances)
             
-        f.write("模型重点关注的波长区域及其天文物理意义：\n\n")
-        
-        for i, (peak_idx, importance) in enumerate(top_peaks[:10]):
-            wave = wavelengths[peak_idx]
-            feature_name = identify_spectral_feature(wave, element)
-            explanation = get_feature_explanation(wave, element)
-            
-            f.write(f"### {i+1}. 波长 {wave:.2f}Å (重要性: {importance:.4f})\n")
-            f.write(f"特征: {feature_name}\n")
-            f.write(f"解释: {explanation}\n\n")
-        
-        f.write("注：特征重要性反映了模型对特定波长区域的依赖程度，但不一定表示因果关系。")
-        
-        # 添加批次处理信息
-        f.write(f"\n\n## 批次处理信息\n")
-        f.write(f"处理时间: {processing_time:.2f}秒\n")
-        f.write(f"处理样本数: {num_samples_processed}\n")
-        f.write(f"分析时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            # 平均该批次的特征重要性
+            if batch_importances:
+                mean_importances = np.mean(batch_importances, axis=0)
+                all_importances.append(mean_importances)
+                
+                # 如果只处理特定批次，或者需要保存批处理结果，生成该批次的结果
+                if (batch_size is not None and batch_id is not None) or save_batch_results:
+                    # 获取最重要的波长区域
+                    top_indices = np.argsort(mean_importances)[-top_n:][::-1]
+                    
+                    # 绘制特征重要性图
+                    plt.figure(figsize=(12, 6))
+                    plt.subplot(2, 1, 1)
+                    plt.plot(mean_importances, alpha=0.7)
+                    plt.title(f'元素 {element} 特征重要性分析（批次 {batch_id or batch_idx+1}）')
+                    plt.xlabel('波长索引')
+                    plt.ylabel('重要性')
+                    plt.grid(True, alpha=0.3)
+                    
+                    plt.subplot(2, 1, 2)
+                    plt.plot(mean_importances, alpha=0.3, color='gray')
+                    plt.bar(top_indices, mean_importances[top_indices], alpha=0.7, color='red')
+                    plt.title(f'顶部 {top_n} 特征重要性')
+                    plt.xlabel('波长索引')
+                    plt.ylabel('重要性')
+                    plt.grid(True, alpha=0.3)
+                    
+                    plt.tight_layout()
+                    
+                    # 保存图表
+                    plot_path = os.path.join(batch_dir, f'batch_{batch_id or batch_idx+1}_feature_importance.png')
+                    plt.savefig(plot_path, dpi=300)
+                    plt.close()
+                    
+                    # 保存解释文件
+                    explanation_path = os.path.join(batch_dir, f'batch_{batch_id or batch_idx+1}_explanation.txt')
+                    with open(explanation_path, 'w') as f:
+                        f.write(f"元素 {element} 批次 {batch_id or batch_idx+1} 的特征重要性分析\n")
+                        f.write("=" * 50 + "\n\n")
+                        f.write("最重要的波长区域及其可能对应的光谱特征：\n\n")
+                        
+                        # 获取默认的波长范围 - 从预处理模块或使用估计值
+                        try:
+                            # 尝试导入preprocessdata7
+                            import importlib
+                            pp7 = importlib.import_module('preprocessdata7')
+                            if hasattr(pp7, 'LAMOSTPreprocessor'):
+                                preprocessor = pp7.LAMOSTPreprocessor()
+                                if hasattr(preprocessor, 'get_wavelength_range'):
+                                    wavelength_min, wavelength_max = preprocessor.get_wavelength_range()
+                                else:
+                                    # 使用估计值
+                                    wavelength_min, wavelength_max = 3800, 9000
+                            else:
+                                wavelength_min, wavelength_max = 3800, 9000
+                        except:
+                            # 默认LAMOST波长范围估计值
+                            wavelength_min, wavelength_max = 3800, 9000
+                        
+                        # 估计每个索引对应的波长
+                        wavelength_step = (wavelength_max - wavelength_min) / input_size
+                        wavelengths = np.linspace(wavelength_min, wavelength_max, input_size)
+                        
+                        for i, idx in enumerate(top_indices):
+                            wavelength = wavelengths[idx]
+                            feature_explanation = get_feature_explanation(wavelength, element)
+                            f.write(f"{i+1}. 波长索引 {idx} (估计波长: {wavelength:.2f} Å):\n")
+                            f.write(f"   重要性得分: {mean_importances[idx]:.6f}\n")
+                            f.write(f"   可能特征: {feature_explanation}\n\n")
+                    
+                    # 如果启用批处理结果保存，记录该批次的结果
+                    if save_batch_results:
+                        # 创建批次结果记录
+                        batch_result = {
+                            'batch_id': batch_id or batch_idx+1,
+                            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                            'top_indices': top_indices.tolist(),
+                            'top_importances': mean_importances[top_indices].tolist(),
+                            'mean_importance': np.mean(mean_importances),
+                            'max_importance': np.max(mean_importances),
+                            'plot_path': plot_path,
+                            'explanation_path': explanation_path
+                        }
+                        
+                        # 添加到批次跟踪器
+                        batch_tracker.add_batch_result(batch_result)
+                        
+                        # 生成趋势图和批次摘要
+                        batch_tracker.generate_trend_plots()
+                        batch_tracker.generate_batch_summary()
+                    
+                    # 如果只处理特定批次，完成后返回
+                    if batch_size is not None and batch_id is not None:
+                        return {
+                            'batch_id': batch_id,
+                            'feature_importance': mean_importances,
+                            'top_indices': top_indices.tolist(),
+                            'plot_path': plot_path,
+                            'explanation_path': explanation_path
+                        }
     
-    # 如果启用了批处理结果跟踪，则更新跟踪数据
-    if save_batch_results:
-        # 准备批次结果数据
-        batch_result = {
-            'batch_id': batch_id,
-            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-            'num_samples': num_samples_processed,
-            'top_feature_wavelength': top_feature_wavelength,
-            'top_feature_importance': top_feature_importance,
-            'top_feature_name': top_feature_name,
-            'processing_time': processing_time
+    # 如果我们处理了所有批次，计算总体特征重要性
+    if all_importances:
+        mean_importances = np.mean(all_importances, axis=0)
+        top_indices = np.argsort(mean_importances)[-top_n:][::-1]
+        
+        # 绘制总体特征重要性图
+        plt.figure(figsize=(12, 6))
+        plt.subplot(2, 1, 1)
+        plt.plot(mean_importances, alpha=0.7)
+        plt.title(f'元素 {element} 特征重要性分析（总体）')
+        plt.xlabel('波长索引')
+        plt.ylabel('重要性')
+        plt.grid(True, alpha=0.3)
+        
+        plt.subplot(2, 1, 2)
+        plt.plot(mean_importances, alpha=0.3, color='gray')
+        plt.bar(top_indices, mean_importances[top_indices], alpha=0.7, color='red')
+        plt.title(f'顶部 {top_n} 特征重要性')
+        plt.xlabel('波长索引')
+        plt.ylabel('重要性')
+        plt.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        # 保存图表
+        plot_dir = os.path.join('results', 'feature_importance')
+        os.makedirs(plot_dir, exist_ok=True)
+        plot_path = os.path.join(plot_dir, f'{element}_feature_importance.png')
+        plt.savefig(plot_path, dpi=300)
+        plt.close()
+        
+        # 保存总体解释文件
+        explanation_path = os.path.join(plot_dir, f'{element}_feature_explanation.txt')
+        with open(explanation_path, 'w') as f:
+            f.write(f"元素 {element} 特征重要性分析\n")
+            f.write("=" * 50 + "\n\n")
+            f.write("最重要的波长区域及其可能对应的光谱特征：\n\n")
+            
+            # 估计波长范围
+            try:
+                # 尝试导入preprocessdata7
+                import importlib
+                pp7 = importlib.import_module('preprocessdata7')
+                if hasattr(pp7, 'LAMOSTPreprocessor'):
+                    preprocessor = pp7.LAMOSTPreprocessor()
+                    if hasattr(preprocessor, 'get_wavelength_range'):
+                        wavelength_min, wavelength_max = preprocessor.get_wavelength_range()
+                    else:
+                        # 使用估计值
+                        wavelength_min, wavelength_max = 3800, 9000
+                else:
+                    wavelength_min, wavelength_max = 3800, 9000
+            except:
+                # 默认LAMOST波长范围估计值
+                wavelength_min, wavelength_max = 3800, 9000
+            
+            # 估计每个索引对应的波长
+            wavelength_step = (wavelength_max - wavelength_min) / input_size
+            wavelengths = np.linspace(wavelength_min, wavelength_max, input_size)
+            
+            for i, idx in enumerate(top_indices):
+                wavelength = wavelengths[idx]
+                feature_explanation = get_feature_explanation(wavelength, element)
+                f.write(f"{i+1}. 波长索引 {idx} (估计波长: {wavelength:.2f} Å):\n")
+                f.write(f"   重要性得分: {mean_importances[idx]:.6f}\n")
+                f.write(f"   可能特征: {feature_explanation}\n\n")
+        
+        return {
+            'feature_importance': mean_importances,
+            'top_indices': top_indices.tolist(),
+            'plot_path': plot_path,
+            'explanation_path': explanation_path
         }
-        
-        # 更新批次跟踪
-        batch_tracker.add_batch_result(batch_result)
-        
-        # 更新趋势图
-        if len(batch_tracker.tracking_df) > 1:
-            batch_tracker.generate_trend_plots()
-            
-        # 更新批次摘要
-        batch_tracker.generate_batch_summary()
-    
-    logger.info(f"{element}特征重要性分析完成 (批次 {batch_id})，结果保存在{output_path}")
-    return output_path
+    else:
+        return None
 
 def analyze_residuals(model, test_loader, device, element, batch_size=None, batch_id=None, save_batch_results=True):
     """分析模型预测残差，评估模型在不同元素丰度区间的表现

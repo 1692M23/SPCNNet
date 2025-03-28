@@ -29,7 +29,7 @@ from config import Config
 # 导入自定义模块
 import config
 from model import load_trained_model, predict
-from preprocessdata import LAMOSTPreprocessor
+from preprocessdata7 import LAMOSTPreprocessor
 from utils import CacheManager, ProgressManager, ask_clear_cache
 
 # 配置日志
@@ -115,6 +115,115 @@ def load_csv_metadata(csv_file):
     except Exception as e:
         logger.error(f"加载CSV元数据失败: {str(e)}")
         return None
+
+def load_test_data(data_file, element):
+    """
+    加载测试数据并提取特定元素的标签
+    
+    参数:
+        data_file (str): 测试数据文件路径
+        element (str): 元素名称
+        
+    返回:
+        tuple: (spectra, true_values, wavelengths)
+    """
+    try:
+        logger.info(f"加载测试数据: {data_file}")
+        data = np.load(data_file, allow_pickle=True)
+        
+        # 检查数据键
+        keys = list(data.keys())
+        logger.info(f"数据包含键: {keys}")
+        
+        # 处理光谱数据 - 兼容preprocessdata7.py格式
+        if 'spectra' in keys:
+            spectra = data['spectra']
+        elif 'X' in keys:
+            spectra = data['X']
+        elif 'flux' in keys:
+            spectra = data['flux']
+        else:
+            # 如果没有标准键名，尝试使用第一个数组
+            logger.warning(f"未找到标准特征键名，尝试使用第一个数组: {keys[0]}")
+            spectra = data[keys[0]]
+            
+        logger.info(f"加载光谱数据，形状: {spectra.shape}")
+        
+        # 处理元素丰度标签
+        if element in keys:
+            # 直接使用元素名称作为键
+            true_values = data[element]
+            logger.info(f"使用键 '{element}' 加载标签，形状: {true_values.shape}")
+        elif 'y' in keys:
+            # 传统格式：y包含所有元素的标签
+            true_values = data['y']
+            logger.info(f"使用 'y' 键加载标签，形状: {true_values.shape}")
+            
+            # 如果y是多维的，需要找到对应元素的列
+            if len(true_values.shape) > 1 and true_values.shape[1] > 1:
+                # 尝试从元素列表中找到对应索引
+                if 'elements' in keys:
+                    elements = data['elements']
+                    if element in elements:
+                        idx = np.where(elements == element)[0][0]
+                        true_values = true_values[:, idx]
+                        logger.info(f"从元素列表中提取 {element} 的标签，索引: {idx}")
+                    else:
+                        logger.warning(f"在元素列表中找不到 {element}，使用第一列标签")
+                        true_values = true_values[:, 0]
+                else:
+                    logger.warning(f"未提供元素列表，假设标签为第一列")
+                    true_values = true_values[:, 0]
+        elif 'labels' in keys:
+            # preprocessdata7.py格式
+            true_values = data['labels']
+            logger.info(f"使用 'labels' 键加载标签，形状: {true_values.shape}")
+            
+            # 如果标签是多维的，找到对应元素的列
+            if len(true_values.shape) > 1 and true_values.shape[1] > 1:
+                if 'elements' in keys:
+                    elements = data['elements']
+                    if element in elements:
+                        idx = np.where(elements == element)[0][0]
+                        true_values = true_values[:, idx]
+                        logger.info(f"从 'elements' 中提取 {element} 的标签，索引: {idx}")
+                    else:
+                        logger.warning(f"在 'elements' 中找不到 {element}，使用第一列标签")
+                        true_values = true_values[:, 0]
+                else:
+                    logger.warning(f"未提供元素列表，假设标签为第一列")
+                    true_values = true_values[:, 0]
+        elif 'abundance' in keys:
+            # 另一种可能的键名
+            true_values = data['abundance']
+            logger.info(f"使用 'abundance' 键加载标签，形状: {true_values.shape}")
+            
+            # 处理多维标签
+            if len(true_values.shape) > 1 and true_values.shape[1] > 1:
+                # 同上处理逻辑
+                if 'elements' in keys:
+                    elements = data['elements']
+                    if element in elements:
+                        idx = np.where(elements == element)[0][0]
+                        true_values = true_values[:, idx]
+                    else:
+                        true_values = true_values[:, 0]
+                else:
+                    true_values = true_values[:, 0]
+        else:
+            logger.error(f"找不到元素 {element} 的标签")
+            return None, None, None
+            
+        # 获取波长数据（如果有）
+        wavelengths = None
+        if 'wavelength' in keys:
+            wavelengths = data['wavelength']
+            logger.info(f"加载波长数据，形状: {wavelengths.shape}")
+            
+        return spectra, true_values, wavelengths
+    except Exception as e:
+        logger.error(f"加载数据时出错: {e}")
+        return None, None, None
 
 def load_test_predictions(elements=None, csv_files=None):
     """
@@ -463,8 +572,8 @@ def evaluate_all_elements(elements=None, save_dir=None):
     if save_dir is None:
         save_dir = config.output_config['results_dir']
     
-    # 加载测试数据
-    test_data = np.load(config.data_paths['test_data'])
+    # 确保目录存在
+    os.makedirs(save_dir, exist_ok=True)
     
     # 评估结果
     all_results = {}
@@ -477,63 +586,165 @@ def evaluate_all_elements(elements=None, save_dir=None):
             # 加载模型
             model_path = os.path.join(config.model_config['model_dir'], f"{element}_model.pth")
             if not os.path.exists(model_path):
-                logger.error(f"找不到 {element} 的模型文件")
-                continue
+                # 尝试其他可能的模型命名格式
+                alt_paths = [
+                    os.path.join(config.model_config['model_dir'], f"model_{element}.pth"),
+                    os.path.join(config.model_config['model_dir'], f"{element.lower()}_model.pth"),
+                    os.path.join(config.model_config['model_dir'], f"{element.upper()}_model.pth")
+                ]
+                
+                for alt_path in alt_paths:
+                    if os.path.exists(alt_path):
+                        model_path = alt_path
+                        logger.info(f"找到替代模型路径: {model_path}")
+                        break
+                        
+                if not os.path.exists(model_path):
+                    logger.error(f"找不到 {element} 的模型文件")
+                    progress.update()
+                    continue
             
             device = config.training_config['device']
-            model = load_trained_model(element, model_path, device)
+            model = load_trained_model(element, model_path=model_path, device=device)
             
-            # 预测测试数据
-            spectra = test_data['spectra']
-            true_values = test_data[element]
+            if model is None:
+                logger.error(f"加载 {element} 模型失败")
+                progress.update()
+                continue
             
+            # 使用新的load_test_data函数加载测试数据
+            spectra, true_values, wavelengths = load_test_data(
+                config.data_paths['test_data'], 
+                element
+            )
+            
+            if spectra is None or true_values is None:
+                logger.error(f"加载 {element} 测试数据失败")
+                progress.update()
+                continue
+                
+            # 确保数据形状正确
+            if len(spectra.shape) == 2:
+                input_size = spectra.shape[1]
+            elif len(spectra.shape) == 3:
+                # 如果是3D张量(例如有波长和流量分开)，则展平或取一个通道
+                logger.info(f"检测到3D张量，形状: {spectra.shape}，尝试重塑")
+                if spectra.shape[1] == 2:  # 如果第二维是2(波长+流量)
+                    # 只使用流量(假设是第二个通道)
+                    spectra = spectra[:, 1, :]
+                    logger.info(f"选择第二通道，新形状: {spectra.shape}")
+                else:
+                    # 否则展平后两个维度
+                    original_shape = spectra.shape
+                    spectra = spectra.reshape(original_shape[0], -1)
+                    logger.info(f"重塑光谱，从 {original_shape} 到 {spectra.shape}")
+                input_size = spectra.shape[1]
+            else:
+                logger.error(f"不支持的光谱形状: {spectra.shape}")
+                progress.update()
+                continue
+            
+            # 确保标签形状正确
+            if len(true_values.shape) > 1:
+                true_values = true_values.reshape(-1)
+                
+            # 创建数据加载器
+            test_dataset = torch.utils.data.TensorDataset(
+                torch.tensor(spectra, dtype=torch.float32),
+                torch.tensor(true_values, dtype=torch.float32)
+            )
+            test_loader = torch.utils.data.DataLoader(
+                test_dataset,
+                batch_size=config.training_config['batch_size'],
+                shuffle=False,
+                num_workers=0  # 避免多进程问题
+            )
+            
+            # 预测和评估
+            logger.info(f"开始评估 {element} 模型...")
+            predictions = []
+            actuals = []
+            
+            model.eval()  # 设置为评估模式
+            with torch.no_grad():
+                for batch_spectra, batch_labels in test_loader:
+                    batch_spectra = batch_spectra.to(device)
+                    batch_predictions = model(batch_spectra).cpu().numpy()
+                    
+                    predictions.extend(batch_predictions.flatten())
+                    actuals.extend(batch_labels.numpy().flatten())
+            
+            # 计算评估指标
+            predictions = np.array(predictions)
+            actuals = np.array(actuals)
+            
+            mse = mean_squared_error(actuals, predictions)
+            rmse = np.sqrt(mse)
+            mae = mean_absolute_error(actuals, predictions)
+            r2 = r2_score(actuals, predictions)
+            
+            # 计算预测值与真实值的标准差之比
+            std_true = np.std(actuals)
+            std_pred = np.std(predictions)
+            std_ratio = std_pred / std_true if std_true > 0 else 0
+            
+            # 计算残差标准差
+            residuals = predictions - actuals
+            std_residuals = np.std(residuals)
+            
+            # 计算相关系数
             try:
-                # 转换数据格式并预测
-                spectra_tensor = torch.FloatTensor(spectra).unsqueeze(1).to(device)
-                model.eval()
-                with torch.no_grad():
-                    predictions = model(spectra_tensor).cpu().numpy().flatten()
-                
-                # 计算评估指标
-                mae = mean_absolute_error(true_values, predictions)
-                mse = mean_squared_error(true_values, predictions)
-                rmse = np.sqrt(mse)
-                r2 = r2_score(true_values, predictions)
-                std = np.std(predictions - true_values)
-                
-                # 保存结果
-                results = {
-                    'element': element,
-                    'true_values': true_values,
-                    'predictions': predictions,
-                    'mae': mae,
-        'mse': mse,
-        'rmse': rmse,
-        'r2': r2,
-                    'std': std
-                }
-                
-                # 保存到文件
-                results_path = os.path.join(save_dir, f"{element}_test_results.npz")
-                np.savez(results_path, **results)
-                
-                # 添加到总结果
-                all_results[element] = results
-                
-                # 输出评估指标
-                logger.info(f"{element} 评估结果:")
-                logger.info(f"  MAE:  {mae:.6f}")
-                logger.info(f"  MSE:  {mse:.6f}")
-                logger.info(f"  RMSE: {rmse:.6f}")
-                logger.info(f"  R²:   {r2:.6f}")
-                logger.info(f"  STD:  {std:.6f}")
-                
-            except Exception as e:
-                logger.error(f"{element} 评估失败: {str(e)}")
+                pearson_r, pearson_p = pearsonr(actuals, predictions)
+                spearman_r, spearman_p = spearmanr(actuals, predictions)
+            except:
+                pearson_r, pearson_p = 0, 1
+                spearman_r, spearman_p = 0, 1
+            
+            # 保存结果
+            element_results = {
+                'element': element,
+                'mse': mse,
+                'rmse': rmse,
+                'mae': mae,
+                'r2': r2,
+                'std_true': std_true,
+                'std_pred': std_pred,
+                'std_ratio': std_ratio,
+                'std_residuals': std_residuals,
+                'pearson_r': pearson_r,
+                'pearson_p': pearson_p,
+                'spearman_r': spearman_r,
+                'spearman_p': spearman_p,
+                'predictions': predictions,
+                'actuals': actuals,
+                'residuals': residuals
+            }
+            
+            all_results[element] = element_results
+            
+            # 保存评估结果到CSV
+            results_df = pd.DataFrame({
+                'Actual': actuals,
+                'Predicted': predictions,
+                'Residual': residuals
+            })
+            csv_path = os.path.join(save_dir, f'{element}_evaluation.csv')
+            results_df.to_csv(csv_path, index=False)
+            
+            # 保存评估指标
+            metrics_df = pd.DataFrame({
+                'Metric': ['MSE', 'RMSE', 'MAE', 'R²', 'Std Ratio', 'Pearson r', 'Spearman r'],
+                'Value': [mse, rmse, mae, r2, std_ratio, pearson_r, spearman_r]
+            })
+            metrics_path = os.path.join(save_dir, f'{element}_metrics.csv')
+            metrics_df.to_csv(metrics_path, index=False)
+            
+            logger.info(f"{element} 评估结果: RMSE={rmse:.4f}, MAE={mae:.4f}, R²={r2:.4f}")
             
             # 更新进度
-            progress.update(1)
+            progress.update()
     
+    # 返回所有评估结果
     return all_results
 
 def load_catalog_data(catalog_file, element_name):

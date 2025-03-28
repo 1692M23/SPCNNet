@@ -410,7 +410,7 @@ def train_model(model, train_loader, val_loader, element, config):
     # 使用余弦退火学习率调度器
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer,
-        T_0=config.training_config['epochs'] // 3,  # 第一次重启的epoch数
+        T_0=config.training_config['num_epochs'] // 3,  # 第一次重启的epoch数
         T_mult=2,  # 每次重启后周期的倍数
         eta_min=config.training_config['lr'] * 0.01  # 最小学习率
     )
@@ -436,7 +436,7 @@ def train_model(model, train_loader, val_loader, element, config):
     batch_df = pd.DataFrame(columns=['epoch', 'train_loss', 'val_loss', 'lr', 'timestamp'])
     
     # 训练循环
-    for epoch in range(config.training_config['epochs']):
+    for epoch in range(config.training_config['num_epochs']):
         model.train()
         epoch_loss = 0
         valid_batches = 0
@@ -682,7 +682,7 @@ def train_model(model, train_loader, val_loader, element, config):
         
         # 每10个epoch记录一次损失
         if (epoch + 1) % 10 == 0:
-            logger.info(f'Epoch [{epoch+1}/{config.training_config["epochs"]}] '
+            logger.info(f'Epoch [{epoch+1}/{config.training_config["num_epochs"]}] '
                        f'Train Loss: {avg_train_loss:.6f} '
                        f'Val Loss: {avg_val_loss:.6f}')
     
@@ -788,31 +788,78 @@ def load_trained_model(input_size, element, config):
     加载训练好的模型
     
     参数:
-        input_size (int): 输入维度
+        input_size (int): 输入大小
         element (str): 元素名称
         config: 配置对象
         
     返回:
         torch.nn.Module: 加载的模型
     """
-    model_path = os.path.join(config.model_config['model_dir'], f"{element}_model.pth")
-    if not os.path.exists(model_path):
-        logger.warning(f"未找到 {element} 的模型文件")
-        return None
+    device = config.training_config['device']
     
     try:
+        # 确保模型目录存在
+        os.makedirs(config.model_config['model_dir'], exist_ok=True)
+        
+        # 尝试多种可能的模型文件命名模式
+        model_paths = [
+            os.path.join(config.model_config['model_dir'], f"{element}_model.pth"),  # 标准格式
+            os.path.join(config.model_config['model_dir'], f"{element.lower()}_model.pth"),  # 小写
+            os.path.join(config.model_config['model_dir'], f"{element.upper()}_model.pth"),  # 大写
+            os.path.join(config.model_config['model_dir'], f"{element}_best_model.pth"),  # best前缀
+            os.path.join(config.model_config['model_dir'], f"model_{element}.pth"),  # 另一种格式
+        ]
+        
+        model_path = None
+        for path in model_paths:
+            if os.path.exists(path):
+                model_path = path
+                break
+                
+        if model_path is None:
+            logger.warning(f"找不到{element}的模型文件，尝试其他格式")
+            
+            # 检查目录中的所有文件，查找可能匹配的模型
+            if os.path.exists(config.model_config['model_dir']):
+                for file in os.listdir(config.model_config['model_dir']):
+                    if file.endswith('.pth') and element.lower() in file.lower():
+                        model_path = os.path.join(config.model_config['model_dir'], file)
+                        logger.info(f"找到可能匹配的模型文件: {file}")
+                        break
+        
+        if model_path is None:
+            logger.error(f"找不到元素 {element} 的模型文件")
+            return None
+            
         # 创建模型实例
-        model = SpectralResCNN(input_size).to(config.training_config['device'])
+        model = SpectralResCNN(input_size)
+        model = model.to(device)
         
-        # 加载模型状态
-        checkpoint = torch.load(model_path, map_location=config.training_config['device'])
-        model.load_state_dict(checkpoint['model_state_dict'])
+        # 加载模型权重
+        try:
+            checkpoint = torch.load(model_path, map_location=device)
+            
+            # 检查加载的文件是否为字典格式
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                logger.info(f"加载带有state_dict的模型: {model_path}")
+                model.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                # 直接加载整个模型
+                logger.info(f"加载完整模型: {model_path}")
+                model = checkpoint
+                model = model.to(device)
+        except Exception as e:
+            logger.error(f"加载模型失败: {str(e)}")
+            return None
+            
+        # 设置为评估模式
+        model.eval()
+        logger.info(f"成功加载元素 {element} 的模型")
         
-        logger.info(f"成功加载 {element} 模型，验证损失: {checkpoint['val_loss']:.6f}")
         return model
         
     except Exception as e:
-        logger.error(f"加载模型失败: {str(e)}")
+        logger.error(f"加载模型时出错: {str(e)}")
         return None
 
 # 在模型训练完成后添加

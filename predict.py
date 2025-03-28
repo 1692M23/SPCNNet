@@ -39,7 +39,7 @@ cache_manager = CacheManager(cache_dir=os.path.join(config.output_config['cache_
 
 def load_data(data_path):
     """
-    加载待预测的光谱数据
+    加载待预测的光谱数据，支持preprocessdata7.py处理的数据格式
     
     参数:
         data_path (str): 数据文件路径，支持.npz和.csv格式
@@ -61,19 +61,27 @@ def load_data(data_path):
             return None, None
             
         if data_path.endswith('.npz'):
-            data = np.load(data_path)
+            data = np.load(data_path, allow_pickle=True)
             logger.info(f"NPZ文件包含以下键: {data.files}")
             
-            # 尝试不同的键名
+            # 尝试不同的键名 - 增加对preprocessdata7.py格式的支持
             if 'spectra' in data.files:
                 spectra = data['spectra']
             elif 'data' in data.files:
                 spectra = data['data']
             elif 'X' in data.files:
                 spectra = data['X']
+            elif 'flux' in data.files:
+                spectra = data['flux']
+            elif 'wavelength' in data.files and 'flux' in data.files:
+                # 如果分别存储了波长和流量，可以选择合并或只使用流量
+                logger.info("找到分离的波长和流量数据")
+                spectra = data['flux']
             else:
-                logger.error(f"NPZ文件中未找到光谱数据，可用的键: {data.files}")
-                return None, None
+                # 尝试使用第一个数组
+                first_key = list(data.keys())[0]
+                logger.warning(f"未找到标准光谱数据键，尝试使用第一个键 {first_key}")
+                spectra = data[first_key]
             
             if spectra is None:
                 logger.error("无法从NPZ文件中提取光谱数据")
@@ -81,80 +89,155 @@ def load_data(data_path):
                 
             logger.info(f"成功从NPZ文件加载光谱数据，形状: {spectra.shape}")
             
+            # 提取可能的元数据
+            metadata = None
+            if 'metadata' in data.files:
+                metadata = data['metadata']
+            elif 'obsid' in data.files or 'spec' in data.files:
+                # 创建元数据DataFrame
+                id_key = 'obsid' if 'obsid' in data.files else 'spec'
+                id_values = data[id_key]
+                metadata = pd.DataFrame({id_key: id_values})
+                logger.info(f"从NPZ文件创建元数据DataFrame，包含{len(metadata)}行")
+            
             # 保存到缓存
             cache_manager.set_cache(cache_key, {
                 'spectra': spectra,
-                'metadata': None
+                'metadata': metadata
             })
             
-            return spectra, None
+            return spectra, metadata
             
         elif data_path.endswith('.csv'):
             df = pd.read_csv(data_path)
             logger.info(f"CSV文件包含以下列: {df.columns.tolist()}")
             
-            # 假设CSV文件中包含obsid列和其他元数据列
-            if 'obsid' not in df.columns:
-                logger.error("CSV文件缺少'obsid'列，需要OBSID来匹配FITS文件")
+            # 兼容preprocessdata7.py，检查obsid或spec列
+            id_col = None
+            if 'obsid' in df.columns:
+                id_col = 'obsid'
+            elif 'spec' in df.columns:
+                id_col = 'spec'
+                
+            if id_col is None:
+                logger.error("CSV文件缺少'obsid'或'spec'列，需要识别符来匹配FITS文件")
                 return None, None
             
-            # 从预处理模块获取处理好的光谱数据
-            from preprocessdata import LAMOSTPreprocessor
-            
+            # 尝试从preprocessdata7.py获取处理好的光谱数据
             try:
-                # 初始化预处理器
-                preprocessor = LAMOSTPreprocessor()
-                
-                # 获取所有OBSID
-                obsids = df['obsid'].values
-                logger.info(f"从CSV文件加载了{len(obsids)}个OBSID")
-                
-                # 处理每个OBSID对应的光谱
-                spectra = []
-                valid_indices = []
-                
-                for i, obsid in enumerate(obsids):
-                    try:
-                        # 查找并读取FITS文件
-                        fits_file = preprocessor._find_fits_file(obsid)
-                        if fits_file is None:
-                            logger.warning(f"找不到OBSID为{obsid}的FITS文件")
-                            continue
-                            
-                        # 读取和预处理光谱
-                        wavelength, flux, _ = preprocessor.read_fits_file(fits_file)
-                        if wavelength is None or flux is None:
-                            logger.warning(f"无法读取FITS文件: {fits_file}")
-                            continue
+                # 优先尝试导入preprocessdata7模块
+                import importlib
+                try:
+                    pp7 = importlib.import_module('preprocessdata7')
+                    if hasattr(pp7, 'LAMOSTPreprocessor'):
+                        logger.info("使用preprocessdata7.LAMOSTPreprocessor处理FITS数据")
+                        preprocessor = pp7.LAMOSTPreprocessor()
                         
-                        # 预处理光谱数据
-                        processed_data = preprocessor.process_single_spectrum(obsid, None)
-                        if processed_data and 'spectrum' in processed_data:
-                            spectra.append(processed_data['spectrum'])
-                            valid_indices.append(i)
-                        else:
-                            logger.warning(f"处理OBSID为{obsid}的光谱失败")
-                    except Exception as e:
-                        logger.warning(f"处理OBSID为{obsid}的光谱时出错: {str(e)}")
-                
-                if not spectra:
-                    logger.error("没有成功处理任何光谱")
-                    return None, None
+                        # 获取所有ID
+                        ids = df[id_col].values
+                        logger.info(f"从CSV文件加载了{len(ids)}个{id_col}")
+                        
+                        # 处理每个ID对应的光谱
+                        spectra = []
+                        valid_indices = []
+                        
+                        for i, id_value in enumerate(ids):
+                            try:
+                                # 查找并读取FITS文件
+                                fits_file = preprocessor._find_fits_file(id_value)
+                                if fits_file is None:
+                                    logger.warning(f"找不到ID为{id_value}的FITS文件")
+                                    continue
+                                    
+                                # 处理光谱数据
+                                processed_data = preprocessor.process_single_spectrum(fits_file, None)
+                                if processed_data and 'spectrum' in processed_data:
+                                    spectra.append(processed_data['spectrum'])
+                                    valid_indices.append(i)
+                                else:
+                                    logger.warning(f"处理ID为{id_value}的光谱失败")
+                            except Exception as e:
+                                logger.warning(f"处理ID为{id_value}的光谱时出错: {str(e)}")
+                        
+                        if not spectra:
+                            logger.error("没有成功处理任何光谱")
+                            return None, None
+                            
+                        spectra = np.array(spectra)
+                        logger.info(f"成功处理{len(spectra)}个光谱，形状: {spectra.shape}")
+                        
+                        # 获取有效的元数据
+                        metadata = df.iloc[valid_indices].reset_index(drop=True) if len(df.columns) > 1 else None
+                        
+                        # 保存到缓存
+                        cache_manager.set_cache(cache_key, {
+                            'spectra': spectra,
+                            'metadata': metadata
+                        })
+                        
+                        return spectra, metadata
+                except (ImportError, ModuleNotFoundError):
+                    logger.warning("无法导入preprocessdata7模块，尝试使用原始方法")
                     
-                spectra = np.array(spectra)
-                logger.info(f"成功处理{len(spectra)}个光谱，形状: {spectra.shape}")
-                
-                # 获取有效的元数据
-                metadata = df.iloc[valid_indices].reset_index(drop=True) if len(df.columns) > 1 else None
-                
-                # 保存到缓存
-                cache_manager.set_cache(cache_key, {
-                    'spectra': spectra,
-                    'metadata': metadata
-                })
-                
-                return spectra, metadata
-                
+                # 如果无法使用preprocessdata7，回退到原始方法
+                # 从preprocessdata.py导入相关功能
+                try:
+                    from preprocessdata7 import LAMOSTPreprocessor
+                    preprocessor = LAMOSTPreprocessor()
+                    
+                    # 获取所有OBSID
+                    obsids = df[id_col].values
+                    logger.info(f"从CSV文件加载了{len(obsids)}个{id_col}")
+                    
+                    # 处理每个OBSID对应的光谱
+                    spectra = []
+                    valid_indices = []
+                    
+                    for i, obsid in enumerate(obsids):
+                        try:
+                            # 查找并读取FITS文件
+                            fits_file = preprocessor._find_fits_file(obsid)
+                            if fits_file is None:
+                                logger.warning(f"找不到ID为{obsid}的FITS文件")
+                                continue
+                                
+                            # 读取和预处理光谱
+                            wavelength, flux, _ = preprocessor.read_fits_file(fits_file)
+                            if wavelength is None or flux is None:
+                                logger.warning(f"无法读取FITS文件: {fits_file}")
+                                continue
+                            
+                            # 预处理光谱数据
+                            processed_data = preprocessor.process_single_spectrum(obsid, None)
+                            if processed_data and 'spectrum' in processed_data:
+                                spectra.append(processed_data['spectrum'])
+                                valid_indices.append(i)
+                            else:
+                                logger.warning(f"处理ID为{obsid}的光谱失败")
+                        except Exception as e:
+                            logger.warning(f"处理ID为{obsid}的光谱时出错: {str(e)}")
+                    
+                    if not spectra:
+                        logger.error("没有成功处理任何光谱")
+                        return None, None
+                        
+                    spectra = np.array(spectra)
+                    logger.info(f"成功处理{len(spectra)}个光谱，形状: {spectra.shape}")
+                    
+                    # 获取有效的元数据
+                    metadata = df.iloc[valid_indices].reset_index(drop=True) if len(df.columns) > 1 else None
+                    
+                    # 保存到缓存
+                    cache_manager.set_cache(cache_key, {
+                        'spectra': spectra,
+                        'metadata': metadata
+                    })
+                    
+                    return spectra, metadata
+                    
+                except (ImportError, ModuleNotFoundError):
+                    logger.error("无法导入预处理模块，无法处理FITS文件")
+                    return None, None
             except Exception as e:
                 logger.error(f"处理CSV文件中的光谱数据失败: {str(e)}")
                 import traceback

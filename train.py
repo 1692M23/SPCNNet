@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 import numpy as np
 from tqdm import tqdm
 from config import Config
-from preprocessing import LAMOSTDataset
+from preprocessdata7 import LAMOSTDataset
 
 class LAMOSTNet(nn.Module):
     def __init__(self, input_size, hidden_size=128):
