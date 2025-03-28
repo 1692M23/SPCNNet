@@ -304,8 +304,8 @@ def train(model, train_loader, val_loader, config, device, element, resume_from=
     
     # 设置优化器和学习率调度器
     optimizer = optim.Adam(model.parameters(), 
-                          lr=config.training_config['learning_rate'], 
-                          weight_decay=config.training_config['weight_decay'])
+                          lr=config.training_config.get('lr', 0.0005),  # 使用get方法并提供默认值
+                          weight_decay=config.training_config.get('weight_decay', 0.0001))
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
     
     # 设置损失函数
@@ -313,7 +313,7 @@ def train(model, train_loader, val_loader, config, device, element, resume_from=
     
     # 设置早停
     best_val_loss = float('inf')
-    patience = config.training_config['early_stopping_patience']
+    patience = config.training_config.get('early_stopping_patience', 10)
     patience_counter = 0
     
     # 训练记录
@@ -336,7 +336,7 @@ def train(model, train_loader, val_loader, config, device, element, resume_from=
     for param in model.fc.parameters():
         param.requires_grad = False
     
-    for epoch in range(start_epoch, config.training_config['num_epochs']):
+    for epoch in range(start_epoch, config.training_config.get('num_epochs', 100)):
         model.train()
         total_loss = 0
         batch_count = 0
