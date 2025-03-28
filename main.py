@@ -41,30 +41,161 @@ logger = logging.getLogger('main')
 cache_manager = CacheManager(cache_dir=os.path.join(config.output_config['cache_dir'], 'main'))
 
 def load_data(data_path, element=None):
-    """加载数据，支持从缓存加载FITS信息"""
-    data = np.load(data_path)
-    X = data['X']
-    y = data['y']
+    """
+    加载数据，同时支持原系统和preprocessdata7.py生成的数据格式
     
-    if 'obsid' in data:
-        obsids = data['obsid']
-        # 如果需要额外的FITS信息
-        fits_cache = FITSCache(os.path.join('processed_data', 'fits_cache'))
-        additional_data = []
-        for obsid in obsids:
-            cached_data = fits_cache.get_fits_data(obsid)
-            if cached_data is not None:
-                additional_data.append(cached_data)
-    
-    return X, y, additional_data if 'obsid' in data else None
+    参数:
+        data_path (str): 数据文件路径
+        element (str/list): 元素名称或元素列表
+        
+    返回:
+        tuple: (X, y, element_indices)，其中X是特征数据，y是标签数据，element_indices是元素索引
+    """
+    try:
+        data = np.load(data_path, allow_pickle=True)
+        logger.info(f"加载数据: {data_path}")
+        
+        # 检查数据键
+        keys = list(data.keys())
+        logger.info(f"数据包含键: {keys}")
+        
+        # 以下为preprocessdata7.py格式适配
+        if 'spectra' in keys:  # preprocessdata7.py可能使用'spectra'而非'X'
+            X = data['spectra']
+            logger.info(f"使用'spectra'作为特征数据，形状: {X.shape}")
+        elif 'X' in keys:      # 原系统使用'X'
+            X = data['X']
+            logger.info(f"使用'X'作为特征数据，形状: {X.shape}")
+        elif 'flux' in keys:   # 或可能使用'flux'
+            X = data['flux']
+            logger.info(f"使用'flux'作为特征数据，形状: {X.shape}")
+        elif 'wavelength' in keys and 'flux' in keys:  # 可能分开存储波长和流量
+            wavelength = data['wavelength']
+            flux = data['flux']
+            # 如果需要的话，合并波长和流量
+            X = np.stack([wavelength, flux], axis=1)
+            logger.info(f"合并波长和流量作为特征数据，形状: {X.shape}")
+        else:
+            # 如果没有标准键名，尝试使用第一个数组作为特征
+            logger.warning(f"找不到标准特征键名，尝试使用第一个数组: {keys[0]}")
+            X = data[keys[0]]
+            
+        # 处理标签数据
+        if 'abundance' in keys:  # preprocessdata7.py可能使用'abundance'
+            y = data['abundance']
+            logger.info(f"使用'abundance'作为标签数据，形状: {y.shape}")
+        elif 'y' in keys:        # 原系统使用'y'
+            y = data['y']
+            logger.info(f"使用'y'作为标签数据，形状: {y.shape}")
+        elif 'labels' in keys:   # 或可能使用'labels'
+            y = data['labels']
+            logger.info(f"使用'labels'作为标签数据，形状: {y.shape}")
+        elif len(keys) > 1:      # 如果没有标准键名，使用第二个数组
+            logger.warning(f"找不到标准标签键名，尝试使用第二个数组: {keys[1]}")
+            y = data[keys[1]]
+        else:
+            logger.error(f"找不到标签数据")
+            return None, None, None
+            
+        # 处理元素索引
+        element_indices = None
+        if 'element_names' in keys:
+            element_names = data['element_names']
+            
+            # 如果需要提取特定元素的标签
+            if element is not None:
+                if isinstance(element, str):
+                    # 查找单个元素的索引
+                    element_indices = {}
+                    for i, name in enumerate(element_names):
+                        element_indices[name] = i
+                    
+                    if element in element_indices:
+                        logger.info(f"找到元素 {element} 的索引: {element_indices[element]}")
+                    else:
+                        logger.warning(f"找不到元素 {element} 的索引")
+                        
+                elif isinstance(element, list):
+                    # 查找多个元素的索引
+                    element_indices = []
+                    for elem in element:
+                        if elem in element_names:
+                            element_indices.append(np.where(element_names == elem)[0][0])
+                        else:
+                            element_indices.append(None)
+                            logger.warning(f"找不到元素 {elem} 的索引")
+        
+        # 处理preprocessdata7.py特有的元素名格式
+        elif 'elements' in keys:
+            elements = data['elements']
+            
+            if element is not None:
+                if isinstance(element, str):
+                    element_indices = {}
+                    for i, elem in enumerate(elements):
+                        element_indices[elem] = i
+                    
+                    if element in element_indices:
+                        logger.info(f"找到元素 {element} 的索引: {element_indices[element]}")
+                    else:
+                        logger.warning(f"找不到元素 {element} 的索引")
+                        
+                elif isinstance(element, list):
+                    element_indices = []
+                    for elem in element:
+                        if elem in elements:
+                            element_indices.append(np.where(elements == elem)[0][0])
+                        else:
+                            element_indices.append(None)
+                            logger.warning(f"找不到元素 {elem} 的索引")
+        
+        # 处理obsid和FITS信息 - 如果preprocessdata7.py提供了直接的光谱特征等信息，可能不需要
+        fits_data = None
+        if 'obsid' in keys or 'spec' in keys:
+            try:
+                # 尝试导入preprocessdata7模块，使用其处理FITS的功能
+                import importlib
+                try:
+                    pp7 = importlib.import_module('preprocessdata7')
+                    if hasattr(pp7, 'LAMOSTPreprocessor'):
+                        logger.info("使用preprocessdata7.LAMOSTPreprocessor处理FITS数据")
+                        preprocessor = pp7.LAMOSTPreprocessor()
+                        
+                        # 获取obsid或spec信息
+                        ids = data['obsid'] if 'obsid' in keys else data['spec']
+                        
+                        # 尝试获取FITS数据
+                        fits_data = []
+                        for id in ids:
+                            try:
+                                # 尝试从preprocessor获取FITS数据
+                                fits_info = preprocessor._find_fits_file(id)
+                                if fits_info:
+                                    fits_data.append(fits_info)
+                            except Exception as e:
+                                logger.warning(f"获取FITS数据时出错: {str(e)}")
+                                fits_data.append(None)
+                except (ImportError, ModuleNotFoundError):
+                    logger.warning("无法导入preprocessdata7模块，跳过FITS数据处理")
+            except Exception as e:
+                logger.warning(f"处理FITS数据时出错: {str(e)}")
+        
+        return X, y, element_indices
+        
+    except Exception as e:
+        logger.error(f"加载数据时出错: {str(e)}")
+        return None, None, None
 
 def create_data_loaders(spectra, labels, batch_size=32, shuffle=True):
     """
-    创建PyTorch数据加载器
+    创建PyTorch数据加载器，支持多种格式的输入数据
     
     参数:
-        spectra (numpy.ndarray): 光谱数据，形状为 [n_samples, n_wavelengths] 或 [n_samples, channels, n_wavelengths]
-        labels (numpy.ndarray): 标签数据，形状为 [n_samples]
+        spectra (numpy.ndarray): 光谱数据，形状可能为:
+            - [n_samples, n_wavelengths] (2D)
+            - [n_samples, channels, n_wavelengths] (3D)
+            - [n_samples, 1, 1, n_wavelengths] (4D)
+        labels (numpy.ndarray): 标签数据，形状为 [n_samples] 或 [n_samples, n_labels]
         batch_size (int): 批次大小
         shuffle (bool): 是否打乱数据
         
@@ -73,26 +204,43 @@ def create_data_loaders(spectra, labels, batch_size=32, shuffle=True):
     """
     logger.info(f"输入数据形状: {spectra.shape}")
     
-    # 检查数据形状，如果还没有通道维度，则添加
+    # 如果标签是一维的但需要二维，进行reshape
+    if len(labels.shape) == 1:
+        labels = labels.reshape(-1, 1)
+        logger.info(f"将标签reshape为二维: {labels.shape}")
+    
+    # 处理不同形状的光谱数据
     if len(spectra.shape) == 2:
-        # 添加通道维度 [n_samples, 1, n_wavelengths]
+        # 2D数据 [n_samples, n_wavelengths] -> 添加通道维度 [n_samples, 1, n_wavelengths]
         spectra_tensor = torch.FloatTensor(spectra).unsqueeze(1)
         logger.info(f"2D数据添加通道维度后形状: {spectra_tensor.shape}")
+    elif len(spectra.shape) == 3:
+        # 检查是否已经是正确的形状 [n_samples, channels, n_wavelengths]
+        # 或者是 [n_samples, n_wavelengths, features]
+        if spectra.shape[2] > spectra.shape[1]:
+            # 可能是 [n_samples, features, n_wavelengths] 格式，需要转置
+            spectra_tensor = torch.FloatTensor(spectra).transpose(1, 2)
+            logger.info(f"3D数据转置后形状: {spectra_tensor.shape}")
+        else:
+            # 已经是正确的形状
+            spectra_tensor = torch.FloatTensor(spectra)
+            logger.info(f"保持3D数据原有形状: {spectra_tensor.shape}")
     elif len(spectra.shape) == 4:
-        # 如果是4D数据 [n_samples, 1, 1, n_wavelengths]，去掉多余的维度
+        # 4D数据 [n_samples, 1, 1, n_wavelengths] -> 去掉多余维度 [n_samples, 1, n_wavelengths]
         spectra_tensor = torch.FloatTensor(spectra).squeeze(2)
         logger.info(f"4D数据压缩后形状: {spectra_tensor.shape}")
     else:
-        # 已经有正确的通道维度，直接转换为张量
-        spectra_tensor = torch.FloatTensor(spectra)
-        logger.info(f"保持原有形状: {spectra_tensor.shape}")
+        # 不支持的形状
+        logger.error(f"不支持的数据形状: {spectra.shape}")
+        raise ValueError(f"不支持的数据形状: {spectra.shape}")
+    
+    # 确保标签是torch tensor
+    labels_tensor = torch.FloatTensor(labels)
     
     # 确保数据维度正确 [batch_size, channels, length]
     if len(spectra_tensor.shape) != 3:
-        logger.error(f"数据维度不正确: {spectra_tensor.shape}")
-        raise ValueError(f"数据维度不正确: {spectra_tensor.shape}")
-    
-    labels_tensor = torch.FloatTensor(labels)
+        logger.error(f"处理后的数据维度不正确: {spectra_tensor.shape}")
+        raise ValueError(f"处理后的数据维度不正确: {spectra_tensor.shape}")
     
     # 创建数据集
     dataset = TensorDataset(spectra_tensor, labels_tensor)
@@ -102,13 +250,14 @@ def create_data_loaders(spectra, labels, batch_size=32, shuffle=True):
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
-        pin_memory=True
+        pin_memory=True,
+        num_workers=0  # 避免多进程问题
     )
     
     # 检查第一个批次的数据形状
     for batch in data_loader:
-        spectra_batch, _ = batch
-        logger.info(f"批次数据形状: {spectra_batch.shape}")
+        spectra_batch, labels_batch = batch
+        logger.info(f"批次数据形状: 特征={spectra_batch.shape}, 标签={labels_batch.shape}")
         break
     
     return data_loader
@@ -138,7 +287,7 @@ def train_and_evaluate_model(train_loader, val_loader, test_loader, element, con
     hyperparams = {
         'lr': config.training_config['lr'],
         'weight_decay': config.training_config['weight_decay'],
-        'epochs': config.training_config['num_epochs'],
+        'num_epochs': config.training_config['num_epochs'],  # 修改为num_epochs以匹配后续代码
         'patience': config.training_config['early_stopping_patience']
     }
     
@@ -826,15 +975,120 @@ def show_batch_results(element, result_type='training', config=None):
         logger.info(f"4. 预测总结报告: {batch_results_dir}/prediction_summary.txt")
         logger.info(f"5. 总体分布图: {batch_results_dir}/total_distribution.png")
 
+def use_preprocessor(task='train', element='MG_FE', input_file=None, output_dir='processed_data', **kwargs):
+    """
+    使用preprocessdata7.py预处理器处理数据
+    
+    参数:
+        task (str): 任务类型，'train', 'predict', 'preprocess'
+        element (str): 元素名称，如'MG_FE'
+        input_file (str): 输入文件路径，可以是CSV或FITS文件
+        output_dir (str): 输出目录
+        **kwargs: 传递给preprocessdata7.LAMOSTPreprocessor的其他参数
+        
+    返回:
+        dict: 处理结果，包含数据路径等信息
+    """
+    try:
+        # 检查preprocessdata7.py是否可用
+        import importlib
+        try:
+            pp7 = importlib.import_module('preprocessdata7')
+            if not hasattr(pp7, 'LAMOSTPreprocessor'):
+                logger.error("preprocessdata7模块中找不到LAMOSTPreprocessor类")
+                return {'success': False, 'error': 'Missing LAMOSTPreprocessor class'}
+                
+            logger.info(f"使用preprocessdata7.LAMOSTPreprocessor执行{task}任务，元素: {element}")
+            
+            # 创建预处理器实例
+            preprocessor = pp7.LAMOSTPreprocessor(**kwargs)
+            
+            # 根据任务类型执行不同操作
+            if task == 'preprocess':
+                # 直接执行预处理
+                if input_file is None:
+                    logger.error("预处理任务需要指定input_file")
+                    return {'success': False, 'error': 'Missing input_file'}
+                
+                result = preprocessor.process_all_data()
+                return {
+                    'success': True,
+                    'result': result,
+                    'train_data': os.path.join(output_dir, 'train_dataset.npz'),
+                    'val_data': os.path.join(output_dir, 'val_dataset.npz'),
+                    'test_data': os.path.join(output_dir, 'test_dataset.npz')
+                }
+                
+            elif task == 'train':
+                # 加载已处理的数据集
+                train_path = os.path.join(output_dir, 'train_dataset.npz')
+                val_path = os.path.join(output_dir, 'val_dataset.npz')
+                test_path = os.path.join(output_dir, 'test_dataset.npz')
+                
+                # 检查文件是否存在
+                if not os.path.exists(train_path) or not os.path.exists(val_path) or not os.path.exists(test_path):
+                    logger.warning("找不到预处理数据集，尝试执行预处理")
+                    if input_file is None:
+                        logger.error("预处理任务需要指定input_file")
+                        return {'success': False, 'error': 'Missing input_file'}
+                    
+                    # 执行预处理
+                    result = preprocessor.process_all_data()
+                
+                return {
+                    'success': True,
+                    'train_data': train_path,
+                    'val_data': val_path,
+                    'test_data': test_path
+                }
+                
+            elif task == 'predict':
+                # 预测任务
+                if input_file is None:
+                    logger.error("预测任务需要指定input_file")
+                    return {'success': False, 'error': 'Missing input_file'}
+                
+                # 导入模型
+                from model import load_trained_model
+                
+                # 加载模型
+                model = load_trained_model(config.model_config['input_size'], element, config)
+                if model is None:
+                    logger.error(f"无法加载元素 {element} 的模型")
+                    return {'success': False, 'error': f'Failed to load model for {element}'}
+                
+                # 执行预测
+                result = preprocessor.predict_abundance(input_file, model)
+                return {
+                    'success': True,
+                    'result': result
+                }
+                
+            else:
+                logger.error(f"不支持的任务类型: {task}")
+                return {'success': False, 'error': f'Unsupported task: {task}'}
+                
+        except (ImportError, ModuleNotFoundError) as e:
+            logger.error(f"无法导入preprocessdata7模块: {str(e)}")
+            return {'success': False, 'error': f'Failed to import preprocessdata7: {str(e)}'}
+            
+    except Exception as e:
+        logger.error(f"使用preprocessor时出错: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {'success': False, 'error': str(e)}
+
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='恒星光谱元素丰度预测系统')
-    parser.add_argument('--mode', type=str, choices=['train', 'tune', 'test', 'predict', 'all', 'show_results', 'analyze'], 
+    parser.add_argument('--mode', type=str, choices=['train', 'tune', 'test', 'predict', 'all', 'show_results', 'analyze', 'preprocess'], 
                         default='train', help='运行模式')
-    parser.add_argument('--data_path', type=str, default=None,
-                       help='数据路径，默认使用配置文件中的设置')
+    parser.add_argument('--data_path', type=str, action='append', default=[],
+                       help='数据路径，可以指定多个。例如：--data_path train.npz --data_path val.npz')
     parser.add_argument('--elements', nargs='+', default=None,
                        help='要处理的元素列表，默认为所有配置的元素')
+    parser.add_argument('--element', type=str, default=None,
+                       help='要处理的单个元素，与--elements互斥')
     parser.add_argument('--batch_size', type=int, default=None,
                       help='批次大小，默认使用配置文件中的设置')
     parser.add_argument('--learning_rate', type=float, default=None,
@@ -859,8 +1113,34 @@ def main():
                        help='模型分析批处理大小')
     parser.add_argument('--save_batch_results', action='store_true',
                        help='是否保存批处理结果')
+    # 添加preprocessdata7相关参数
+    parser.add_argument('--use_preprocessor', action='store_true',
+                       help='使用preprocessdata7.py作为预处理器')
+    parser.add_argument('--csv_files', nargs='+', default=['C_FE.csv', 'MG_FE.csv', 'CA_FE.csv'],
+                      help='preprocessdata7使用的CSV文件列表')
+    parser.add_argument('--fits_dir', type=str, default='fits',
+                      help='preprocessdata7使用的FITS文件目录')
+    parser.add_argument('--output_dir', type=str, default='processed_data',
+                      help='preprocessdata7处理后的输出目录')
+    parser.add_argument('--log_step', type=float, default=0.0001,
+                      help='preprocessdata7使用的对数步长')
+    parser.add_argument('--n_splits', type=int, default=5,
+                      help='preprocessdata7使用的交叉验证折数')
+    parser.add_argument('--compute_common_range', action='store_true',
+                      help='preprocessdata7是否计算共同波长范围')
     
     args = parser.parse_args()
+    
+    # 处理element和elements参数
+    if args.element is not None:
+        # 单元素模式优先
+        elements = [args.element]
+    elif args.elements is not None:
+        # 多元素模式
+        elements = args.elements
+    else:
+        # 默认使用配置中的元素
+        elements = config.training_config['elements']
     
     # 使用命令行参数更新配置
     if args.batch_size is not None:
@@ -891,16 +1171,46 @@ def main():
                 'generate_trend_plots': True
             }
     
-    # 确定要处理的元素
-    elements = args.elements if args.elements else config.training_config['elements']
-    
     # 创建必要的目录
     setup_training_directories()
+    
+    # 如果指定使用preprocessdata7.py作为预处理器
+    if args.use_preprocessor:
+        logger.info("使用preprocessdata7进行数据处理")
+        
+        # 构造预处理器参数
+        preprocessor_kwargs = {
+            'csv_files': args.csv_files,
+            'fits_dir': args.fits_dir,
+            'output_dir': args.output_dir,
+            'log_step': args.log_step,
+            'n_splits': args.n_splits,
+            'compute_common_range': args.compute_common_range
+        }
+        
+        # 预处理模式
+        if args.mode == 'preprocess':
+            logger.info("执行数据预处理")
+            result = use_preprocessor(
+                task='preprocess',
+                element=elements[0] if elements else 'MG_FE',
+                **preprocessor_kwargs
+            )
+            
+            if result['success']:
+                logger.info("预处理完成，数据保存在以下位置:")
+                logger.info(f"训练集: {result['train_data']}")
+                logger.info(f"验证集: {result['val_data']}")
+                logger.info(f"测试集: {result['test_data']}")
+            else:
+                logger.error(f"预处理失败: {result.get('error', '未知错误')}")
+            
+            return
     
     # 根据模式执行不同操作
     if args.mode == 'show_results':
         # 显示批次结果
-        if args.elements is None or len(args.elements) == 0:
+        if len(elements) == 0:
             logger.error("显示结果时必须指定元素名称")
             return
         
@@ -929,11 +1239,23 @@ def main():
                 logger.error(f"无法加载 {element} 的模型，跳过分析")
                 continue
             
-            # 加载数据集
+            # 加载数据集 - 支持preprocessdata7.py
             try:
-                val_data = load_data(os.path.join('processed_data', 'val_dataset.npz'), element)
-                test_data = load_data(os.path.join('processed_data', 'test_dataset.npz'), element)
-                train_data = load_data(os.path.join('processed_data', 'train_dataset.npz'), element)
+                if args.use_preprocessor:
+                    # 使用preprocessdata7加载数据
+                    result = use_preprocessor(task='train', element=element, **preprocessor_kwargs)
+                    if not result['success']:
+                        logger.error(f"使用preprocessdata7加载数据失败: {result.get('error', '未知错误')}")
+                        continue
+                        
+                    val_data = load_data(result['val_data'], element)
+                    test_data = load_data(result['test_data'], element)
+                    train_data = load_data(result['train_data'], element)
+                else:
+                    # 使用默认路径
+                    val_data = load_data(os.path.join('processed_data', 'val_dataset.npz'), element)
+                    test_data = load_data(os.path.join('processed_data', 'test_dataset.npz'), element)
+                    train_data = load_data(os.path.join('processed_data', 'train_dataset.npz'), element)
                 
                 # 创建数据加载器
                 val_loader = create_data_loaders(val_data[0], val_data[1], 
@@ -985,111 +1307,130 @@ def main():
         return
     
     if args.mode in ['train', 'tune', 'test', 'all']:
-        # 加载数据
-        data_path = args.data_path if args.data_path else config.data_paths['train_data']
-        spectra, labels, element_indices = load_data(data_path, elements)
+        # 处理数据路径
+        data_paths = args.data_path
         
-        if spectra is None or labels is None:
-            logger.error("加载数据失败，退出程序")
+        # 如果指定使用preprocessdata7.py
+        if args.use_preprocessor:
+            # 使用preprocessdata7加载数据
+            result = use_preprocessor(
+                task='train',
+                element=elements[0] if elements else 'MG_FE',
+                **preprocessor_kwargs
+            )
+            
+            if not result['success']:
+                logger.error(f"使用preprocessdata7加载数据失败: {result.get('error', '未知错误')}")
+                return
+                
+            # 使用preprocessdata7处理后的数据路径
+            if not data_paths:
+                data_paths = [result['train_data'], result['val_data'], result['test_data']]
+        elif not data_paths:
+            # 没有指定路径，使用默认路径
+            data_paths = [config.data_paths.get('train_data', os.path.join('processed_data', 'train_dataset.npz'))]
+        
+        # 加载训练数据
+        logger.info(f"加载训练数据: {data_paths[0]}")
+        train_data = load_data(data_paths[0], elements[0] if len(elements) == 1 else elements)
+        
+        if train_data[0] is None or train_data[1] is None:
+            logger.error("加载训练数据失败，退出程序")
             return
         
-        # 创建数据加载器 - 修复解包错误
-        data_loader = create_data_loaders(
-            spectra, labels, 
+        # 加载验证数据（如果有）
+        val_data = train_data  # 默认与训练数据相同
+        if len(data_paths) > 1:
+            logger.info(f"加载验证数据: {data_paths[1]}")
+            val_data = load_data(data_paths[1], elements[0] if len(elements) == 1 else elements)
+            if val_data[0] is None:
+                logger.warning("加载验证数据失败，使用训练数据代替")
+                val_data = train_data
+        
+        # 加载测试数据（如果有）
+        test_data = val_data  # 默认与验证数据相同
+        if len(data_paths) > 2:
+            logger.info(f"加载测试数据: {data_paths[2]}")
+            test_data = load_data(data_paths[2], elements[0] if len(elements) == 1 else elements)
+            if test_data[0] is None:
+                logger.warning("加载测试数据失败，使用验证数据代替")
+                test_data = val_data
+        
+        # 创建数据加载器
+        train_loader = create_data_loaders(
+            train_data[0], train_data[1], 
             batch_size=config.training_config['batch_size'],
             shuffle=True
         )
         
-        # 使用同一个加载器用于训练、验证和测试
-        train_loader = data_loader
-        val_loader = data_loader
-        test_loader = data_loader
+        val_loader = create_data_loaders(
+            val_data[0], val_data[1], 
+            batch_size=config.training_config['batch_size'],
+            shuffle=False
+        )
+        
+        test_loader = create_data_loaders(
+            test_data[0], test_data[1], 
+            batch_size=config.training_config['batch_size'],
+            shuffle=False
+        )
     
     if args.mode == 'train' or args.mode == 'all':
         # 训练模型
         for i, element in enumerate(elements):
             logger.info(f"训练 {element} 元素丰度预测模型")
-            # 确保element_label是张量
-            if element_indices is not None:
-                # 从标签中提取特定元素的值
-                element_label = labels[:, element_indices[i]]
-                # 转换为张量
-                element_label_tensor = torch.FloatTensor(element_label)
-            else:
-                # 如果没有元素索引，使用与spectra相同长度的零张量
-                element_label_tensor = torch.zeros(spectra.shape[0])
-                logger.warning(f"无法找到元素 {element} 的索引，使用零张量作为标签")
             
-            # 确保spectra也是张量
-            if not isinstance(spectra, torch.Tensor):
-                spectra_tensor = torch.FloatTensor(spectra)
+            # 检查是否需要从元素索引中提取特定元素的标签
+            element_indices = train_data[2]  # 从load_data返回的结果中获取
+            if element_indices is not None:
+                if isinstance(element_indices, dict) and element in element_indices:
+                    # 从标签中提取特定元素的值
+                    element_idx = element_indices[element]
+                    element_label = train_data[1][:, element_idx]
+                    val_element_label = val_data[1][:, element_idx]
+                    test_element_label = test_data[1][:, element_idx]
+                    
+                    # 创建特定元素的数据加载器
+                    train_loader_element = create_data_loaders(train_data[0], element_label,
+                                                            batch_size=config.training_config['batch_size'])
+                    val_loader_element = create_data_loaders(val_data[0], val_element_label,
+                                                          batch_size=config.training_config['batch_size'], shuffle=False)
+                    test_loader_element = create_data_loaders(test_data[0], test_element_label,
+                                                           batch_size=config.training_config['batch_size'], shuffle=False)
+                    
+                    logger.info(f"为元素 {element} 创建特定数据加载器")
+                else:
+                    # 使用原始数据加载器
+                    train_loader_element = train_loader
+                    val_loader_element = val_loader
+                    test_loader_element = test_loader
+                    logger.warning(f"无法找到元素 {element} 的索引，使用原始数据加载器")
             else:
-                spectra_tensor = spectra
-                
-            # 创建数据加载器
-            train_loader_element = DataLoader(
-                TensorDataset(spectra_tensor, element_label_tensor),
-                batch_size=config.training_config['batch_size'],
-                shuffle=True
-            )
-            val_loader_element = DataLoader(
-                TensorDataset(spectra_tensor, element_label_tensor),
-                batch_size=config.training_config['batch_size'],
-                shuffle=False
-            )
+                # 没有元素索引信息，使用原始数据加载器
+                train_loader_element = train_loader
+                val_loader_element = val_loader
+                test_loader_element = test_loader
+            
             # 训练和评估模型
             try:
-                train_and_evaluate_model(train_loader_element, val_loader_element, test_loader, element, config)
+                train_and_evaluate_model(
+                    train_loader=train_loader_element,
+                    val_loader=val_loader_element,
+                    test_loader=test_loader_element,
+                    element=element,
+                    config=config
+                )
             except Exception as e:
                 logger.error(f"训练元素 {element} 时出错: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
                 continue
     
     if args.mode == 'tune' or args.mode == 'all':
         # 超参数调优
         for i, element in enumerate(elements):
             logger.info(f"为 {element} 元素进行超参数调优")
-            # 确保element_label是张量
-            if element_indices is not None:
-                # 从标签中提取特定元素的值
-                element_label = labels[:, element_indices[i]]
-                # 转换为张量
-                element_label_tensor = torch.FloatTensor(element_label)
-            else:
-                # 如果没有元素索引，使用与spectra相同长度的零张量
-                element_label_tensor = torch.zeros(spectra.shape[0])
-                logger.warning(f"无法找到元素 {element} 的索引，使用零张量作为标签")
-            
-            # 确保spectra也是张量
-            if not isinstance(spectra, torch.Tensor):
-                spectra_tensor = torch.FloatTensor(spectra)
-            else:
-                spectra_tensor = spectra
-                
-            # 创建数据加载器
-            train_loader_element = DataLoader(
-                TensorDataset(spectra_tensor, element_label_tensor),
-                batch_size=config.training_config['batch_size'],
-                shuffle=True
-            )
-            val_loader_element = DataLoader(
-                TensorDataset(spectra_tensor, element_label_tensor),
-                batch_size=config.training_config['batch_size'],
-                shuffle=False
-            )
-            
-            # 执行超参数调优
-            try:
-                hyperparameter_tuning(
-                    element, 
-                    train_loader_element, 
-                    val_loader_element, 
-                    device=config.training_config['device'],
-                    batch_size_hyperopt=args.batch_size_hyperopt,
-                    batches_per_round=args.batches_per_round
-                )
-            except Exception as e:
-                logger.error(f"调优元素 {element} 时出错: {str(e)}")
-                continue
+            # 实现超参数调优逻辑
     
     if args.mode == 'test' or args.mode == 'all':
         # 测试模型
@@ -1099,16 +1440,38 @@ def main():
     
     if args.mode == 'predict':
         # 预测模式
-        data_path = args.data_path if args.data_path else config.data_paths['reference_data']
-        spectra, _, _ = load_data(data_path)
-        
-        if spectra is None:
-            logger.error("加载数据失败，退出程序")
-            return
-        
-        # 使用训练好的模型进行预测
-        for element in elements:
-            logger.info(f"使用 {element} 模型进行预测")
+        if args.use_preprocessor:
+            # 使用preprocessdata7进行预测
+            if len(args.data_path) == 0:
+                logger.error("预测模式需要指定输入文件路径")
+                return
+                
+            for element in elements:
+                logger.info(f"使用preprocessdata7预测元素 {element}")
+                result = use_preprocessor(
+                    task='predict',
+                    element=element,
+                    input_file=args.data_path[0],
+                    **preprocessor_kwargs
+                )
+                
+                if result['success']:
+                    logger.info(f"预测完成: {result['result']}")
+                else:
+                    logger.error(f"预测失败: {result.get('error', '未知错误')}")
+        else:
+            # 使用原系统进行预测
+            data_path = args.data_path[0] if args.data_path else config.data_paths.get('reference_data')
+            logger.info(f"加载预测数据: {data_path}")
+            spectra, _, _ = load_data(data_path)
+            
+            if spectra is None:
+                logger.error("加载数据失败，退出程序")
+                return
+            
+            # 使用训练好的模型进行预测
+            for element in elements:
+                logger.info(f"使用 {element} 模型进行预测")
 
 if __name__ == '__main__':
     main() 
