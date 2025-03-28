@@ -87,6 +87,7 @@ training_config = {
     'weight_decay': 1e-4,
     'early_stopping_patience': 10,
     'elements': ['C_FE', 'MG_FE', 'CA_FE'],  # 要预测的元素列表
+    'tune_hyperparams': False,  # 是否进行超参数调优
     'batch_processing': {
         'enabled': True,  # 是否启用批处理
         'save_results_per_epoch': True,  # 是否每个epoch保存结果

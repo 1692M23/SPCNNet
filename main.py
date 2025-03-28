@@ -303,14 +303,31 @@ def train_and_evaluate_model(train_loader, val_loader, test_loader, element, con
     """
     训练和评估模型的主函数
     """
+    # 检查数据加载器
+    logger = logging.getLogger('main')
+    logger.info(f"检查{element}的数据加载器...")
+    
+    # 检查训练集
+    train_data = next(iter(train_loader))
+    logger.info(f"训练集批次形状: 数据={train_data[0].shape}, 标签={train_data[1].shape}")
+    logger.info(f"训练集数据范围: [{train_data[0].min():.6f}, {train_data[0].max():.6f}]")
+    logger.info(f"训练集标签范围: [{train_data[1].min():.6f}, {train_data[1].max():.6f}]")
+    
+    # 检查验证集
+    val_data = next(iter(val_loader))
+    logger.info(f"验证集批次形状: 数据={val_data[0].shape}, 标签={val_data[1].shape}")
+    logger.info(f"验证集数据范围: [{val_data[0].min():.6f}, {val_data[0].max():.6f}]")
+    logger.info(f"验证集标签范围: [{val_data[1].min():.6f}, {val_data[1].max():.6f}]")
+    
     # 创建模型
     model = SpectralResCNN(config.model_config['input_size']).to(config.training_config['device'])
+    logger.info(f"模型结构:\n{model}")
     
     # 设置超参数
     hyperparams = {
         'lr': config.training_config['lr'],
         'weight_decay': config.training_config['weight_decay'],
-        'num_epochs': config.training_config['num_epochs'],  # 修改为num_epochs以匹配后续代码
+        'num_epochs': config.training_config['num_epochs'],
         'patience': config.training_config['early_stopping_patience']
     }
     
@@ -319,8 +336,20 @@ def train_and_evaluate_model(train_loader, val_loader, test_loader, element, con
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
-        element=element,
-        config=config
+        config={
+            'training': {
+                'lr': hyperparams['lr'],
+                'weight_decay': hyperparams['weight_decay'],
+                'num_epochs': hyperparams['num_epochs'],
+                'early_stopping_patience': hyperparams['patience'],
+                'device': config.training_config['device']
+            },
+            'model_config': {
+                'model_dir': config.model_config['model_dir']
+            }
+        },
+        device=config.training_config['device'],
+        element=element
     )
     
     # 获取最佳验证损失

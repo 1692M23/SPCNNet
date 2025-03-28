@@ -298,14 +298,14 @@ def _save_checkpoint(model, optimizer, scheduler, epoch, loss, element, config):
         'loss': loss,
     }, model_path)
 
-def train(model, train_loader, val_loader, config, device, element, resume_from=None):
+def train(model, train_loader, val_loader, config, device, element):
     """训练模型"""
     logger = logging.getLogger('model')
     
     # 设置优化器和学习率调度器
     optimizer = optim.Adam(model.parameters(), 
-                          lr=config.training_config.get('lr', 0.0005),  # 使用get方法并提供默认值
-                          weight_decay=config.training_config.get('weight_decay', 0.0001))
+                          lr=config['training']['lr'],
+                          weight_decay=config['training']['weight_decay'])
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
     
     # 设置损失函数
@@ -313,30 +313,23 @@ def train(model, train_loader, val_loader, config, device, element, resume_from=
     
     # 设置早停
     best_val_loss = float('inf')
-    patience = config.training_config.get('early_stopping_patience', 10)
+    patience = config['training']['early_stopping_patience']
     patience_counter = 0
     
     # 训练记录
     train_losses = []
     val_losses = []
     
-    # 恢复训练
-    start_epoch = 0
-    if resume_from and os.path.exists(resume_from):
-        checkpoint = torch.load(resume_from)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        start_epoch = checkpoint['epoch']
-        best_val_loss = checkpoint['val_loss']
-        logger.info(f"从检查点恢复训练，起始轮次: {start_epoch}")
-    
-    # 第一阶段：只训练特征提取器
+    # 第一阶段：只训练特征提取器的前几层
     logger.info("开始第一阶段训练 - 特征提取器")
-    for param in model.fc.parameters():
+    
+    # 获取模型的所有参数
+    all_params = list(model.parameters())
+    # 冻结最后一层的参数
+    for param in all_params[-2:]:  # 最后一个线性层的权重和偏置
         param.requires_grad = False
     
-    for epoch in range(start_epoch, config.training_config.get('num_epochs', 100)):
+    for epoch in range(config['training']['num_epochs']):
         model.train()
         total_loss = 0
         batch_count = 0
@@ -346,29 +339,13 @@ def train(model, train_loader, val_loader, config, device, element, resume_from=
             
             # 检查数据是否包含NaN
             if torch.isnan(data).any() or torch.isnan(target).any():
-                logger.warning(f"检测到输入数据包含NaN值，跳过该批次")
+                logger.warning("检测到输入数据包含NaN值，跳过该批次")
                 continue
-                
+            
             optimizer.zero_grad()
             output = model(data)
-            
-            # 检查输出是否包含NaN
-            if torch.isnan(output).any():
-                logger.warning(f"检测到模型输出包含NaN值，跳过该批次")
-                continue
-                
             loss = criterion(output, target)
-            
-            # 检查损失值是否为NaN
-            if torch.isnan(loss):
-                logger.warning(f"检测到损失值为NaN，跳过该批次")
-                continue
-                
             loss.backward()
-            
-            # 梯度裁剪
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
             optimizer.step()
             
             total_loss += loss.item()
@@ -402,7 +379,7 @@ def train(model, train_loader, val_loader, config, device, element, resume_from=
             best_val_loss = val_loss
             patience_counter = 0
             # 保存最佳模型
-            save_model(model, optimizer, scheduler, epoch, val_loss, config['model_dir'], element)
+            save_model(model, optimizer, scheduler, epoch, val_loss, config['model_config']['model_dir'], element)
         else:
             patience_counter += 1
             if patience_counter >= patience:
@@ -411,18 +388,21 @@ def train(model, train_loader, val_loader, config, device, element, resume_from=
     
     # 第二阶段：微调全模型
     logger.info("开始第二阶段训练 - 全模型微调")
+    # 解冻所有层
     for param in model.parameters():
         param.requires_grad = True
     
     # 重置优化器和学习率
-    optimizer = optim.Adam(model.parameters(), lr=config.training_config['learning_rate'] * 0.1, weight_decay=config.training_config['weight_decay'])
+    optimizer = optim.Adam(model.parameters(), 
+                          lr=config['training']['lr'] * 0.1,
+                          weight_decay=config['training']['weight_decay'])
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2)
     
     # 重置早停
     best_val_loss = float('inf')
     patience_counter = 0
     
-    for epoch in range(config.training_config['num_epochs']):
+    for epoch in range(config['training']['num_epochs']):
         model.train()
         total_loss = 0
         batch_count = 0
@@ -430,31 +410,14 @@ def train(model, train_loader, val_loader, config, device, element, resume_from=
         for batch_idx, (data, target) in enumerate(train_loader):
             data, target = data.to(device), target.to(device)
             
-            # 检查数据是否包含NaN
             if torch.isnan(data).any() or torch.isnan(target).any():
-                logger.warning(f"检测到输入数据包含NaN值，跳过该批次")
+                logger.warning("检测到输入数据包含NaN值，跳过该批次")
                 continue
-                
+            
             optimizer.zero_grad()
             output = model(data)
-            
-            # 检查输出是否包含NaN
-            if torch.isnan(output).any():
-                logger.warning(f"检测到模型输出包含NaN值，跳过该批次")
-                continue
-                
             loss = criterion(output, target)
-            
-            # 检查损失值是否为NaN
-            if torch.isnan(loss):
-                logger.warning(f"检测到损失值为NaN，跳过该批次")
-                continue
-                
             loss.backward()
-            
-            # 梯度裁剪
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
             optimizer.step()
             
             total_loss += loss.item()
@@ -488,7 +451,7 @@ def train(model, train_loader, val_loader, config, device, element, resume_from=
             best_val_loss = val_loss
             patience_counter = 0
             # 保存最佳模型
-            save_model(model, optimizer, scheduler, epoch, val_loss, config['model_dir'], element)
+            save_model(model, optimizer, scheduler, epoch, val_loss, config['model_config']['model_dir'], element)
         else:
             patience_counter += 1
             if patience_counter >= patience:
@@ -601,13 +564,13 @@ def evaluate_model(model, test_loader, device=None):
             return {
                 'mse': mse,
                 'rmse': rmse,
-                'mae': mae,
+                        'mae': mae,
                 'r2': r2,
-                'r_value': r_value,
-                'slope': slope,
-                'intercept': intercept,
-                'std_err': std_err,
-                'p_value': p_value
+                        'r_value': r_value,
+                        'slope': slope,
+                        'intercept': intercept,
+                        'std_err': std_err,
+                        'p_value': p_value
             }
                 
         except Exception as e:
@@ -770,7 +733,7 @@ def load_trained_model(model_path, device=None):
         
         # 检查checkpoint是否包含模型架构信息
         if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-            # 创建模型实例
+        # 创建模型实例
             if 'model_config' in checkpoint:
                 config = checkpoint['model_config']
                 input_size = config.get('input_size', 1024)
@@ -1029,3 +992,104 @@ def save_model(model, optimizer, scheduler, epoch, val_loss, model_dir, element)
         'scheduler_state_dict': scheduler.state_dict(),
         'val_loss': val_loss,
     }, model_path) 
+
+class CNNModel(nn.Module):
+    def __init__(self, input_size):
+        """
+        初始化CNN模型
+        
+        参数:
+            input_size: 输入光谱的长度
+        """
+        super(CNNModel, self).__init__()
+        
+        # 计算卷积层输出大小
+        def conv_output_size(input_size, kernel_size, stride=1, padding=0):
+            return (input_size + 2 * padding - kernel_size) // stride + 1
+        
+        # 第一个卷积块
+        self.conv1 = nn.Sequential(
+            nn.Conv1d(1, 64, kernel_size=7, stride=1, padding=3),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2)
+        )
+        
+        # 第二个卷积块
+        self.conv2 = nn.Sequential(
+            nn.Conv1d(64, 128, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2)
+        )
+        
+        # 第三个卷积块
+        self.conv3 = nn.Sequential(
+            nn.Conv1d(128, 256, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2)
+        )
+        
+        # 计算展平后的特征维度
+        self.feature_size = input_size
+        self.feature_size = conv_output_size(self.feature_size, 7, 1, 3)  # conv1
+        self.feature_size = conv_output_size(self.feature_size, 2, 2, 0)  # pool1
+        self.feature_size = conv_output_size(self.feature_size, 5, 1, 2)  # conv2
+        self.feature_size = conv_output_size(self.feature_size, 2, 2, 0)  # pool2
+        self.feature_size = conv_output_size(self.feature_size, 3, 1, 1)  # conv3
+        self.feature_size = conv_output_size(self.feature_size, 2, 2, 0)  # pool3
+        self.feature_size *= 256  # 通道数
+        
+        # 全连接层
+        self.fc = nn.Sequential(
+            nn.Linear(self.feature_size, 512),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(512, 128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(128, 1)
+        )
+        
+        # 初始化权重
+        self._initialize_weights()
+        
+    def _initialize_weights(self):
+        """初始化模型权重"""
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.constant_(m.bias, 0)
+    
+    def forward(self, x):
+        """
+        前向传播
+        
+        参数:
+            x: 输入张量，形状为 (batch_size, input_size)
+        返回:
+            输出张量，形状为 (batch_size, 1)
+        """
+        # 添加通道维度
+        x = x.unsqueeze(1)  # (batch_size, 1, input_size)
+        
+        # 卷积层
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
+        
+        # 展平
+        x = x.view(x.size(0), -1)
+        
+        # 全连接层
+        x = self.fc(x)
+        
+        return x 

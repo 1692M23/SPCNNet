@@ -41,7 +41,7 @@ def is_in_colab():
 IN_COLAB = is_in_colab()
 
 class LAMOSTPreprocessor:
-    def __init__(self, csv_files=['C_FE.csv'], 
+    def __init__(self, csv_files=['C_FE.csv', 'MG_FE.csv', 'CA_FE.csv'], 
                  fits_dir='fits', 
                  output_dir='processed_data',
                  wavelength_range=None,  # 修改为None，表示将使用最大公有波长范围
@@ -160,26 +160,8 @@ class LAMOSTPreprocessor:
         dataframes = []
         for csv_file in self.csv_files:
             if not os.path.exists(csv_file):
-                print(f"错误: 找不到CSV文件 {csv_file}")
-                print(f"当前工作目录: {os.getcwd()}")
-                print(f"尝试查找的完整路径: {os.path.abspath(csv_file)}")
-                
-                # 尝试从可能的目录中查找
-                possible_dirs = ['/content', '/content/drive/My Drive', '/content/SPCNNet']
-                for posdir in possible_dirs:
-                    if os.path.exists(posdir):
-                        possible_path = os.path.join(posdir, os.path.basename(csv_file))
-                        if os.path.exists(possible_path):
-                            print(f"找到可用的CSV文件: {possible_path}")
-                            csv_file = possible_path
-                            break
-                        
-                if not os.path.exists(csv_file):
-                    # 如果还是没找到，列出当前目录的文件
-                    print("当前目录中的文件:")
-                    for f in os.listdir():
-                        print(f"  - {f}")
-                    continue
+                print(f"注意: 找不到CSV文件 {csv_file}，跳过")
+                continue
                 
             print(f"读取CSV文件: {csv_file}")
             try:
@@ -197,7 +179,7 @@ class LAMOSTPreprocessor:
                     # 不在启动时检查所有文件，只显示警告信息
                     print(f"CSV文件包含{len(df)}条记录，如果找不到某些FITS文件，将在处理时报错")
                     
-                    # 仅检查前3个文件作为示例(不再检查所有文件)
+                    # 仅检查前3个文件作为示例
                     spec_files = df['spec'].values[:3]
                     for spec_file in spec_files:
                         # 使用_find_fits_file方法查找文件
@@ -327,7 +309,7 @@ class LAMOSTPreprocessor:
         file_path = self._get_file_extension(fits_file)
         if file_path is None:
             print(f"无法找到文件: {fits_file}，查找路径: {self.fits_dir}")
-            return None, None, 0
+            return None, None, 0, 0
         
         print(f"读取文件: {file_path}")
         try:
@@ -346,7 +328,58 @@ class LAMOSTPreprocessor:
                       f"BITPIX={header.get('BITPIX')}")
                 
                 # 尝试获取视向速度信息(如果有)
-                v_helio = header.get('V_HELIO', 0)  # 日心视向速度 (km/s)
+                v_helio = None
+                for key in ['V_HELIO', 'VHELIO', 'RV', 'VELOCITY']:
+                    if key in header:
+                        v_helio = float(header[key])
+                        print(f"从头信息找到视向速度: {v_helio} km/s (关键字: {key})")
+                        break
+                
+                # 如果头信息中没有找到视向速度，尝试从CSV文件中获取
+                if v_helio is None:
+                    base_file = os.path.basename(fits_file)
+                    if '.' in base_file:
+                        base_file = base_file.split('.')[0]
+                    for csv_file in self.csv_files:
+                        if os.path.exists(csv_file):
+                            df = pd.read_csv(csv_file)
+                            if 'spec' in df.columns and 'rv' in df.columns:
+                                matches = df[df['spec'].str.contains(base_file, case=False, na=False)]
+                                if not matches.empty:
+                                    v_helio = float(matches.iloc[0]['rv'])
+                                    print(f"从CSV找到视向速度: {v_helio} km/s")
+                                    break
+                
+                if v_helio is None:
+                    print("未找到视向速度信息，使用默认值0")
+                    v_helio = 0
+                
+                # 尝试获取红移值
+                z = None
+                for key in ['Z', 'REDSHIFT', 'z', 'redshift']:
+                    if key in header:
+                        z = float(header[key])
+                        print(f"从头信息找到红移值: {z} (关键字: {key})")
+                        break
+                
+                # 如果头信息中没有找到红移值，尝试从CSV文件中获取
+                if z is None:
+                    base_file = os.path.basename(fits_file)
+                    if '.' in base_file:
+                        base_file = base_file.split('.')[0]
+                    for csv_file in self.csv_files:
+                        if os.path.exists(csv_file):
+                            df = pd.read_csv(csv_file)
+                            if 'spec' in df.columns and 'z' in df.columns:
+                                matches = df[df['spec'].str.contains(base_file, case=False, na=False)]
+                                if not matches.empty:
+                                    z = float(matches.iloc[0]['z'])
+                                    print(f"从CSV找到红移值: {z}")
+                                    break
+                
+                if z is None:
+                    print("未找到红移值，使用默认值0")
+                    z = 0
                 
                 # 优先获取第一个HDU的数据(如果是主要光谱数据)
                 flux = None
@@ -460,11 +493,11 @@ class LAMOSTPreprocessor:
                 # 进行最后的数据检查
                 if flux is None:
                     print("无法从FITS文件提取流量数据")
-                    return None, None, 0
+                    return None, None, 0, 0
                 
                 if wavelength is None:
                     print("无法生成波长数据")
-                    return None, None, 0
+                    return None, None, 0, 0
                 
                 # 确保数据类型是浮点数
                 flux = flux.astype(np.float64)
@@ -476,13 +509,14 @@ class LAMOSTPreprocessor:
                     flux = np.nan_to_num(flux)
                 
                 print(f"成功提取光谱数据: 点数={len(wavelength)}, 波长范围={wavelength[0]:.2f}~{wavelength[-1]:.2f}")
-                return wavelength, flux, v_helio
+                print(f"视向速度: {v_helio} km/s, 红移值: {z}")
+                return wavelength, flux, v_helio, z
                 
         except Exception as e:
             print(f"读取{file_path}出错: {e}")
             import traceback
             traceback.print_exc()
-            return None, None, 0
+            return None, None, 0, 0
     
     def denoise_spectrum(self, wavelength, flux):
         """对光谱进行去噪处理"""
@@ -1074,78 +1108,83 @@ class LAMOSTPreprocessor:
         try:
             # 读取FITS文件
             print(f"处理光谱: {spec_file}")
-            wavelength, flux, v_helio = self.read_fits_file(spec_file)
+            wavelength, flux, v_helio, z = self.read_fits_file(spec_file)
             if wavelength is None or flux is None:
                 print(f"无法读取FITS文件: {spec_file}")
                 return None
             
-            # 检查数据有效性
-            if np.isnan(flux).all() or len(flux) == 0:
-                print(f"文件{spec_file}中的流量数据全为NaN或为空")
-                return None
-            
-            print(f"原始数据: 波长范围{wavelength[0]}~{wavelength[-1]}, 点数={len(wavelength)}")
-            
-            # 获取红移数据
-            z = 0
-            try:
-                # 尝试从文件名匹配到CSV中的记录获取红移
-                for csv_file in self.csv_files:
-                    if os.path.exists(csv_file):
-                        df = pd.read_csv(csv_file)
-                        if 'spec' in df.columns and 'z' in df.columns:
-                            # 提取文件名（不包含路径和扩展名）
-                            base_file = os.path.basename(spec_file)
-                            if '.' in base_file:
-                                base_file = base_file.split('.')[0]
-                            
-                            # 在CSV中查找匹配记录
-                            matches = df[df['spec'].str.contains(base_file, case=False, na=False)]
-                            if not matches.empty:
-                                z = matches.iloc[0]['z']
-                                print(f"从CSV找到红移值: z = {z}")
-                                break
-            except Exception as e:
-                print(f"查找红移数据出错: {e}")
-                # 出错时使用默认值
-                z = 0
+            # 数据验证检查 - 原始数据
+            print("\n=== 数据验证检查 ===")
+            print(f"原始数据统计:")
+            print(f"波长范围: {wavelength[0]:.2f} - {wavelength[-1]:.2f}")
+            print(f"流量统计: 最小值={np.min(flux):.2f}, 最大值={np.max(flux):.2f}, 均值={np.mean(flux):.2f}, 标准差={np.std(flux):.2f}")
+            print(f"是否包含NaN: {np.isnan(flux).any()}")
+            print(f"是否包含无穷值: {np.isinf(flux).any()}")
             
             # 1. 波长校正
             wavelength_calibrated = self.correct_wavelength(wavelength, flux)
-            print(f"波长校正后: 波长范围{wavelength_calibrated[0]}~{wavelength_calibrated[-1]}")
+            print(f"\n波长校正后统计:")
+            print(f"波长范围: {wavelength_calibrated[0]:.2f} - {wavelength_calibrated[-1]:.2f}")
             
             # 2. 视向速度校正
             wavelength_corrected = self.correct_velocity(wavelength_calibrated, flux, v_helio)
-            print(f"视向速度校正后: 波长范围{wavelength_corrected[0]}~{wavelength_corrected[-1]}")
+            print(f"\n视向速度校正后统计:")
+            print(f"波长范围: {wavelength_corrected[0]:.2f} - {wavelength_corrected[-1]:.2f}")
             
             # 3. 去噪
             flux_denoised = self.denoise_spectrum(wavelength_corrected, flux)
             if flux_denoised is None:
                 print(f"去噪{spec_file}失败")
                 return None
+                
+            print(f"\n去噪后统计:")
+            print(f"流量统计: 最小值={np.min(flux_denoised):.2f}, 最大值={np.max(flux_denoised):.2f}, 均值={np.mean(flux_denoised):.2f}, 标准差={np.std(flux_denoised):.2f}")
             
             # 4. 红移校正
             wavelength_rest = self.correct_redshift(wavelength_corrected, flux_denoised, z)
-            print(f"红移校正后: 波长范围{wavelength_rest[0]}~{wavelength_rest[-1]}")
+            print(f"\n红移校正后统计:")
+            print(f"波长范围: {wavelength_rest[0]:.2f} - {wavelength_rest[-1]:.2f}")
             
             # 5. 重采样
-            print(f"重采样到波长范围: {self.wavelength_range}, 点数={self.n_points}")
+            print(f"\n重采样参数:")
+            print(f"目标波长范围: {self.wavelength_range}, 目标点数: {self.n_points}")
             wavelength_resampled, flux_resampled = self.resample_spectrum(wavelength_rest, flux_denoised)
-            if wavelength_resampled is None or flux_resampled is None:
-                print(f"重采样{spec_file}失败")
-                return None
+            
+            print(f"\n重采样后统计:")
+            print(f"波长范围: {wavelength_resampled[0]:.2f} - {wavelength_resampled[-1]:.2f}")
+            print(f"流量统计: 最小值={np.min(flux_resampled):.2f}, 最大值={np.max(flux_resampled):.2f}, 均值={np.mean(flux_resampled):.2f}, 标准差={np.std(flux_resampled):.2f}")
             
             # 6. 连续谱归一化
             flux_continuum = self.normalize_continuum(wavelength_resampled, flux_resampled)
+            print(f"\n连续谱归一化后统计:")
+            print(f"流量统计: 最小值={np.min(flux_continuum):.2f}, 最大值={np.max(flux_continuum):.2f}, 均值={np.mean(flux_continuum):.2f}, 标准差={np.std(flux_continuum):.2f}")
             
-            # 7. 二次去噪
-            flux_denoised_second = self.denoise_spectrum_second(wavelength_resampled, flux_continuum)
+            # 7. 第二次去噪
+            flux_denoised_second = self.denoise_spectrum(wavelength_resampled, flux_continuum)
+            if flux_denoised_second is None:
+                print(f"第二次去噪{spec_file}失败")
+                return None
+                
+            print(f"\n第二次去噪后统计:")
+            print(f"流量统计: 最小值={np.min(flux_denoised_second):.2f}, 最大值={np.max(flux_denoised_second):.2f}, 均值={np.mean(flux_denoised_second):.2f}, 标准差={np.std(flux_denoised_second):.2f}")
             
-            # 8. 最终归一化 (最大最小值归一化)
-            print(f"对流量进行最终归一化")
+            # 8. 最终归一化
             flux_normalized = self.normalize_spectrum(flux_denoised_second)
-            if flux_normalized is None:
-                print(f"归一化{spec_file}失败")
+            print(f"\n最终归一化后统计:")
+            print(f"流量统计: 最小值={np.min(flux_normalized):.2f}, 最大值={np.max(flux_normalized):.2f}, 均值={np.mean(flux_normalized):.2f}, 标准差={np.std(flux_normalized):.2f}")
+            print("=== 数据验证检查结束 ===\n")
+            
+            # 检查最终数据的有效性
+            if np.isnan(flux_normalized).any() or np.isinf(flux_normalized).any():
+                print(f"警告: 最终数据包含NaN或无穷值")
+                return None
+                
+            if np.all(flux_normalized == 0):
+                print(f"警告: 最终数据全为零")
+                return None
+                
+            if np.std(flux_normalized) < 1e-10:
+                print(f"警告: 最终数据标准差过小")
                 return None
             
             print(f"成功处理光谱: {spec_file}")
@@ -1168,7 +1207,8 @@ class LAMOSTPreprocessor:
                     'flux_resampled': flux_resampled,
                     'flux_continuum': flux_continuum,
                     'flux_denoised_second': flux_denoised_second,
-                    'z': z  # 保存红移值
+                    'z': z,  # 保存红移值
+                    'v_helio': v_helio  # 保存视向速度
                 },
                 'validation_metrics': {
                     'quality_metrics': {
@@ -1425,28 +1465,22 @@ class LAMOSTPreprocessor:
                         all_data = pickle.load(f)
                     print(f"已加载保存的处理结果，共{len(all_data)}条记录")
                     
-                    # 读取CSV文件来获取总记录数
+                    # 检查是否所有元素都已完成处理
                     dataframes = self.read_csv_data()
-                    if not dataframes:
-                        print("错误: 没有有效的数据集")
-                        return np.array([]), np.array([]), np.array([]), np.array([])
-                    
-                    # 计算总数据量
-                    total_records = sum(len(df) for df in dataframes)
-                    
-                    # 显示进度并询问是否继续
-                    progress_percent = len(all_data)/total_records * 100
-                    print(f"当前进度: {len(all_data)}/{total_records} 条记录 ({progress_percent:.2f}%)")
-                    
-                    if len(all_data) >= total_records:
-                        print(f"所有数据已处理完成，进入数据准备阶段")
-                        return self._prepare_arrays(all_data)
-                    else:
-                        if input(f"是否继续处理剩余{total_records - len(all_data)}条数据？(y/n): ").lower() != 'y':
-                            print("跳过处理阶段，直接使用已有数据")
+                    if dataframes:
+                        all_complete = True
+                        for df, element in zip(dataframes, [os.path.splitext(os.path.basename(csv))[0] for csv in self.csv_files]):
+                            element_records = sum(1 for item in all_data if item.get('element') == element)
+                            if element_records < len(df):
+                                all_complete = False
+                                break
+                        
+                        if all_complete:
+                            print("所有元素的数据都已处理完成，将直接返回结果")
                             return self._prepare_arrays(all_data)
                         else:
-                            print(f"继续处理剩余数据...")
+                            print("发现未完成处理的元素，将继续处理")
+                            
                 except Exception as e:
                     print(f"加载进度文件出错: {e}，将重新处理所有数据")
                     all_data = []
@@ -1457,28 +1491,22 @@ class LAMOSTPreprocessor:
                         all_data = pickle.load(f)
                     print(f"从Google Drive加载处理结果，共{len(all_data)}条记录")
                     
-                    # 读取CSV文件来获取总记录数
+                    # 检查是否所有元素都已完成处理
                     dataframes = self.read_csv_data()
-                    if not dataframes:
-                        print("错误: 没有有效的数据集")
-                        return np.array([]), np.array([]), np.array([]), np.array([])
-                    
-                    # 计算总数据量
-                    total_records = sum(len(df) for df in dataframes)
-                    
-                    # 显示进度并询问是否继续
-                    progress_percent = len(all_data)/total_records * 100
-                    print(f"当前进度: {len(all_data)}/{total_records} 条记录 ({progress_percent:.2f}%)")
-                    
-                    if len(all_data) >= total_records:
-                        print(f"所有数据已处理完成，进入数据准备阶段")
-                        return self._prepare_arrays(all_data)
-                    else:
-                        if input(f"是否继续处理剩余{total_records - len(all_data)}条数据？(y/n): ").lower() != 'y':
-                            print("跳过处理阶段，直接使用已有数据")
+                    if dataframes:
+                        all_complete = True
+                        for df, element in zip(dataframes, [os.path.splitext(os.path.basename(csv))[0] for csv in self.csv_files]):
+                            element_records = sum(1 for item in all_data if item.get('element') == element)
+                            if element_records < len(df):
+                                all_complete = False
+                                break
+                        
+                        if all_complete:
+                            print("所有元素的数据都已处理完成，将直接返回结果")
                             return self._prepare_arrays(all_data)
                         else:
-                            print(f"继续处理剩余数据...")
+                            print("发现未完成处理的元素，将继续处理")
+                            
                 except Exception as e:
                     print(f"加载Google Drive进度文件出错: {e}，将重新处理所有数据")
                     all_data = []
@@ -1489,13 +1517,9 @@ class LAMOSTPreprocessor:
             print("错误: 没有有效的数据集")
             return np.array([]), np.array([]), np.array([]), np.array([])
         
-        # 计算总数据量
-        total_records = sum(len(df) for df in dataframes)
-        print(f"总数据量: {total_records}条记录")
-        
         # 处理每个元素的数据
         processed_records = 0
-        for i, (df, element) in enumerate(zip(dataframes, ['C_FE', 'MG_FE', 'CA_FE'])):
+        for i, (df, element) in enumerate(zip(dataframes, [os.path.splitext(os.path.basename(csv))[0] for csv in self.csv_files])):
             # 统计已处理的元素记录数
             element_records = sum(1 for item in all_data if item.get('element') == element)
             # 元素的总记录数
@@ -1505,36 +1529,42 @@ class LAMOSTPreprocessor:
             if element_records >= element_total:
                 print(f"{element}数据已在之前的运行中处理完成 ({element_records}/{element_total}条记录)")
                 processed_records += element_records
-            else:
-                print(f"\n处理元素 {i+1}/{len(dataframes)}: {element}")
-                print(f"已处理: {element_records}/{element_total}条记录")
-                print(f"当前进度: [{processed_records/total_records:.2%}]")
-                
-                # 如果元素已部分处理，从未处理的部分继续
-                start_idx = element_records
-                print(f"从索引{start_idx}继续处理...")
-                
-                results = self.process_element_data(df, element, start_idx=start_idx)
-                all_data.extend(results)
-                processed_records += len(results)
-                
-                # 更新总体进度
-                overall_progress = processed_records / total_records
-                print(f"总进度: [{overall_progress:.2%}] 已完成{processed_records}/{total_records}条记录")
+                continue  # 跳过已完成的元素
             
-            # 保存总进度
-            with open(progress_file, 'wb') as f:
-                pickle.dump(all_data, f)
+            print(f"\n处理元素 {i+1}/{len(dataframes)}: {element}")
+            print(f"已处理: {element_records}/{element_total}条记录")
+            print(f"当前进度: [{element_records/element_total:.2%}]")
+            
+            # 如果元素已部分处理，从未处理的部分继续
+            start_idx = element_records
+            print(f"从索引{start_idx}继续处理...")
+            
+            results = self.process_element_data(df, element, start_idx=start_idx)
+            if results:  # 只有在成功获取结果时才添加
+                all_data.extend(results)
+                processed_records = len(results)  # 只计算当前元素的处理记录
                 
+                # 更新进度
+                progress = processed_records / element_total
+                print(f"进度: [{progress:.2%}] 已完成{processed_records}/{element_total}条记录")
+                
+                # 保存总进度
+                try:
+                    with open(progress_file, 'wb') as f:
+                        pickle.dump(all_data, f)
+                    print("已保存处理进度")
+                except Exception as e:
+                    print(f"保存进度文件失败: {e}")
+            
             # 输出阶段性统计
             elapsed_time = time.time() - start_time
             records_per_second = processed_records / elapsed_time if elapsed_time > 0 else 0
-            print(f"当前已处理总数据量: {len(all_data)}条")
+            print(f"当前已处理数据量: {processed_records}条")
             print(f"处理速度: {records_per_second:.2f}条/秒")
             
             # 估计剩余时间
-            if processed_records < total_records and records_per_second > 0:
-                remaining_records = total_records - processed_records
+            if processed_records < element_total and records_per_second > 0:
+                remaining_records = element_total - processed_records
                 estimated_time = remaining_records / records_per_second
                 hours, remainder = divmod(estimated_time, 3600)
                 minutes, seconds = divmod(remainder, 60)
@@ -1553,7 +1583,7 @@ class LAMOSTPreprocessor:
         hours, remainder = divmod(elapsed_time, 3600)
         minutes, seconds = divmod(remainder, 60)
         print(f"\n处理完成! 总耗时: {int(hours)}小时 {int(minutes)}分钟 {int(seconds)}秒")
-        print(f"处理记录: {len(all_data)}/{total_records} ({len(all_data)/total_records:.2%})")
+        print(f"处理记录: {len(all_data)}条")
         
         # 保存文件缓存
         self._save_files_cache()
