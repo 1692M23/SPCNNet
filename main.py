@@ -52,6 +52,13 @@ def load_data(data_path, element=None):
     返回:
         tuple: (X, y, element_indices)，其中X是特征数据，y是标签数据，element_indices是元素索引
     """
+    # 如果路径不是绝对路径且不存在，尝试在processed_data目录下查找
+    if not os.path.isabs(data_path) and not os.path.exists(data_path):
+        processed_path = os.path.join('processed_data', os.path.basename(data_path))
+        if os.path.exists(processed_path):
+            data_path = processed_path
+            logger.info(f"使用processed_data目录下的文件: {data_path}")
+    
     try:
         data = np.load(data_path, allow_pickle=True)
         logger.info(f"加载数据: {data_path}")
@@ -552,7 +559,8 @@ def visualize_training(element, train_metrics, val_metrics, output_dir=None):
 def process_element(element, config=None):
     """处理单个元素的训练和评估"""
     if config is None:
-        config = config.CONFIG
+        # 直接使用导入的config模块中的配置变量
+        import config
         
     # 加载数据集
     train_data = load_data(os.path.join('processed_data', 'train_dataset.npz'), element)
@@ -565,26 +573,26 @@ def process_element(element, config=None):
         
     # 创建数据加载器
     train_loader = create_data_loaders(train_data[0], train_data[1], 
-                                     batch_size=config['training']['batch_size'])
+                                     batch_size=config.training_config['batch_size'])
     val_loader = create_data_loaders(val_data[0], val_data[1], 
-                                   batch_size=config['training']['batch_size'])
+                                   batch_size=config.training_config['batch_size'])
     test_loader = None
     if test_data[0] is not None:
         test_loader = create_data_loaders(test_data[0], test_data[1], 
-                                        batch_size=config['training']['batch_size'])
+                                        batch_size=config.training_config['batch_size'])
     
     # 超参数调优（如果启用）
     hyperparams = None
-    if config['training']['tune_hyperparams']:
+    if config.training_config['tune_hyperparams']:
         logger.info(f"开始 {element} 的超参数调优")
         # 使用新的两阶段调优方法
-        hyperparams = hyperparameter_tuning(element, train_loader, val_loader, device=config['training']['device'])
+        hyperparams = hyperparameter_tuning(element, train_loader, val_loader, device=config.training_config['device'])
         
         if hyperparams:
             logger.info(f"{element} 的最佳超参数: {hyperparams}")
             
             # 更新训练配置，应用优化后的超参数
-            training_config = config['training'].copy()
+            training_config = config.training_config.copy()
             
             # 应用关键超参数
             if 'lr' in hyperparams:
@@ -603,7 +611,7 @@ def process_element(element, config=None):
                 training_config['early_stopping_patience'] = hyperparams['patience']
                 
             # 更新配置
-            config['training'] = training_config
+            config.training_config = training_config
     
     # 使用最佳超参数训练模型
     logger.info(f"开始训练 {element} 模型" + 
@@ -614,14 +622,14 @@ def process_element(element, config=None):
     
     # 创建模型，将dropout_rate传递给模型构造函数
     model = SpectralResCNN(
-        input_size=config['model_config']['input_size'],
+        input_size=config.model_config['input_size'],
         dropout_rate=dropout_rate
-    ).to(config['training']['device'])
+    ).to(config.training_config['device'])
     
     # 检查是否存在检查点可以恢复训练
-    device = config['training']['device']
+    device = config.training_config['device']
     resume_from = None
-    checkpoint_pattern = os.path.join(config['model_config']['model_dir'], f'checkpoint_{element}_epoch*.pth')
+    checkpoint_pattern = os.path.join(config.model_config['model_dir'], f'checkpoint_{element}_epoch*.pth')
     checkpoints = glob.glob(checkpoint_pattern)
     
     if checkpoints:
@@ -659,7 +667,7 @@ def process_element(element, config=None):
     test_metrics = None
     if test_loader:
         # 加载最佳模型进行评估
-        best_model_path = os.path.join(config['model_config']['model_dir'], f'best_model_{element}.pth')
+        best_model_path = os.path.join(config.model_config['model_dir'], f'best_model_{element}.pth')
         if os.path.exists(best_model_path):
             try:
                 logger.info(f"加载最佳模型进行评估: {best_model_path}")
@@ -668,15 +676,15 @@ def process_element(element, config=None):
             except Exception as e:
                 logger.error(f"加载最佳模型失败: {str(e)}")
                 
-        test_metrics = evaluate_model(model, test_loader, config['training']['device'])
+        test_metrics = evaluate_model(model, test_loader, config.training_config['device'])
         logger.info(f"{element} 测试集评估结果: {test_metrics}")
         
         # 添加模型性能分析
-        if config.get('analysis', {}).get('perform_analysis', False):
+        if hasattr(config, 'analysis_config') and config.analysis_config.get('perform_analysis', False):
             logger.info(f"开始对{element}模型进行性能分析...")
             try:
                 from model_analysis import analyze_model_performance
-                output_dir = os.path.join(config['output_config']['results_dir'], f'analysis_{element}')
+                output_dir = os.path.join(config.output_config['results_dir'], f'analysis_{element}')
                 os.makedirs(output_dir, exist_ok=True)
                 
                 analysis_results = analyze_model_performance(
@@ -1126,6 +1134,12 @@ def main():
                         default='train', help='运行模式')
     parser.add_argument('--data_path', type=str, action='append', default=[],
                        help='数据路径，可以指定多个。例如：--data_path train.npz --data_path val.npz')
+    parser.add_argument('--train_data_path', type=str, default=None, 
+                       help='训练数据路径')
+    parser.add_argument('--val_data_path', type=str, default=None,
+                       help='验证数据路径')
+    parser.add_argument('--test_data_path', type=str, default=None,
+                       help='测试数据路径')
     parser.add_argument('--elements', nargs='+', default=None,
                        help='要处理的元素列表，默认为所有配置的元素')
     parser.add_argument('--element', type=str, default=None,
@@ -1351,51 +1365,49 @@ def main():
         # 处理数据路径
         data_paths = args.data_path
         
-        # 如果指定使用preprocessdata7.py
-        if args.use_preprocessor:
-            # 使用preprocessdata7加载数据
-            result = use_preprocessor(
-                task='train',
-                element=elements[0] if elements else 'MG_FE',
-                **preprocessor_kwargs
-            )
+        # 优先使用专门的路径参数
+        if args.train_data_path:
+            train_path = args.train_data_path
+        elif data_paths and len(data_paths) > 0:
+            train_path = data_paths[0]
+        else:
+            train_path = os.path.join('processed_data', 'train_dataset.npz')
             
-            if not result['success']:
-                logger.error(f"使用preprocessdata7加载数据失败: {result.get('error', '未知错误')}")
-                return
-                
-            # 使用preprocessdata7处理后的数据路径
-            if not data_paths:
-                data_paths = [result['train_data'], result['val_data'], result['test_data']]
-        elif not data_paths:
-            # 没有指定路径，使用默认路径
-            data_paths = [config.data_paths.get('train_data', os.path.join('processed_data', 'train_dataset.npz'))]
+        if args.val_data_path:
+            val_path = args.val_data_path
+        elif data_paths and len(data_paths) > 1:
+            val_path = data_paths[1]
+        else:
+            val_path = os.path.join('processed_data', 'val_dataset.npz')
+            
+        if args.test_data_path:
+            test_path = args.test_data_path
+        elif data_paths and len(data_paths) > 2:
+            test_path = data_paths[2]
+        else:
+            test_path = os.path.join('processed_data', 'test_dataset.npz')
         
         # 加载训练数据
-        logger.info(f"加载训练数据: {data_paths[0]}")
-        train_data = load_data(data_paths[0], elements[0] if len(elements) == 1 else elements)
+        logger.info(f"加载训练数据: {train_path}")
+        train_data = load_data(train_path, elements[0] if len(elements) == 1 else elements)
         
         if train_data[0] is None or train_data[1] is None:
             logger.error("加载训练数据失败，退出程序")
             return
         
-        # 加载验证数据（如果有）
-        val_data = train_data  # 默认与训练数据相同
-        if len(data_paths) > 1:
-            logger.info(f"加载验证数据: {data_paths[1]}")
-            val_data = load_data(data_paths[1], elements[0] if len(elements) == 1 else elements)
-            if val_data[0] is None:
-                logger.warning("加载验证数据失败，使用训练数据代替")
-                val_data = train_data
+        # 加载验证数据
+        logger.info(f"加载验证数据: {val_path}")
+        val_data = load_data(val_path, elements[0] if len(elements) == 1 else elements)
+        if val_data[0] is None:
+            logger.warning("加载验证数据失败，使用训练数据代替")
+            val_data = train_data
         
-        # 加载测试数据（如果有）
-        test_data = val_data  # 默认与验证数据相同
-        if len(data_paths) > 2:
-            logger.info(f"加载测试数据: {data_paths[2]}")
-            test_data = load_data(data_paths[2], elements[0] if len(elements) == 1 else elements)
-            if test_data[0] is None:
-                logger.warning("加载测试数据失败，使用验证数据代替")
-                test_data = val_data
+        # 加载测试数据
+        logger.info(f"加载测试数据: {test_path}")
+        test_data = load_data(test_path, elements[0] if len(elements) == 1 else elements)
+        if test_data[0] is None:
+            logger.warning("加载测试数据失败，使用验证数据代替")
+            test_data = val_data
         
         # 创建数据加载器
         train_loader = create_data_loaders(
@@ -1463,7 +1475,7 @@ def main():
             
             # 训练和评估模型
             try:
-                process_element(element, config)
+                process_element(element)
             except Exception as e:
                 logger.error(f"训练元素 {element} 时出错: {str(e)}")
                 import traceback
