@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import ParameterGrid
 import pandas as pd
 import glob
+import traceback
 
 # 导入自定义模块
 import config
@@ -557,156 +558,83 @@ def visualize_training(element, train_metrics, val_metrics, output_dir=None):
     logger.info(f"已保存训练过程可视化图表")
 
 def process_element(element, config=None, tune_hyperparams=False):
-    """处理单个元素的训练和评估"""
-    if config is None:
-        # 直接使用导入的config模块中的配置变量
-        import config
-        
-    # 加载数据集
-    train_data = load_data(os.path.join('processed_data', 'train_dataset.npz'), element)
-    val_data = load_data(os.path.join('processed_data', 'val_dataset.npz'), element)
-    test_data = load_data(os.path.join('processed_data', 'test_dataset.npz'), element)
-    
-    if train_data[0] is None or val_data[0] is None:
-        logger.error(f"加载{element}的数据集失败")
-        return None
-        
-    # 创建数据加载器
-    train_loader = create_data_loaders(train_data[0], train_data[1], 
-                                     batch_size=config.training_config['batch_size'])
-    val_loader = create_data_loaders(val_data[0], val_data[1], 
-                                   batch_size=config.training_config['batch_size'])
-    test_loader = None
-    if test_data[0] is not None:
-        test_loader = create_data_loaders(test_data[0], test_data[1], 
-                                        batch_size=config.training_config['batch_size'])
-    
-    # 超参数调优（如果启用）
-    hyperparams = None
-    if tune_hyperparams:
-        logger.info(f"开始 {element} 的超参数调优")
-        # 使用新的两阶段调优方法
-        hyperparams = hyperparameter_tuning(element, train_loader, val_loader, device=config.training_config['device'])
-        
-        if hyperparams:
-            logger.info(f"{element} 的最佳超参数: {hyperparams}")
-            
-            # 更新训练配置，应用优化后的超参数
-            training_config = config.training_config.copy()
-            
-            # 应用关键超参数
-            if 'lr' in hyperparams:
-                training_config['lr'] = hyperparams['lr']
-            if 'weight_decay' in hyperparams:
-                training_config['weight_decay'] = hyperparams['weight_decay']
-            if 'batch_size' in hyperparams:
-                # 更新数据加载器的batch_size
-                batch_size = hyperparams['batch_size']
-                train_loader = create_data_loaders(train_data[0], train_data[1], batch_size=batch_size)
-                val_loader = create_data_loaders(val_data[0], val_data[1], batch_size=batch_size)
-                if test_data[0] is not None:
-                    test_loader = create_data_loaders(test_data[0], test_data[1], batch_size=batch_size)
-                training_config['batch_size'] = batch_size
-            if 'patience' in hyperparams:
-                training_config['early_stopping_patience'] = hyperparams['patience']
-                
-            # 更新配置
-            config.training_config = training_config
-        else:
-            logger.warning(f"{element} 的超参数调优未找到更好的参数组合，将使用默认参数")
-    
-    # 使用最佳超参数训练模型
-    logger.info(f"开始训练 {element} 模型" + 
-               (f" (使用优化超参数)" if hyperparams else " (使用默认参数)"))
-    
-    # 如果有dropout_rate超参数，传递给模型
-    dropout_rate = hyperparams.get('dropout_rate', 0.5) if hyperparams else 0.5
-    
-    # 创建模型，将dropout_rate传递给模型构造函数
-    model = SpectralResCNN(
-        input_size=config.model_config['input_size'],
-        dropout_rate=dropout_rate
-    ).to(config.training_config['device'])
-    
-    # 检查是否存在检查点可以恢复训练
-    device = config.training_config['device']
-    resume_from = None
-    checkpoint_pattern = os.path.join(config.model_config['model_dir'], f'checkpoint_{element}_epoch*.pth')
-    checkpoints = glob.glob(checkpoint_pattern)
-    
-    if checkpoints:
-        # 找到最新的检查点
-        latest_checkpoint = max(checkpoints, key=os.path.getctime)
-        logger.info(f"找到最新检查点: {latest_checkpoint}，尝试恢复训练")
-        resume_from = latest_checkpoint
-    
-    # 训练模型，使用新的train函数和参数
+    """
+    处理单个元素的训练过程
+    """
     try:
-        from model import train
-        train_losses, val_losses = train(
-            model=model,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            element=element,
-            config=config,
-            device=device,
-            resume_from=resume_from
-        )
-    except Exception as e:
-        logger.error(f"训练 {element} 模型时出错: {str(e)}")
-        # 尝试使用旧的训练函数作为备用
-        logger.warning("尝试使用旧的train_model函数作为备用")
-        from model import train_model
-    train_losses, val_losses = train_model(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        element=element,
-        config=config
-    )
-    
-    # 评估模型（如果有测试集）
-    test_metrics = None
-    if test_loader:
-        # 加载最佳模型进行评估
-        best_model_path = os.path.join(config.model_config['model_dir'], f'best_model_{element}.pth')
-        if os.path.exists(best_model_path):
-            try:
-                logger.info(f"加载最佳模型进行评估: {best_model_path}")
-                checkpoint = torch.load(best_model_path, map_location=device)
-                model.load_state_dict(checkpoint['model_state_dict'])
-            except Exception as e:
-                logger.error(f"加载最佳模型失败: {str(e)}")
-                
-        test_metrics = evaluate_model(model, test_loader, config.training_config['device'])
-        logger.info(f"{element} 测试集评估结果: {test_metrics}")
+        from model import train, train_model  # 将导入移到函数开始
         
-        # 添加模型性能分析
-        if hasattr(config, 'analysis_config') and config.analysis_config.get('perform_analysis', False):
-            logger.info(f"开始对{element}模型进行性能分析...")
-            try:
-                from model_analysis import analyze_model_performance
-                output_dir = os.path.join(config.output_config['results_dir'], f'analysis_{element}')
-                os.makedirs(output_dir, exist_ok=True)
-                
-                analysis_results = analyze_model_performance(
-                    model=model,
-                    data_loader=test_loader,
-                    element=element,
-                    device=device,
-                    batch_id=None,
-                    save_feature_importance=True,
-                    save_batch_results=True,
-                    output_dir=output_dir
-                )
-                logger.info(f"{element}模型性能分析完成, 结果保存在{output_dir}目录")
-            except Exception as e:
-                logger.error(f"模型性能分析失败: {str(e)}")
-    
-    # 可视化训练过程
-    visualize_training(element, train_losses, val_losses)
-    
-    return model, test_metrics
+        # 设置设备
+        device = config.training_config['device'] if config else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # 加载数据
+        train_data = load_data(config.data_paths['train_data'], element)
+        val_data = load_data(config.data_paths['val_data'], element)
+        test_data = load_data(config.data_paths['test_data'], element)
+        
+        # 创建数据加载器
+        train_loader = create_data_loaders(train_data[0], train_data[1], batch_size=config.training_config['batch_size'])
+        val_loader = create_data_loaders(val_data[0], val_data[1], batch_size=config.training_config['batch_size'])
+        test_loader = create_data_loaders(test_data[0], test_data[1], batch_size=config.training_config['batch_size'])
+        
+        # 创建模型
+        model = SpectralResCNN(config.model_config['input_size']).to(device)
+        
+        # 尝试恢复训练
+        resume_from = None
+        if config and config.training_config.get('resume_training', False):
+            resume_path = os.path.join(config.model_config['model_dir'], f'checkpoint_{element}.pth')
+            if os.path.exists(resume_path):
+                resume_from = resume_path
+        
+        try:
+            # 首先尝试使用新的train函数
+            train_losses, val_losses = train(
+                model=model,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                element=element,
+                config=config,
+                device=device,
+                resume_from=resume_from
+            )
+        except Exception as e:
+            logger.warning(f"使用新的train函数失败: {str(e)}")
+            logger.warning("尝试使用旧的train_model函数作为备用")
+            # 使用旧的train_model函数作为备用
+            train_losses, val_losses = train_model(
+                model=model,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                element=element,
+                config=config
+            )
+        
+        # 评估模型（如果有测试集）
+        test_metrics = None
+        if test_loader:
+            # 加载最佳模型进行评估
+            best_model_path = os.path.join(config.model_config['model_dir'], f'best_model_{element}.pth')
+            if os.path.exists(best_model_path):
+                try:
+                    logger.info(f"加载最佳模型进行评估: {best_model_path}")
+                    checkpoint = torch.load(best_model_path, map_location=device)
+                    model.load_state_dict(checkpoint['model_state_dict'])
+                except Exception as e:
+                    logger.error(f"加载最佳模型失败: {str(e)}")
+            
+            test_metrics = evaluate_model(model, test_loader, device)
+            logger.info(f"{element} 测试集评估结果: {test_metrics}")
+        
+        # 可视化训练过程
+        visualize_training(element, train_losses, val_losses)
+        
+        return model, test_metrics
+        
+    except Exception as e:
+        logger.error(f"训练元素 {element} 时出错: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise
 
 def process_multiple_elements(csv_file, fits_dir, element_columns=None, 
                              test_size=0.2, val_size=0.1, batch_size=32, 
@@ -910,8 +838,7 @@ def process_multiple_elements(csv_file, fits_dir, element_columns=None,
             
         except Exception as e:
             logger.error(f"元素 {element} 处理失败: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
+            logger.error(f"Traceback: {traceback.format_exc()}")
             
     # 所有元素处理完成，评估整体结果
     logger.info("所有元素处理完成")
@@ -1476,8 +1403,7 @@ def main():
                 process_element(element, config, tune_hyperparams=tune_hyperparams)
             except Exception as e:
                 logger.error(f"训练元素 {element} 时出错: {str(e)}")
-                import traceback
-                logger.error(traceback.format_exc())
+                logger.error(f"Traceback: {traceback.format_exc()}")
                 continue
     
     if args.mode == 'tune' or args.mode == 'all':
