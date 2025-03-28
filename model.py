@@ -263,12 +263,15 @@ class SpectralResCNNEnsemble:
         results = []
         for i, model in enumerate(self.models):
             logger.info(f"Training model {i+1}/{self.num_models}...")
-            train_losses, val_losses = train_model(
+            device = config.training_config.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+            train_losses, val_losses = train(
                 model=model,
                 train_loader=train_loader,
                 val_loader=val_loader,
                 element=f"{element}_model{i+1}",
-                config=config
+                config=config,
+                device=device,
+                resume_from=None
             )
             results.append((train_losses, val_losses))
         return results
@@ -373,27 +376,27 @@ def _save_checkpoint(model, optimizer, scheduler, epoch, loss, element, config):
         'loss': loss,
     }, model_path)
 
-def train_model(model, train_loader, val_loader, element, config):
+def train(model, train_loader, val_loader, element, config, device, resume_from=None):
     """
     训练模型
     
     参数:
-        model (torch.nn.Module): 模型
-        train_loader (DataLoader): 训练数据加载器
-        val_loader (DataLoader): 验证数据加载器
-        element (str): 元素名称
+        model: 要训练的模型
+        train_loader: 训练数据加载器
+        val_loader: 验证数据加载器
+        element: 元素名称
         config: 配置对象
-        
+        device: 计算设备
+        resume_from: 恢复训练的检查点路径
+    
     返回:
-        tuple: (train_losses, val_losses) 训练和验证损失列表
+        tuple: (训练损失列表, 验证损失列表)
     """
-    device = config.training_config['device']
-    model = model.to(device)
+    # 记录训练开始时间
+    training_start_time = time.time()
     
-    # 降低权重衰减
-    weight_decay = 0.0001  # 降低正则化强度
-    
-    # 使用AdamW优化器，添加梯度裁剪
+    # 创建优化器
+    weight_decay = config.training_config.get('weight_decay', 1e-4)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.training_config['lr'],
@@ -422,8 +425,9 @@ def train_model(model, train_loader, val_loader, element, config):
     train_losses = []
     val_losses = []
     nan_counter = 0
-    max_nan_attempts = 3
+    max_nan_attempts = 5  # 增加允许的NaN尝试次数
     max_patience = config.training_config['early_stopping_patience']
+    epoch_start = 0
     
     # 记录NaN值出现的次数和位置
     nan_stats = {
@@ -436,149 +440,300 @@ def train_model(model, train_loader, val_loader, element, config):
     
     # 创建批次追踪文件
     batch_tracking_path = os.path.join(batch_results_dir, 'batch_tracking.csv')
-    batch_df = pd.DataFrame(columns=['epoch', 'train_loss', 'val_loss', 'lr', 'timestamp'])
+    batch_columns = ['epoch', 'train_loss', 'val_loss', 'lr', 'timestamp']
+    
+    # 加载现有的批次追踪文件（如果存在）
+    if os.path.exists(batch_tracking_path):
+        try:
+            batch_df = pd.read_csv(batch_tracking_path)
+            # 确保所有必需的列都存在
+            for col in batch_columns:
+                if col not in batch_df.columns:
+                    batch_df[col] = None
+        except Exception as e:
+            logger.warning(f"Error loading existing batch tracking file: {str(e)}")
+            batch_df = pd.DataFrame(columns=batch_columns)
+    else:
+        batch_df = pd.DataFrame(columns=batch_columns)
     
     # 创建NaN追踪日志
     nan_log_path = os.path.join(batch_results_dir, 'nan_tracking.csv')
-    nan_df = pd.DataFrame(columns=['epoch', 'batch', 'location', 'action_taken', 'timestamp'])
+    nan_columns = ['epoch', 'batch', 'location', 'action_taken', 'timestamp']
+    
+    # 加载现有的NaN追踪日志（如果存在）
+    if os.path.exists(nan_log_path):
+        try:
+            nan_df = pd.read_csv(nan_log_path)
+            # 确保所有必需的列都存在
+            for col in nan_columns:
+                if col not in nan_df.columns:
+                    nan_df[col] = None
+        except Exception as e:
+            logger.warning(f"Error loading existing NaN tracking file: {str(e)}")
+            nan_df = pd.DataFrame(columns=nan_columns)
+    else:
+        nan_df = pd.DataFrame(columns=nan_columns)
+    
+    # 如果提供了恢复点，从检查点恢复
+    if resume_from is not None:
+        try:
+            logger.info(f"Resuming training from checkpoint: {resume_from}")
+            checkpoint = torch.load(resume_from, map_location=device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            epoch_start = checkpoint['epoch'] + 1
+            best_val_loss = checkpoint['best_val_loss']
+            train_losses = checkpoint.get('train_losses', [])
+            val_losses = checkpoint.get('val_losses', [])
+            patience_counter = checkpoint.get('patience_counter', 0)
+            logger.info(f"Resumed from epoch {epoch_start} with best validation loss {best_val_loss}")
+        except Exception as e:
+            logger.error(f"Error resuming from checkpoint: {str(e)}")
+            # 继续使用新初始化的模型和优化器
+    
+    # 修复梯度的函数
+    def _fix_nan_gradients(model, threshold=1.0):
+        """修复梯度中的NaN值并执行梯度裁剪"""
+        nan_count = 0
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                # 检查并修复NaN梯度
+                nan_mask = torch.isnan(param.grad)
+                if nan_mask.any():
+                    nan_count += torch.sum(nan_mask).item()
+                    param.grad[nan_mask] = 0.0
+                
+                # 执行元素级梯度裁剪
+                with torch.no_grad():
+                    too_large = torch.abs(param.grad) > threshold
+                    if too_large.any():
+                        # 裁剪大梯度但保留符号
+                        param.grad[too_large] = threshold * torch.sign(param.grad[too_large])
+        
+        return nan_count
+    
+    # 重置模型和优化器的函数
+    def _reset_model_and_optimizer(model, optimizer, counter, max_attempts):
+        if counter >= max_attempts:
+            logger.warning(f"Encountered NaN values in {counter} consecutive batches, resetting model parameters")
+            
+            # 重新初始化特定层
+            for name, module in model.named_modules():
+                if isinstance(module, (nn.Conv1d, nn.Linear)):
+                    nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+                    if module.bias is not None:
+                        nn.init.constant_(module.bias, 0)
+                elif isinstance(module, nn.BatchNorm1d):
+                    nn.init.constant_(module.weight, 1)
+                    nn.init.constant_(module.bias, 0)
+            
+            # 重置优化器状态
+            for param_group in optimizer.param_groups:
+                for param in param_group['params']:
+                    if param.grad is not None:
+                        param.grad.detach_()
+                        param.grad.zero_()
     
     # 训练循环
-    for epoch in range(config.training_config['num_epochs']):
+    logger.info(f"Starting training for element {element} from epoch {epoch_start+1}")
+    for epoch in range(epoch_start, config.training_config['num_epochs']):
+        epoch_start_time = time.time()
         model.train()
         epoch_loss = 0
         valid_batches = 0
+        skipped_batches = 0
         
         # 训练阶段
         for batch_idx, (data, target) in enumerate(train_loader):
             nan_stats['total_batches'] += 1
-            data, target = data.to(device), target.to(device)
             
-            # 检查输入数据是否包含nan并进行处理
-            if torch.isnan(data).any():
-                # 记录NaN统计
-                nan_stats['input_data'] += 1
-                
-                # 尝试修复NaN值
-                data_mean = torch.nanmean(data, dim=0)
-                nan_mask = torch.isnan(data)
-                nan_count = torch.sum(nan_mask).item()
-                
-                # 用平均值填充NaN
-                data_clone = data.clone()
-                for i in range(data.size(0)):
-                    sample_nan_mask = nan_mask[i]
-                    if sample_nan_mask.any():
-                        data_clone[i][sample_nan_mask] = data_mean[sample_nan_mask]
-                
-                # 记录到NaN日志
-                new_nan_row = pd.DataFrame({
-                    'epoch': [epoch+1],
-                    'batch': [batch_idx],
-                    'location': ['input_data'],
-                    'action_taken': [f'Filled {nan_count} NaN values'],
-                    'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
-                })
-                nan_df = pd.concat([nan_df, new_nan_row], ignore_index=True)
-                nan_df.to_csv(nan_log_path, index=False)
-                
-                logger.warning(f"Detected {nan_count} NaN values in input data and filled with mean values")
-                data = data_clone
-            
-            optimizer.zero_grad()
+            # 检查数据和目标的维度是否匹配
+            if data.size(0) != target.size(0):
+                logger.warning(f"Batch size mismatch: data={data.size(0)}, target={target.size(0)}")
+                continue
             
             try:
-                # 前向传播
-                output = model(data)
+                data, target = data.to(device), target.to(device)
                 
-                # 检查模型输出是否包含nan
-                if torch.isnan(output).any():
-                    nan_stats['model_output'] += 1
-                    output_nan_count = torch.sum(torch.isnan(output)).item()
+                # 检查输入数据是否包含nan并进行处理
+                if torch.isnan(data).any():
+                    # 记录NaN统计
+                    nan_stats['input_data'] += 1
+                    
+                    # 尝试修复NaN值
+                    data_mean = torch.nanmean(data, dim=0)
+                    nan_mask = torch.isnan(data)
+                    nan_count = torch.sum(nan_mask).item()
+                    
+                    # 用平均值填充NaN
+                    data_clone = data.clone()
+                    for i in range(data.size(0)):
+                        sample_nan_mask = nan_mask[i]
+                        if sample_nan_mask.any():
+                            data_clone[i][sample_nan_mask] = data_mean[sample_nan_mask]
                     
                     # 记录到NaN日志
                     new_nan_row = pd.DataFrame({
                         'epoch': [epoch+1],
                         'batch': [batch_idx],
-                        'location': ['model_output'],
-                        'action_taken': ['Skipping batch'],
+                        'location': ['input_data'],
+                        'action_taken': [f'Filled {nan_count} NaN values with mean'],
                         'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
                     })
                     nan_df = pd.concat([nan_df, new_nan_row], ignore_index=True)
-                    nan_df.to_csv(nan_log_path, index=False)
                     
-                    logger.warning(f"Detected {output_nan_count} NaN values in model output, skipping current batch")
-                    nan_counter += 1
-                    if nan_counter >= max_nan_attempts:
-                        _reset_model_and_optimizer(model, optimizer, nan_counter, max_nan_attempts)
-                        nan_counter = 0
-                    continue
+                    logger.warning(f"Epoch {epoch+1}, Batch {batch_idx}: Detected {nan_count} NaN values in input data")
+                    data = data_clone
                 
-                # 计算损失
-                loss = F.mse_loss(output, target)
-                
-                # 检查损失值是否为nan
-                if torch.isnan(loss):
-                    nan_stats['loss'] += 1
+                # 检查目标数据是否包含nan并进行处理
+                if torch.isnan(target).any():
+                    nan_stats['input_data'] += 1
+                    target_mean = torch.nanmean(target, dim=0)
+                    nan_mask = torch.isnan(target)
+                    nan_count = torch.sum(nan_mask).item()
+                    
+                    # 用平均值填充NaN
+                    target_clone = target.clone()
+                    for i in range(target.size(0)):
+                        sample_nan_mask = nan_mask[i]
+                        if sample_nan_mask.any():
+                            target_clone[i][sample_nan_mask] = target_mean[sample_nan_mask]
                     
                     # 记录到NaN日志
                     new_nan_row = pd.DataFrame({
                         'epoch': [epoch+1],
                         'batch': [batch_idx],
-                        'location': ['loss'],
-                        'action_taken': ['Skipping batch'],
+                        'location': ['target_data'],
+                        'action_taken': [f'Filled {nan_count} NaN values with mean'],
                         'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
                     })
                     nan_df = pd.concat([nan_df, new_nan_row], ignore_index=True)
-                    nan_df.to_csv(nan_log_path, index=False)
                     
-                    logger.warning(f"NaN loss detected, skipping current batch")
-                    nan_counter += 1
-                    if nan_counter >= max_nan_attempts:
-                        _reset_model_and_optimizer(model, optimizer, nan_counter, max_nan_attempts)
-                        nan_counter = 0
-                    continue
+                    logger.warning(f"Epoch {epoch+1}, Batch {batch_idx}: Detected {nan_count} NaN values in target data")
+                    target = target_clone
                 
-                # 反向传播
-                loss.backward()
+                optimizer.zero_grad()
                 
-                # 检查梯度是否包含nan
-                nan_in_grad = False
-                for name, param in model.named_parameters():
-                    if param.grad is not None and torch.isnan(param.grad).any():
-                        nan_in_grad = True
+                # 使用异常处理来捕获前向传播和损失计算中的错误
+                try:
+                    # 前向传播
+                    output = model(data)
+                    
+                    # 检查模型输出是否包含nan
+                    if torch.isnan(output).any():
+                        nan_stats['model_output'] += 1
+                        output_nan_count = torch.sum(torch.isnan(output)).item()
+                        
+                        # 尝试修复输出中的NaN值
+                        output_mean = torch.nanmean(output, dim=0)
+                        nan_mask = torch.isnan(output)
+                        output[nan_mask] = output_mean.repeat(output.size(0), 1)[nan_mask]
+                        
+                        # 记录到NaN日志
+                        new_nan_row = pd.DataFrame({
+                            'epoch': [epoch+1],
+                            'batch': [batch_idx],
+                            'location': ['model_output'],
+                            'action_taken': [f'Filled {output_nan_count} NaN values with mean'],
+                            'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
+                        })
+                        nan_df = pd.concat([nan_df, new_nan_row], ignore_index=True)
+                        
+                        logger.warning(f"Epoch {epoch+1}, Batch {batch_idx}: Detected {output_nan_count} NaN values in model output")
+                    
+                    # 计算损失前检查输出和目标是否包含无限值
+                    if torch.isinf(output).any() or torch.isinf(target).any():
+                        # 替换无限值
+                        output[torch.isinf(output)] = 0.0
+                        target[torch.isinf(target)] = 0.0
+                        logger.warning(f"Epoch {epoch+1}, Batch {batch_idx}: Detected infinite values, replacing with 0")
+                    
+                    # 计算损失
+                    loss = F.mse_loss(output, target, reduction='none')
+                    
+                    # 检查并处理每个样本的损失
+                    if torch.isnan(loss).any() or torch.isinf(loss).any():
+                        # 将NaN或无限损失替换为0
+                        loss[torch.isnan(loss) | torch.isinf(loss)] = 0.0
+                        logger.warning(f"Epoch {epoch+1}, Batch {batch_idx}: NaN/Inf in element-wise loss detected, replacing with 0")
+                    
+                    # 取平均值作为最终损失
+                    loss = loss.mean()
+                    
+                    # 最终检查损失值
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        nan_stats['loss'] += 1
+                        
+                        # 记录到NaN日志
+                        new_nan_row = pd.DataFrame({
+                            'epoch': [epoch+1],
+                            'batch': [batch_idx],
+                            'location': ['final_loss'],
+                            'action_taken': ['Skipping batch'],
+                            'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
+                        })
+                        nan_df = pd.concat([nan_df, new_nan_row], ignore_index=True)
+                        
+                        logger.warning(f"Epoch {epoch+1}, Batch {batch_idx}: Final loss is NaN/Inf, skipping batch")
+                        skipped_batches += 1
+                        nan_counter += 1
+                        continue
+                    
+                    # 反向传播
+                    loss.backward()
+                    
+                    # 修复梯度中的NaN值并进行梯度裁剪
+                    nan_grad_count = _fix_nan_gradients(model, threshold=5.0)
+                    
+                    if nan_grad_count > 0:
                         nan_stats['gradients'] += 1
+                        logger.warning(f"Epoch {epoch+1}, Batch {batch_idx}: Fixed {nan_grad_count} NaN values in gradients")
                         
-                        # 将NaN梯度置零
-                        nan_mask = torch.isnan(param.grad)
-                        param.grad[nan_mask] = 0.0
+                        # 记录到NaN日志
+                        new_nan_row = pd.DataFrame({
+                            'epoch': [epoch+1],
+                            'batch': [batch_idx],
+                            'location': ['gradients'],
+                            'action_taken': [f'Fixed {nan_grad_count} NaN gradients'],
+                            'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
+                        })
+                        nan_df = pd.concat([nan_df, new_nan_row], ignore_index=True)
+                    
+                    # 全局梯度裁剪
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    
+                    # 更新参数
+                    optimizer.step()
+                    
+                    # 收集统计信息
+                    epoch_loss += loss.item()
+                    valid_batches += 1
+                    nan_counter = 0  # 重置nan计数器
+                    
+                except RuntimeError as e:
+                    if 'one of the variables needed for gradient computation' in str(e):
+                        logger.error(f"Epoch {epoch+1}, Batch {batch_idx}: Gradient computation error: {str(e)}")
                         
-                        grad_nan_count = torch.sum(nan_mask).item()
-                        logger.warning(f"Detected {grad_nan_count} NaN values in gradients of '{name}', set to zero")
-                
-                if nan_in_grad:
-                    # 记录到NaN日志
-                    new_nan_row = pd.DataFrame({
-                        'epoch': [epoch+1],
-                        'batch': [batch_idx],
-                        'location': ['gradients'],
-                        'action_taken': ['Set gradients to zero'],
-                        'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
-                    })
-                    nan_df = pd.concat([nan_df, new_nan_row], ignore_index=True)
-                    nan_df.to_csv(nan_log_path, index=False)
-                
-                # 梯度裁剪
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                
-                # 更新参数
-                optimizer.step()
-                
-                epoch_loss += loss.item()
-                valid_batches += 1
-                nan_counter = 0  # 重置nan计数器
-                
+                        # 记录到NaN日志
+                        new_nan_row = pd.DataFrame({
+                            'epoch': [epoch+1],
+                            'batch': [batch_idx],
+                            'location': ['gradient_computation'],
+                            'action_taken': ['Skipping batch and zeroing gradients'],
+                            'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
+                        })
+                        nan_df = pd.concat([nan_df, new_nan_row], ignore_index=True)
+                        
+                        # 清零梯度
+                        optimizer.zero_grad()
+                        skipped_batches += 1
+                        nan_counter += 1
+                    else:
+                        raise e
+                    
             except Exception as e:
-                logger.error(f"Error during training batch: {str(e)}")
+                logger.error(f"Epoch {epoch+1}, Batch {batch_idx}: Error during training: {str(e)}")
                 
                 # 记录到NaN日志
                 new_nan_row = pd.DataFrame({
@@ -589,26 +744,47 @@ def train_model(model, train_loader, val_loader, element, config):
                     'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
                 })
                 nan_df = pd.concat([nan_df, new_nan_row], ignore_index=True)
-                nan_df.to_csv(nan_log_path, index=False)
                 
-                continue
+                skipped_batches += 1
+                nan_counter += 1
+                optimizer.zero_grad()  # 确保梯度被清零
+            
+            # 检查是否需要重置模型
+            if nan_counter >= max_nan_attempts:
+                _reset_model_and_optimizer(model, optimizer, nan_counter, max_nan_attempts)
+                nan_counter = 0
+            
+            # 每50个批次保存NaN日志
+            if batch_idx % 50 == 0:
+                try:
+                    nan_df.to_csv(nan_log_path, index=False)
+                except Exception as e:
+                    logger.error(f"Error saving NaN log: {str(e)}")
         
         # 检查是否有有效的损失值
         if valid_batches == 0:
-            logger.error("No valid loss values during training")
+            logger.error(f"Epoch {epoch+1}: No valid loss values during training")
             
             # 记录到NaN日志
             new_nan_row = pd.DataFrame({
                 'epoch': [epoch+1],
                 'batch': [0],
                 'location': ['entire_epoch'],
-                'action_taken': ['Skipping entire epoch'],
+                'action_taken': ['No valid batches in epoch'],
                 'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
             })
             nan_df = pd.concat([nan_df, new_nan_row], ignore_index=True)
             nan_df.to_csv(nan_log_path, index=False)
             
-            return [], []
+            # 如果连续多个epoch没有有效损失，提前停止训练
+            if len(train_losses) > 0 and sum(1 for loss in train_losses[-3:] if loss == 0) == 3:
+                logger.error("Multiple epochs with no valid losses, stopping training")
+                break
+            
+            # 添加零损失记录，继续训练
+            train_losses.append(0)
+            val_losses.append(0)
+            continue
         
         # 计算平均训练损失
         avg_train_loss = epoch_loss / valid_batches
@@ -625,281 +801,251 @@ def train_model(model, train_loader, val_loader, element, config):
         
         with torch.no_grad():
             for data, target in val_loader:
-                data, target = data.to(device), target.to(device)
-                
-                # 检查并填充数据中的NaN
-                if torch.isnan(data).any():
-                    data_mean = torch.nanmean(data, dim=0)
-                    nan_mask = torch.isnan(data)
-                    data[nan_mask] = data_mean.repeat(data.size(0), 1)[nan_mask]
-                    
                 try:
+                    data, target = data.to(device), target.to(device)
+                    
+                    # 检查并填充数据中的NaN
+                    if torch.isnan(data).any():
+                        data_mean = torch.nanmean(data, dim=0)
+                        nan_mask = torch.isnan(data)
+                        for i in range(data.size(0)):
+                            sample_nan_mask = nan_mask[i]
+                            if sample_nan_mask.any():
+                                data[i][sample_nan_mask] = data_mean[sample_nan_mask]
+                    
                     # 前向传播
                     output = model(data)
                     
                     # 检查并处理输出中的NaN
                     if torch.isnan(output).any():
-                        # 用零替换输出中的NaN
-                        output[torch.isnan(output)] = 0.0
+                        # 使用均值填充NaN
+                        output_mean = torch.nanmean(output, dim=0)
+                        nan_mask = torch.isnan(output)
+                        for i in range(output.size(0)):
+                            sample_nan_mask = nan_mask[i]
+                            if sample_nan_mask.any():
+                                output[i][sample_nan_mask] = output_mean[sample_nan_mask]
                     
                     # 计算损失
                     loss = F.mse_loss(output, target)
                     
                     # 检查损失值
-                    if torch.isnan(loss):
-                        continue
-                    
-                    # 收集非NaN预测结果和真实值
-                    valid_indices = ~torch.isnan(output).any(dim=1)
-                    if valid_indices.any():
-                        all_outputs.append(output[valid_indices].cpu().numpy())
-                        all_targets.append(target[valid_indices].cpu().numpy())
-                    
-                    val_loss += loss.item()
-                    valid_val_batches += 1
-                    
+                    if not torch.isnan(loss) and not torch.isinf(loss):
+                        val_loss += loss.item()
+                        valid_val_batches += 1
+                        
+                        # 收集预测和真实值
+                        all_outputs.append(output.cpu().numpy())
+                        all_targets.append(target.cpu().numpy())
                 except Exception as e:
-                    logger.error(f"Error during validation batch: {str(e)}")
+                    logger.warning(f"Error during validation: {str(e)}")
                     continue
         
-        # 检查是否有有效的验证损失值
-        if valid_val_batches == 0:
-            logger.error("No valid loss values during validation")
-            return [], []
-        
-        # 计算平均验证损失
-        avg_val_loss = val_loss / valid_val_batches
-        val_losses.append(avg_val_loss)
-        
-        # 更新学习率
-        current_lr = optimizer.param_groups[0]['lr']
-        scheduler.step()
-        
-        # 生成当前epoch的评估结果和可视化
-        if len(all_outputs) > 0 and len(all_targets) > 0:
-            try:
-                # 合并所有批次的结果
-                all_outputs = np.concatenate(all_outputs)
-                all_targets = np.concatenate(all_targets)
+        # 确保验证集上有有效的损失计算
+        if valid_val_batches > 0:
+            avg_val_loss = val_loss / valid_val_batches
+            val_losses.append(avg_val_loss)
+            
+            # 更新学习率
+            scheduler.step()
+            current_lr = optimizer.param_groups[0]['lr']
+            
+            # 评估模型性能
+            if all_outputs and all_targets:
+                all_outputs = np.vstack(all_outputs)
+                all_targets = np.vstack(all_targets)
                 
-                # 计算评估指标
-                mse = np.mean((all_outputs - all_targets) ** 2)
-                rmse = np.sqrt(mse)
-                mae = np.mean(np.abs(all_outputs - all_targets))
-                r2 = r2_score(all_targets.flatten(), all_outputs.flatten())
-                scatter = np.std(all_outputs - all_targets)
+                # 计算RMSE
+                rmse = np.sqrt(np.mean((all_outputs - all_targets) ** 2))
                 
-                # 在评估指标中添加NaN统计
-                metrics_path = os.path.join(batch_results_dir, f'epoch_{epoch+1}_metrics.txt')
-                with open(metrics_path, 'w') as f:
-                    f.write(f"Epoch {epoch+1} Evaluation Results for {element}\n")
-                    f.write("=" * 50 + "\n")
-                    f.write(f"Training Loss: {avg_train_loss:.6f}\n")
-                    f.write(f"Validation Loss: {avg_val_loss:.6f}\n")
-                    f.write(f"MSE: {mse:.6f}\n")
-                    f.write(f"RMSE: {rmse:.6f}\n")
-                    f.write(f"MAE: {mae:.6f}\n")
-                    f.write(f"R²: {r2:.6f}\n")
-                    f.write(f"Scatter: {scatter:.6f}\n")
-                    f.write(f"Learning Rate: {current_lr:.8f}\n")
-                    f.write("\nNaN Statistics:\n")
-                    f.write(f"Total Batches: {nan_stats['total_batches']}\n")
-                    f.write(f"NaN in Input Data: {nan_stats['input_data']} ({nan_stats['input_data']/max(1, nan_stats['total_batches'])*100:.2f}%)\n")
-                    f.write(f"NaN in Model Output: {nan_stats['model_output']} ({nan_stats['model_output']/max(1, nan_stats['total_batches'])*100:.2f}%)\n") 
-                    f.write(f"NaN in Loss: {nan_stats['loss']} ({nan_stats['loss']/max(1, nan_stats['total_batches'])*100:.2f}%)\n")
-                    f.write(f"NaN in Gradients: {nan_stats['gradients']} ({nan_stats['gradients']/max(1, nan_stats['total_batches'])*100:.2f}%)\n")
+                # 计算R²
+                r2 = 1 - np.sum((all_targets - all_outputs) ** 2) / np.sum((all_targets - np.mean(all_targets)) ** 2)
                 
-                # 生成散点图
-                plt.figure(figsize=(10, 6))
-                plt.scatter(all_targets, all_outputs, alpha=0.5)
-                plt.plot([min(all_targets), max(all_targets)], [min(all_targets), max(all_targets)], 'r--')
-                plt.xlabel('True Values')
-                plt.ylabel('Predictions')
-                plt.title(f'Epoch {epoch+1} Predictions vs True Values (RMSE: {rmse:.4f})')
-                plt.grid(True)
-                plt.tight_layout()
-                scatter_path = os.path.join(batch_results_dir, f'epoch_{epoch+1}_scatter.png')
-                plt.savefig(scatter_path)
-                plt.close()
-                
-                # 更新批次追踪文件
-                new_row = pd.DataFrame({
-                    'epoch': [epoch+1],
-                    'train_loss': [avg_train_loss],
-                    'val_loss': [avg_val_loss],
-                    'lr': [current_lr],
-                    'rmse': [rmse],
-                    'mae': [mae],
-                    'r2': [r2],
-                    'scatter': [scatter],
-                    'nan_input_rate': [nan_stats['input_data']/max(1, nan_stats['total_batches'])*100],
-                    'nan_output_rate': [nan_stats['model_output']/max(1, nan_stats['total_batches'])*100],
-                    'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
-                })
-                
-                batch_df = pd.concat([batch_df, new_row], ignore_index=True)
-                batch_df.to_csv(batch_tracking_path, index=False)
-                
-                # 生成训练进度趋势图
-                if len(batch_df) > 1:
-                    plt.figure(figsize=(12, 10))
-                    
-                    plt.subplot(3, 2, 1)
-                    plt.plot(batch_df['epoch'], batch_df['train_loss'], 'b-', label='Training Loss')
-                    plt.plot(batch_df['epoch'], batch_df['val_loss'], 'r-', label='Validation Loss')
-                    plt.xlabel('Epoch')
-                    plt.ylabel('Loss')
-                    plt.title('Training/Validation Loss Trends')
-                    plt.legend()
-                    plt.grid(True)
-                    
-                    plt.subplot(3, 2, 2)
-                    plt.plot(batch_df['epoch'], batch_df['rmse'], 'g-')
-                    plt.xlabel('Epoch')
-                    plt.ylabel('RMSE')
-                    plt.title('RMSE Trend')
-                    plt.grid(True)
-                    
-                    plt.subplot(3, 2, 3)
-                    plt.plot(batch_df['epoch'], batch_df['mae'], 'm-')
-                    plt.xlabel('Epoch')
-                    plt.ylabel('MAE')
-                    plt.title('MAE Trend')
-                    plt.grid(True)
-                    
-                    plt.subplot(3, 2, 4)
-                    plt.plot(batch_df['epoch'], batch_df['r2'], 'c-')
-                    plt.xlabel('Epoch')
-                    plt.ylabel('R²')
-                    plt.title('R² Trend')
-                    plt.grid(True)
-                    
-                    plt.subplot(3, 2, 5)
-                    plt.plot(batch_df['epoch'], batch_df['scatter'], 'y-')
-                    plt.xlabel('Epoch')
-                    plt.ylabel('Scatter')
-                    plt.title('Scatter Trend')
-                    plt.grid(True)
-                    
-                    plt.subplot(3, 2, 6)
-                    plt.plot(batch_df['epoch'], batch_df['lr'], 'k-')
-                    plt.xlabel('Epoch')
-                    plt.ylabel('Learning Rate')
-                    plt.title('Learning Rate Trend')
-                    plt.yscale('log')
-                    plt.grid(True)
-                    
-                    plt.tight_layout()
-                    trends_path = os.path.join(batch_results_dir, 'training_trends.png')
-                    plt.savefig(trends_path)
-                    plt.close()
-                
-                logger.info(f"Successfully generated evaluation results and visualization for Epoch {epoch+1}")
-                
-            except Exception as e:
-                logger.error(f"Error generating evaluation results for Epoch {epoch+1}: {str(e)}")
-        
-        # 早停检查
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            patience_counter = 0
-            # 保存最佳模型
-            _save_checkpoint(model, optimizer, scheduler, epoch, best_val_loss, element, {
-                'output': {'model_dir': config.model_config['model_dir']}
+                metrics_str = f"RMSE: {rmse:.6f}, R²: {r2:.6f}"
+            else:
+                metrics_str = "No valid predictions for metrics calculation"
+            
+            # 输出训练信息
+            epoch_time = time.time() - epoch_start_time
+            logger.info(f"Epoch {epoch+1}/{config.training_config['num_epochs']}, "
+                       f"Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}, "
+                       f"LR: {current_lr:.7f}, {metrics_str}, "
+                       f"Time: {epoch_time:.2f}s, Skipped: {skipped_batches}")
+            
+            # 记录到批次追踪文件
+            new_batch_row = pd.DataFrame({
+                'epoch': [epoch+1],
+                'train_loss': [avg_train_loss],
+                'val_loss': [avg_val_loss],
+                'lr': [current_lr],
+                'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
             })
+            batch_df = pd.concat([batch_df, new_batch_row], ignore_index=True)
             
-            # 标记这是最佳模型
-            best_model_path = os.path.join(batch_results_dir, 'best_model_info.txt')
-            with open(best_model_path, 'w') as f:
-                f.write(f"Best Model - Epoch {epoch+1}\n")
-                f.write(f"Validation Loss: {best_val_loss:.6f}\n")
-                f.write(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            try:
+                batch_df.to_csv(batch_tracking_path, index=False)
+            except Exception as e:
+                logger.error(f"Error saving batch tracking file: {str(e)}")
+            
+            # 检查是否为最佳模型
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                patience_counter = 0
                 
-        else:
-            patience_counter += 1
+                # 保存最佳模型
+                best_model_path = os.path.join(config.model_config['model_dir'], f'best_model_{element}.pth')
+                
+                # 创建一个包含更多信息的检查点
+                checkpoint = {
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'best_val_loss': best_val_loss,
+                    'train_losses': train_losses,
+                    'val_losses': val_losses,
+                    'element': element,
+                    'config': {
+                        'input_size': model.input_size if hasattr(model, 'input_size') else None,
+                        'dropout': model.dropout if hasattr(model, 'dropout') else None,
+                        'num_features': model.num_features if hasattr(model, 'num_features') else None
+                    }
+                }
+                
+                try:
+                    torch.save(checkpoint, best_model_path)
+                    logger.info(f"Saved best model at epoch {epoch+1} with validation loss {best_val_loss:.6f}")
+                    
+                    # 记录模型信息到文件
+                    info_path = os.path.join(config.model_config['model_dir'], f'best_model_info_{element}.txt')
+                    with open(info_path, 'w') as f:
+                        f.write(f"Best Model Information for Element: {element}\n")
+                        f.write("=" * 50 + "\n\n")
+                        f.write(f"Epoch: {epoch+1}\n")
+                        f.write(f"Validation Loss: {best_val_loss:.6f}\n")
+                        f.write(f"Training Loss: {avg_train_loss:.6f}\n")
+                        f.write(f"Learning Rate: {current_lr:.7f}\n")
+                        f.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                        f.write(f"Model Path: {best_model_path}\n\n")
+                        
+                        f.write("Model Configuration:\n")
+                        if hasattr(model, 'input_size'):
+                            f.write(f"Input Size: {model.input_size}\n")
+                        if hasattr(model, 'dropout'):
+                            f.write(f"Dropout Rate: {model.dropout}\n")
+                        if hasattr(model, 'num_features'):
+                            f.write(f"Number of Features: {model.num_features}\n")
+                        
+                        f.write("\nTraining Configuration:\n")
+                        for key, value in config.training_config.items():
+                            f.write(f"{key}: {value}\n")
+                except Exception as e:
+                    logger.error(f"Error saving best model: {str(e)}")
+            else:
+                patience_counter += 1
+                logger.info(f"No improvement for {patience_counter} epochs (patience: {max_patience})")
+                
+                # 保存定期检查点
+                if epoch % 5 == 0:
+                    checkpoint_path = os.path.join(config.model_config['model_dir'], f'checkpoint_{element}_epoch{epoch+1}.pth')
+                    try:
+                        torch.save({
+                            'epoch': epoch,
+                            'model_state_dict': model.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'scheduler_state_dict': scheduler.state_dict(),
+                            'best_val_loss': best_val_loss,
+                            'train_losses': train_losses,
+                            'val_losses': val_losses,
+                            'patience_counter': patience_counter
+                        }, checkpoint_path)
+                        logger.info(f"Saved checkpoint at epoch {epoch+1}")
+                    except Exception as e:
+                        logger.error(f"Error saving checkpoint: {str(e)}")
+            
+            # 提前停止
             if patience_counter >= max_patience:
-                logger.info(f"Early stopping: No improvement for {max_patience} epochs")
+                logger.info(f"Early stopping triggered after {max_patience} epochs without improvement")
                 break
+        else:
+            # 没有有效的验证损失，继续训练
+            logger.warning(f"Epoch {epoch+1}: No valid validation loss values")
+            val_losses.append(0)
+    
+    # 训练结束
+    training_time = time.time() - training_start_time
+    
+    # 创建训练总结
+    summary_path = os.path.join(batch_results_dir, 'training_summary.txt')
+    with open(summary_path, 'w') as f:
+        f.write(f"Training Summary for Element: {element}\n")
+        f.write("=" * 50 + "\n\n")
+        f.write(f"Total Training Time: {training_time:.2f} seconds ({training_time/3600:.2f} hours)\n")
+        f.write(f"Total Epochs: {len(train_losses)}\n")
+        f.write(f"Best Validation Loss: {best_val_loss:.6f}\n\n")
         
-        # 每10个epoch记录一次损失
-        logger.info(f'Epoch [{epoch+1}/{config.training_config["num_epochs"]}] '
-                   f'Train Loss: {avg_train_loss:.6f} '
-                   f'Val Loss: {avg_val_loss:.6f}')
+        # 添加NaN统计信息
+        f.write("NaN Statistics:\n")
+        for key, value in nan_stats.items():
+            f.write(f"{key}: {value}\n")
+        
+        # 添加最后5个epoch的损失
+        f.write("\nLast 5 Epochs:\n")
+        f.write("Epoch | Train Loss | Val Loss\n")
+        f.write("-" * 35 + "\n")
+        for i in range(max(0, len(train_losses)-5), len(train_losses)):
+            f.write(f"{i+1} | {train_losses[i]:.6f} | {val_losses[i]:.6f}\n")
     
-    # 生成训练完成的汇总报告
-    if len(batch_df) > 0:
-        try:
-            # 找出最佳epoch
-            best_epoch = batch_df.loc[batch_df['val_loss'].idxmin(), 'epoch']
-            best_val_loss = batch_df['val_loss'].min()
-            best_rmse = batch_df.loc[batch_df['val_loss'].idxmin(), 'rmse']
-            
-            # 保存最终汇总报告
-            summary_path = os.path.join(batch_results_dir, 'training_summary.txt')
-            with open(summary_path, 'w') as f:
-                f.write(f"Training Summary for {element}\n")
-                f.write("=" * 50 + "\n")
-                f.write(f"Total Training Epochs: {len(batch_df)}\n")
-                f.write(f"Best Epoch: {best_epoch} (Validation Loss: {best_val_loss:.6f}, RMSE: {best_rmse:.6f})\n")
-                f.write(f"Initial Learning Rate: {batch_df['lr'].iloc[0]:.8f}\n")
-                f.write(f"Final Learning Rate: {batch_df['lr'].iloc[-1]:.8f}\n")
-                f.write("\nTraining Details:\n")
-                
-                # 添加每10个epoch的详细信息
-                step = 10 if len(batch_df) > 50 else max(1, len(batch_df) // 5)
-                for i in range(0, len(batch_df), step):
-                    epoch_data = batch_df.iloc[i]
-                    f.write(f"Epoch {epoch_data['epoch']}: Training Loss={epoch_data['train_loss']:.6f}, Validation Loss={epoch_data['val_loss']:.6f}, RMSE={epoch_data['rmse']:.6f}\n")
-            
-            logger.info(f"Generated training summary report: {summary_path}")
-            
-        except Exception as e:
-            logger.error(f"Error generating training summary report: {str(e)}")
-    
-    # 生成NaN值分析报告
-    nan_report_path = os.path.join(batch_results_dir, 'nan_analysis_report.txt')
-    with open(nan_report_path, 'w') as f:
-        f.write(f"NaN Analysis Report for {element}\n")
-        f.write("=" * 50 + "\n")
+    # 创建NaN分析报告
+    nan_analysis_path = os.path.join(batch_results_dir, 'nan_analysis_report.txt')
+    with open(nan_analysis_path, 'w') as f:
+        f.write(f"NaN Analysis Report for Element: {element}\n")
+        f.write("=" * 50 + "\n\n")
+        f.write("Summary of NaN Occurrences:\n")
+        f.write(f"Input Data: {nan_stats['input_data']} batches\n")
+        f.write(f"Model Output: {nan_stats['model_output']} batches\n")
+        f.write(f"Loss: {nan_stats['loss']} batches\n")
+        f.write(f"Gradients: {nan_stats['gradients']} batches\n")
         f.write(f"Total Batches: {nan_stats['total_batches']}\n\n")
-        f.write("NaN Location Statistics:\n")
-        f.write(f"NaN in Input Data: {nan_stats['input_data']} ({nan_stats['input_data']/max(1, nan_stats['total_batches'])*100:.2f}%)\n")
-        f.write(f"NaN in Model Output: {nan_stats['model_output']} ({nan_stats['model_output']/max(1, nan_stats['total_batches'])*100:.2f}%)\n")
-        f.write(f"NaN in Loss: {nan_stats['loss']} ({nan_stats['loss']/max(1, nan_stats['total_batches'])*100:.2f}%)\n")
-        f.write(f"NaN in Gradients: {nan_stats['gradients']} ({nan_stats['gradients']/max(1, nan_stats['total_batches'])*100:.2f}%)\n\n")
         
-        f.write("Possible NaN Causes and Suggestions:\n")
+        # 计算NaN比例
+        if nan_stats['total_batches'] > 0:
+            input_pct = nan_stats['input_data'] / nan_stats['total_batches'] * 100
+            output_pct = nan_stats['model_output'] / nan_stats['total_batches'] * 100
+            loss_pct = nan_stats['loss'] / nan_stats['total_batches'] * 100
+            grad_pct = nan_stats['gradients'] / nan_stats['total_batches'] * 100
+            
+            f.write("Percentages:\n")
+            f.write(f"Input Data NaN: {input_pct:.2f}%\n")
+            f.write(f"Model Output NaN: {output_pct:.2f}%\n")
+            f.write(f"Loss NaN: {loss_pct:.2f}%\n")
+            f.write(f"Gradients NaN: {grad_pct:.2f}%\n\n")
+        
+        # 添加可能的原因和建议
+        f.write("Possible Causes and Recommendations:\n")
         if nan_stats['input_data'] > 0:
-            f.write("- NaN in Input Data: Check preprocessing steps to ensure all data is properly normalized and cleaned\n")
+            f.write("- Input Data: Check data preprocessing, normalization, and handling of outliers\n")
         if nan_stats['model_output'] > 0:
-            f.write("- NaN in Model Output: May be caused by numerical overflow or activation function issues, consider using more stable activation functions or adjusting network structure\n")
+            f.write("- Model Output: Review model architecture, activation functions, and initializations\n")
         if nan_stats['loss'] > 0:
-            f.write("- NaN in Loss: Check loss function calculation, adjust learning rate or use more robust loss functions\n")
+            f.write("- Loss: Ensure target values are properly normalized and check for division by zero\n")
         if nan_stats['gradients'] > 0:
-            f.write("- NaN in Gradients: Consider using smaller learning rates or increasing gradient clipping strength to avoid gradient explosion\n")
+            f.write("- Gradients: Consider gradient clipping, reducing learning rate, or batch size\n")
         
-        if sum([nan_stats['input_data'], nan_stats['model_output'], nan_stats['loss'], nan_stats['gradients']]) == 0:
-            f.write("- No NaN values detected during training, model numerical stability is good\n")
+        f.write("\nRecommended Actions:\n")
+        if nan_stats['total_batches'] > 0 and (nan_stats['input_data'] + nan_stats['model_output'] + nan_stats['loss'] + nan_stats['gradients']) > 0:
+            f.write("1. Review data preprocessing pipeline\n")
+            f.write("2. Check model architecture for numerical stability\n")
+            f.write("3. Reduce learning rate and increase batch size\n")
+            f.write("4. Add batch normalization to stabilize hidden layer activations\n")
+            f.write("5. Consider using more robust loss functions\n")
+        else:
+            f.write("No significant NaN issues detected\n")
     
-    logger.info(f"Generated NaN analysis report: {nan_report_path}")
+    logger.info(f"Training completed in {training_time:.2f} seconds ({training_time/3600:.2f} hours)")
+    logger.info(f"Best validation loss: {best_val_loss:.6f}")
     
     return train_losses, val_losses
-
-# 新增的辅助函数，用于重置模型和优化器
-def _reset_model_and_optimizer(model, optimizer, nan_counter, max_nan_attempts):
-    """重置模型参数和学习率"""
-    logger.warning(f"NaN values detected {max_nan_attempts} times consecutively, resetting model and learning rate")
-    
-    # 重置模型参数
-    model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
-    
-    # 降低学习率
-    for param_group in optimizer.param_groups:
-        param_group['lr'] *= 0.1
-        
-    # 记录降低后的学习率
-    new_lr = optimizer.param_groups[0]['lr']
-    logger.info(f"Learning rate reduced to {new_lr:.8f}")
 
 # =============== 3. 评估相关 ===============
 def evaluate_model(model, test_loader, device=None):
@@ -1163,36 +1309,65 @@ def load_trained_model(model_path, device=None):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     try:
+        # 防止递归错误：设置递归深度限制
+        import sys
+        original_recursion_limit = sys.getrecursionlimit()
+        sys.setrecursionlimit(10000)  # 增加递归深度限制
+        
         # 尝试加载模型
+        logger.info(f"Loading model from {model_path}")
         checkpoint = torch.load(model_path, map_location=device)
         
         # 检查checkpoint是否包含模型架构信息
-        if 'model_state_dict' in checkpoint:
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
             # 创建模型实例
             if 'model_config' in checkpoint:
                 config = checkpoint['model_config']
                 input_size = config.get('input_size', 1024)
                 hidden_size = config.get('hidden_size', 256)
                 output_size = config.get('output_size', 1)
-                dropout_rate = config.get('dropout_rate', 0.3)
+                dropout_rate = config.get('dropout_rate', 0.2)
                 model = SpectralResCNN(input_size, hidden_size, output_size, dropout_rate)
             else:
                 # 使用默认参数
-                logger.warning(f"模型配置信息缺失，使用默认参数创建模型")
+                logger.warning(f"Model configuration missing, using default parameters")
                 model = SpectralResCNN()
                 
             # 加载模型权重
             model.load_state_dict(checkpoint['model_state_dict'])
         else:
-            # 老版本的checkpoint可能直接保存了模型状态
+            # 直接加载模型状态字典
+            logger.info(f"Loading from direct state dict")
             model = SpectralResCNN()
-            model.load_state_dict(checkpoint)
+            
+            # 如果checkpoint不是字典而是OrderedDict，直接加载
+            if not isinstance(checkpoint, dict):
+                model.load_state_dict(checkpoint)
+            else:
+                # 尝试直接加载整个checkpoint作为state_dict
+                try:
+                    model.load_state_dict(checkpoint)
+                except Exception as e:
+                    logger.error(f"Failed to load state_dict: {str(e)}")
+                    # 回退到默认模型
+                    model = SpectralResCNN()
+        
+        # 恢复原始递归深度限制
+        sys.setrecursionlimit(original_recursion_limit)
         
         model.to(device)
         model.eval()  # 设置为评估模式
         logger.info(f"Successfully loaded model from {model_path}")
         return model
         
+    except RecursionError as e:
+        logger.error(f"Recursion error while loading model: {str(e)}")
+        # 在递归错误时，返回一个新的未训练模型
+        model = SpectralResCNN()
+        model.to(device)
+        model.eval()
+        logger.warning("Using untrained model as backup due to recursion error")
+        return model
     except Exception as e:
         logger.error(f"Error loading model: {str(e)}")
         # 创建一个空模型作为后备选择
@@ -1273,7 +1448,7 @@ def train_and_evaluate_model(train_loader, val_loader, test_loader, element, con
     }
     
     # 训练模型
-    train_losses, val_losses = train_model(
+    train_losses, val_losses = train(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
