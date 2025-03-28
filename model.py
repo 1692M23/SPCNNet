@@ -109,13 +109,13 @@ class SpectralResCNN(nn.Module):
         # 循环模块 - 跨波段信念增强
         self.gru = nn.GRU(64, 64, bidirectional=True, batch_first=True)
         self.cross_band_attention = nn.Sequential(
-            nn.Conv1d(128, 64, kernel_size=1),
+            nn.Conv1d(128, 128, kernel_size=1),  # 修改输出通道数为128以匹配GRU输出
             nn.Sigmoid()
         )
         
         # 信息融合层
         self.fusion = nn.Sequential(
-            nn.Conv1d(128, 64, kernel_size=1),
+            nn.Conv1d(192, 64, kernel_size=1),  # 修改输入通道数为192 (64 + 128)
             nn.BatchNorm1d(64),
             nn.ReLU()
         )
@@ -151,7 +151,7 @@ class SpectralResCNN(nn.Module):
         rec_features = rec_features * attention_weights
         
         # 特征融合
-        combined_features = torch.cat([res_features, rec_features[:, :64, :]], dim=1)
+        combined_features = torch.cat([res_features, rec_features], dim=1)  # 直接拼接，不需要切片
         x = self.fusion(combined_features)
         
         # 全连接层
