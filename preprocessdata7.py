@@ -41,7 +41,7 @@ def is_in_colab():
 IN_COLAB = is_in_colab()
 
 class LAMOSTPreprocessor:
-    def __init__(self, csv_files=['C_FE.csv', 'MG_FE.csv', 'CA_FE.csv'], 
+    def __init__(self, csv_files=None, 
                  fits_dir='fits', 
                  output_dir='processed_data',
                  wavelength_range=None,  # 修改为None，表示将使用最大公有波长范围
@@ -55,7 +55,11 @@ class LAMOSTPreprocessor:
                  low_memory_mode=False):  # 低内存模式
         
         # 设置文件路径
-        self.csv_files = [csv_file if os.path.exists(csv_file) else os.path.join('/content', csv_file) for csv_file in csv_files]
+        if csv_files is None:
+            raise ValueError("必须指定要处理的CSV文件列表")
+        if isinstance(csv_files, str):
+            csv_files = [csv_files]  # 如果传入单个文件名，转换为列表
+        self.csv_files = csv_files
         self.fits_dir = fits_dir if os.path.exists(fits_dir) else os.path.join('/content', fits_dir)
         self.output_dir = output_dir
         self.cache_dir = os.path.join(self.output_dir, 'cache')
@@ -1105,12 +1109,20 @@ class LAMOSTPreprocessor:
                         if os.path.exists(csv_file):
                             df = pd.read_csv(csv_file)
                             if 'spec' in df.columns and 'rv' in df.columns:
-                                # 在CSV中查找匹配记录
-                                matches = df[df['spec'].str.contains(base_file, case=False, na=False)]
+                                # 在CSV中查找精确匹配记录
+                                matches = df[df['spec'].str.contains(f"^{base_file}[.]|/{base_file}[.]", case=False, regex=True, na=False)]
                                 if not matches.empty:
-                                    v_helio = matches.iloc[0]['rv']
-                                    print(f"从CSV找到视向速度值: rv = {v_helio} km/s")
-                                    break
+                                    rv_value = matches.iloc[0]['rv']
+                                    if pd.notna(rv_value):  # 确保rv值不是NaN
+                                        v_helio = float(rv_value)
+                                        print(f"从CSV文件 {csv_file} 找到视向速度值: rv = {v_helio} km/s")
+                                        break
+                                    else:
+                                        print(f"在CSV文件 {csv_file} 中找到匹配记录，但rv值为NaN")
+                                else:
+                                    print(f"在CSV文件 {csv_file} 中未找到匹配的spec记录: {base_file}")
+                            else:
+                                print(f"CSV文件 {csv_file} 缺少必要的列(spec或rv)")
                 except Exception as e:
                     print(f"从CSV查找视向速度数据出错: {e}")
                     # 出错时保持使用FITS中的值或默认值
@@ -1418,6 +1430,16 @@ class LAMOSTPreprocessor:
         start_time = time.time()
         all_data = []
         
+        # 读取CSV文件
+        dataframes = self.read_csv_data()
+        if not dataframes:
+            print("错误: 没有有效的数据集")
+            return np.array([]), np.array([]), np.array([]), np.array([])
+        
+        # 获取要处理的元素列表
+        elements = [os.path.splitext(os.path.basename(csv))[0] for csv in self.csv_files]
+        print(f"将处理以下元素: {', '.join(elements)}")
+        
         # 检查是否有整体进度文件
         progress_file = os.path.join(self.progress_dir, "all_progress.pkl")
         drive_progress_file = "/content/drive/My Drive/SPCNNet_Results/processed_data/progress/all_progress.pkl"
@@ -1427,25 +1449,25 @@ class LAMOSTPreprocessor:
             if os.path.exists(progress_file):
                 try:
                     with open(progress_file, 'rb') as f:
-                        all_data = pickle.load(f)
+                        saved_data = pickle.load(f)
+                        # 只加载指定元素的数据
+                        all_data = [item for item in saved_data if item.get('element', '') in elements]
                     print(f"已加载保存的处理结果，共{len(all_data)}条记录")
                     
                     # 检查是否所有元素都已完成处理
-                    dataframes = self.read_csv_data()
-                    if dataframes:
-                        all_complete = True
-                        for df, element in zip(dataframes, [os.path.splitext(os.path.basename(csv))[0] for csv in self.csv_files]):
-                            element_records = sum(1 for item in all_data if item.get('element') == element)
-                            if element_records < len(df):
-                                all_complete = False
-                                break
+                    all_complete = True
+                    for df, element in zip(dataframes, elements):
+                        element_records = sum(1 for item in all_data if item.get('element') == element)
+                        if element_records < len(df):
+                            all_complete = False
+                            break
+                    
+                    if all_complete:
+                        print("所有指定元素的数据都已处理完成，将直接返回结果")
+                        return self._prepare_arrays(all_data)
+                    else:
+                        print("发现未完成处理的元素，将继续处理")
                         
-                        if all_complete:
-                            print("所有元素的数据都已处理完成，将直接返回结果")
-                            return self._prepare_arrays(all_data)
-                        else:
-                            print("发现未完成处理的元素，将继续处理")
-                            
                 except Exception as e:
                     print(f"加载进度文件出错: {e}，将重新处理所有数据")
                     all_data = []
@@ -1453,38 +1475,33 @@ class LAMOSTPreprocessor:
             elif os.path.exists(drive_progress_file):
                 try:
                     with open(drive_progress_file, 'rb') as f:
-                        all_data = pickle.load(f)
+                        saved_data = pickle.load(f)
+                        # 只加载指定元素的数据
+                        all_data = [item for item in saved_data if item.get('element', '') in elements]
                     print(f"从Google Drive加载处理结果，共{len(all_data)}条记录")
                     
                     # 检查是否所有元素都已完成处理
-                    dataframes = self.read_csv_data()
-                    if dataframes:
-                        all_complete = True
-                        for df, element in zip(dataframes, [os.path.splitext(os.path.basename(csv))[0] for csv in self.csv_files]):
-                            element_records = sum(1 for item in all_data if item.get('element') == element)
-                            if element_records < len(df):
-                                all_complete = False
-                                break
+                    all_complete = True
+                    for df, element in zip(dataframes, elements):
+                        element_records = sum(1 for item in all_data if item.get('element') == element)
+                        if element_records < len(df):
+                            all_complete = False
+                            break
+                    
+                    if all_complete:
+                        print("所有指定元素的数据都已处理完成，将直接返回结果")
+                        return self._prepare_arrays(all_data)
+                    else:
+                        print("发现未完成处理的元素，将继续处理")
                         
-                        if all_complete:
-                            print("所有元素的数据都已处理完成，将直接返回结果")
-                            return self._prepare_arrays(all_data)
-                        else:
-                            print("发现未完成处理的元素，将继续处理")
-                            
                 except Exception as e:
                     print(f"加载Google Drive进度文件出错: {e}，将重新处理所有数据")
                     all_data = []
         
-        # 读取CSV文件
-        dataframes = self.read_csv_data()
-        if not dataframes:
-            print("错误: 没有有效的数据集")
-            return np.array([]), np.array([]), np.array([]), np.array([])
-        
         # 处理每个元素的数据
-        processed_records = 0
-        for i, (df, element) in enumerate(zip(dataframes, [os.path.splitext(os.path.basename(csv))[0] for csv in self.csv_files])):
+        for i, (df, element) in enumerate(zip(dataframes, elements)):
+            print(f"\n开始处理元素 {element}")
+            
             # 统计已处理的元素记录数
             element_records = sum(1 for item in all_data if item.get('element') == element)
             # 元素的总记录数
@@ -1493,10 +1510,8 @@ class LAMOSTPreprocessor:
             # 只有当元素的所有记录都已处理时，才认为该元素处理完成
             if element_records >= element_total:
                 print(f"{element}数据已在之前的运行中处理完成 ({element_records}/{element_total}条记录)")
-                processed_records += element_records
                 continue  # 跳过已完成的元素
             
-            print(f"\n处理元素 {i+1}/{len(dataframes)}: {element}")
             print(f"已处理: {element_records}/{element_total}条记录")
             print(f"当前进度: [{element_records/element_total:.2%}]")
             
