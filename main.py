@@ -556,7 +556,7 @@ def visualize_training(element, train_metrics, val_metrics, output_dir=None):
     
     logger.info(f"已保存训练过程可视化图表")
 
-def process_element(element, config=None):
+def process_element(element, config=None, tune_hyperparams=False):
     """处理单个元素的训练和评估"""
     if config is None:
         # 直接使用导入的config模块中的配置变量
@@ -583,7 +583,7 @@ def process_element(element, config=None):
     
     # 超参数调优（如果启用）
     hyperparams = None
-    if config.training_config['tune_hyperparams']:
+    if tune_hyperparams:
         logger.info(f"开始 {element} 的超参数调优")
         # 使用新的两阶段调优方法
         hyperparams = hyperparameter_tuning(element, train_loader, val_loader, device=config.training_config['device'])
@@ -1158,6 +1158,8 @@ def main():
                        help='超参数优化的批量数据大小')
     parser.add_argument('--batches_per_round', type=int, default=2,
                        help='超参数优化每轮处理的批次数')
+    parser.add_argument('--tune_hyperparams', action='store_true',
+                       help='是否进行超参数调优')
     parser.add_argument('--result_type', type=str, choices=['training', 'evaluation', 'prediction', 'analysis'], 
                         default='training', help='要显示的结果类型')
     parser.add_argument('--perform_analysis', action='store_true',
@@ -1475,7 +1477,9 @@ def main():
             
             # 训练和评估模型
             try:
-                process_element(element)
+                # 根据命令行参数决定是否进行超参数调优
+                tune_hyperparams = args.tune_hyperparams or args.mode == 'tune'
+                process_element(element, config, tune_hyperparams=tune_hyperparams)
             except Exception as e:
                 logger.error(f"训练元素 {element} 时出错: {str(e)}")
                 import traceback
