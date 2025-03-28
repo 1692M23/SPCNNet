@@ -106,78 +106,69 @@ class SpectralResCNN(nn.Module):
     1. 输入层：
        - 1D卷积层：处理原始光谱
        - BatchNorm：标准化
-       - ReLU激活
+       - LeakyReLU激活
     
     2. 残差块组1（低级特征）：
-       - 输入通道：32
-       - 输出通道：64
        - 包含2个残差块
-       - 每个残差块包含：
-         * 两个3x1卷积层
-         * 每个卷积层后接BatchNorm和ReLU
-         * 跳跃连接
+       - 每个残差块后增加BatchNorm
+       - 最大池化后使用Dropout
     
     3. 残差块组2（中级特征）：
-       - 输入通道：64
-       - 输出通道：128
        - 包含2个残差块
-       - 结构同残差块组1
+       - 每个残差块后增加BatchNorm
+       - 最大池化后使用Dropout
     
     4. 残差块组3（高级特征）：
-       - 输入通道：128
-       - 输出通道：256
        - 包含2个残差块
-       - 结构同残差块组1
-    
-    每个残差块组后接：
-    - 最大池化：减少特征维度
-    - Dropout：防止过拟合
+       - 每个残差块后增加BatchNorm
+       - 最大池化后使用Dropout
     
     全连接层：
-    - 自适应平均池化：统一特征维度
-    - 三个全连接层，逐步降维：
-      * 256 -> 512
-      * 512 -> 256
-      * 256 -> 128
-      * 128 -> 1
-    - 每个全连接层后接ReLU和Dropout
+    - 每层后使用BatchNorm，LeakyReLU和Dropout
+    - 使用更平滑的维度变化
     
-    特点：
-    1. 使用残差连接，有助于训练更深的网络
-    2. 多尺度特征提取，从低级到高级特征
-    3. 使用BatchNorm和Dropout防止过拟合
-    4. 渐进式降维，保留重要特征
+    改进：
+    1. 更多的BatchNorm层稳定训练
+    2. 使用LeakyReLU防止死神经元
+    3. 适当降低dropout_rate提高训练稳定性
+    4. 全连接层中添加BatchNorm层
     """
-    def __init__(self, input_size, dropout_rate=0.5):
+    def __init__(self, input_size, dropout_rate=0.3):
         super(SpectralResCNN, self).__init__()
         
-        # 输入处理层：使用更小的卷积核和更少的通道数
+        # 输入处理层
         self.input_conv = nn.Sequential(
-            nn.Conv1d(1, 16, kernel_size=5, stride=1, padding=2),  # 减少初始通道数
+            nn.Conv1d(1, 16, kernel_size=5, stride=1, padding=2),
             nn.BatchNorm1d(16),
-            nn.LeakyReLU(0.1)  # 使用LeakyReLU替代ReLU
+            nn.LeakyReLU(0.1)
         )
         
         # 残差块组1：提取低级特征
         self.res_block1 = nn.Sequential(
-            ResidualBlock(16, 32, kernel_size=3),  # 减少通道数
+            ResidualBlock(16, 32, kernel_size=3),
+            nn.BatchNorm1d(32),  # 增加BatchNorm
             ResidualBlock(32, 32, kernel_size=3),
-            nn.MaxPool1d(kernel_size=2, stride=2),  # 减小池化步长
-            nn.Dropout(dropout_rate)  # 减少dropout率
+            nn.BatchNorm1d(32),  # 增加BatchNorm
+            nn.MaxPool1d(kernel_size=2, stride=2),
+            nn.Dropout(dropout_rate)
         )
         
         # 残差块组2：提取中级特征
         self.res_block2 = nn.Sequential(
             ResidualBlock(32, 64, kernel_size=3),
+            nn.BatchNorm1d(64),  # 增加BatchNorm
             ResidualBlock(64, 64, kernel_size=3),
+            nn.BatchNorm1d(64),  # 增加BatchNorm
             nn.MaxPool1d(kernel_size=2, stride=2),
             nn.Dropout(dropout_rate)
         )
         
         # 残差块组3：提取高级特征
         self.res_block3 = nn.Sequential(
-            ResidualBlock(64, 128, kernel_size=3),
-            ResidualBlock(128, 128, kernel_size=3),
+            ResidualBlock(64, 96, kernel_size=3),  # 降低通道数，避免维度爆炸
+            nn.BatchNorm1d(96),  # 增加BatchNorm
+            ResidualBlock(96, 96, kernel_size=3),  # 保持一致的通道数
+            nn.BatchNorm1d(96),  # 增加BatchNorm
             nn.MaxPool1d(kernel_size=2, stride=2),
             nn.Dropout(dropout_rate)
         )
@@ -185,21 +176,24 @@ class SpectralResCNN(nn.Module):
         # 自适应池化层
         self.adaptive_pool = nn.AdaptiveAvgPool1d(1)
         
-        # 全连接层：使用更平滑的维度变化
+        # 全连接层：每层后添加BatchNorm
         self.fc = nn.Sequential(
-            nn.Linear(128, 256),
-            nn.LeakyReLU(0.1),
-            nn.Dropout(dropout_rate),
-            
-            nn.Linear(256, 128),
+            nn.Linear(96, 128),  # 从96开始，与res_block3输出匹配
+            nn.BatchNorm1d(128),  # 增加BatchNorm
             nn.LeakyReLU(0.1),
             nn.Dropout(dropout_rate),
             
             nn.Linear(128, 64),
+            nn.BatchNorm1d(64),  # 增加BatchNorm
             nn.LeakyReLU(0.1),
             nn.Dropout(dropout_rate),
             
-            nn.Linear(64, 1)
+            nn.Linear(64, 32),
+            nn.BatchNorm1d(32),  # 增加BatchNorm
+            nn.LeakyReLU(0.1),
+            nn.Dropout(dropout_rate),
+            
+            nn.Linear(32, 1)
         )
         
         # 初始化权重
@@ -211,12 +205,12 @@ class SpectralResCNN(nn.Module):
         """使用Kaiming初始化权重"""
         for m in self.modules():
             if isinstance(m, nn.Conv1d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')  # 改为leaky_relu
             elif isinstance(m, nn.BatchNorm1d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')  # 改为leaky_relu
                 nn.init.constant_(m.bias, 0)
     
     def forward(self, x, training=False):
@@ -242,14 +236,8 @@ class SpectralResCNN(nn.Module):
         # 展平
         x = x.view(x.size(0), -1)
         
-        # 全连接层（使用功能性dropout以支持MC-Dropout）
-        for i, layer in enumerate(self.fc):
-            x = layer(x)
-            if isinstance(layer, nn.Linear) and i < len(self.fc) - 1:
-                x = F.leaky_relu(x, 0.1)
-                # 在训练或MC模式下，应用dropout
-                if training or self.training:
-                    x = F.dropout(x, p=self.dropout_rate, training=True)
+        # 全连接层
+        x = self.fc(x)
         
         return x
 
