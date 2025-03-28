@@ -319,141 +319,109 @@ def _save_checkpoint(model, optimizer, scheduler, epoch, loss, element, config):
         'loss': loss,
     }, model_path)
 
-def train(model, train_loader, val_loader, element, config, device, resume_from=None):
+def train(model, train_loader, val_loader, element, config, device='cuda', resume_from=None):
     """
-    训练模型的主函数
+    训练模型
+    
+    参数:
+        model: 模型实例
+        train_loader: 训练数据加载器
+        val_loader: 验证数据加载器
+        element: 元素名称
+        config: 配置对象
+        device: 计算设备
+        resume_from: 恢复训练的检查点路径
     """
-    # 创建优化器
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.training_config['lr'],
-        weight_decay=config.training_config.get('weight_decay', 1e-4)
-    )
+    import torch.optim as optim
+    import torch.nn as nn
+    import os
     
-    # 创建学习率调度器
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode='min',
-        factor=0.5,
-        patience=5,
-        verbose=True
-    )
-    
-    # 创建损失函数
+    # 优化器和损失函数
+    optimizer = optim.Adam(model.parameters(), lr=config.training_config['lr'])
     criterion = nn.MSELoss()
     
-    # 初始化变量
+    # 训练参数
+    num_epochs = config.training_config['num_epochs']
+    patience = config.training_config['early_stopping_patience']
+    
+    # 记录最佳模型
     best_val_loss = float('inf')
     patience_counter = 0
     train_losses = []
     val_losses = []
     
-    # 如果提供了恢复点，从检查点恢复
-    if resume_from is not None:
-        try:
-            checkpoint = torch.load(resume_from, map_location=device)
-            model.load_state_dict(checkpoint['model_state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            best_val_loss = checkpoint['best_val_loss']
-            train_losses = checkpoint['train_losses']
-            val_losses = checkpoint['val_losses']
-            patience_counter = checkpoint['patience_counter']
-        except Exception as e:
-            logger.error(f"Error loading checkpoint: {str(e)}")
-    
+    # 恢复训练
+    start_epoch = 0
+    if resume_from and os.path.exists(resume_from):
+        checkpoint = torch.load(resume_from)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch']
+        best_val_loss = checkpoint['best_val_loss']
+        
     # 训练循环
-    for epoch in range(config.training_config['num_epochs']):
+    for epoch in range(start_epoch, num_epochs):
         # 训练阶段
         model.train()
         train_loss = 0
         for batch_idx, (data, target) in enumerate(train_loader):
-            try:
-                data, target = data.to(device), target.to(device)
-                
-                optimizer.zero_grad()
-                output = model(data)
-                loss = criterion(output.squeeze(), target)
-                
-                # 检查损失值是否为nan
-                if torch.isnan(loss):
-                    logger.warning(f"NaN loss detected in batch {batch_idx}, skipping...")
-                    continue
-                
-                loss.backward()
-                
-                # 梯度裁剪
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                
-                optimizer.step()
-                train_loss += loss.item()
-                
-            except RuntimeError as e:
-                if 'one of the variables needed for gradient computation' in str(e):
-                    logger.error(f"Gradient computation error in batch {batch_idx}: {str(e)}")
-                    optimizer.zero_grad()
-                    continue
-                else:
-                    raise e
+            data, target = data.to(device), target.to(device)
+            optimizer.zero_grad()
+            output = model(data)
+            loss = criterion(output, target)
+            loss.backward()
+            
+            # 梯度裁剪
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
+            optimizer.step()
+            train_loss += loss.item()
+            
+            if batch_idx % 10 == 0:
+                logger.info(f'训练轮次: {epoch} [{batch_idx}/{len(train_loader)}], 损失: {loss.item():.6f}')
         
-        # 计算平均训练损失
-        avg_train_loss = train_loss / len(train_loader)
-        train_losses.append(avg_train_loss)
+        train_loss /= len(train_loader)
+        train_losses.append(train_loss)
         
         # 验证阶段
         model.eval()
         val_loss = 0
         with torch.no_grad():
             for data, target in val_loader:
-                try:
-                    data, target = data.to(device), target.to(device)
-                    output = model(data)
-                    val_loss += criterion(output.squeeze(), target).item()
-                except Exception as e:
-                    logger.error(f"Error during validation: {str(e)}")
-                    continue
+                data, target = data.to(device), target.to(device)
+                output = model(data)
+                val_loss += criterion(output, target).item()
+        val_loss /= len(val_loader)
+        val_losses.append(val_loss)
         
-        # 计算平均验证损失
-        avg_val_loss = val_loss / len(val_loader)
-        val_losses.append(avg_val_loss)
-        
-        # 更新学习率
-        scheduler.step(avg_val_loss)
-        
-        # 输出训练信息
-        logger.info(f"Epoch {epoch+1}/{config.training_config['num_epochs']}, "
-                   f"Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}")
+        logger.info(f'轮次 {epoch}: 训练损失={train_loss:.6f}, 验证损失={val_loss:.6f}')
         
         # 保存最佳模型
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
             patience_counter = 0
-            
-            # 保存检查点
-            checkpoint = {
+            torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_loss': best_val_loss,
-                'train_losses': train_losses,
-                'val_losses': val_losses,
-                'patience_counter': patience_counter
-            }
-            
-            try:
-                torch.save(checkpoint, os.path.join(config.model_config['model_dir'], f'best_model_{element}.pth'))
-                logger.info(f"Saved best model with validation loss: {best_val_loss:.6f}")
-            except Exception as e:
-                logger.error(f"Error saving checkpoint: {str(e)}")
+            }, os.path.join(config.model_config['model_dir'], f'best_model_{element}.pth'))
         else:
             patience_counter += 1
+            
+        # 保存检查点
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'best_val_loss': best_val_loss,
+        }, os.path.join(config.model_config['model_dir'], f'checkpoint_{element}.pth'))
         
-        # 早停检查
-        if patience_counter >= config.training_config['early_stopping_patience']:
-            logger.info(f"Early stopping triggered after {patience_counter} epochs without improvement")
+        # 早停
+        if patience_counter >= patience:
+            logger.info(f'早停：验证损失在 {patience} 轮内没有改善')
             break
-    
+            
     return train_losses, val_losses
 
 # =============== 3. 评估相关 ===============
