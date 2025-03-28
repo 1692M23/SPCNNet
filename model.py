@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.optim as optim
 import config
 import os
 import numpy as np
@@ -297,63 +298,74 @@ def _save_checkpoint(model, optimizer, scheduler, epoch, loss, element, config):
         'loss': loss,
     }, model_path)
 
-def train(model, train_loader, val_loader, element, config, device='cuda', resume_from=None):
-    """
-    训练模型，使用分阶段训练策略
-    """
-    import torch.optim as optim
-    import torch.nn as nn
-    from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+def train(model, train_loader, val_loader, config, device, element):
+    """训练模型"""
+    logger = logging.getLogger('model')
     
-    # 优化器和损失函数
-    optimizer = optim.Adam(model.parameters(), lr=config.training_config['lr'])
-    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
+    # 设置优化器和学习率调度器
+    optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
+    
+    # 设置损失函数
     criterion = nn.MSELoss()
     
-    # 训练参数
-    num_epochs = config.training_config['num_epochs']
-    patience = config.training_config['early_stopping_patience']
-    
-    # 记录最佳模型
+    # 设置早停
     best_val_loss = float('inf')
+    patience = config['early_stopping_patience']
     patience_counter = 0
+    
+    # 训练记录
     train_losses = []
     val_losses = []
     
-    # 恢复训练
-    start_epoch = 0
-    if resume_from and os.path.exists(resume_from):
-        checkpoint = torch.load(resume_from)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        start_epoch = checkpoint['epoch']
-        best_val_loss = checkpoint['best_val_loss']
-    
-    # 第一阶段：特征提取器训练
-    logger.info("第一阶段：训练特征提取器")
+    # 第一阶段：只训练特征提取器
+    logger.info("开始第一阶段训练 - 特征提取器")
     for param in model.fc.parameters():
         param.requires_grad = False
     
-    for epoch in range(start_epoch, num_epochs // 2):
+    for epoch in range(config['epochs']):
         model.train()
-        train_loss = 0
+        total_loss = 0
+        batch_count = 0
+        
         for batch_idx, (data, target) in enumerate(train_loader):
             data, target = data.to(device), target.to(device)
+            
+            # 检查数据是否包含NaN
+            if torch.isnan(data).any() or torch.isnan(target).any():
+                logger.warning(f"检测到输入数据包含NaN值，跳过该批次")
+                continue
+                
             optimizer.zero_grad()
             output = model(data)
+            
+            # 检查输出是否包含NaN
+            if torch.isnan(output).any():
+                logger.warning(f"检测到模型输出包含NaN值，跳过该批次")
+                continue
+                
             loss = criterion(output, target)
+            
+            # 检查损失值是否为NaN
+            if torch.isnan(loss):
+                logger.warning(f"检测到损失值为NaN，跳过该批次")
+                continue
+                
             loss.backward()
+            
+            # 梯度裁剪
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             optimizer.step()
-            scheduler.step(epoch + batch_idx / len(train_loader))
-            train_loss += loss.item()
+            
+            total_loss += loss.item()
+            batch_count += 1
             
             if batch_idx % 10 == 0:
-                logger.info(f'第一阶段 - 轮次: {epoch} [{batch_idx}/{len(train_loader)}], 损失: {loss.item():.6f}')
+                logger.info(f"第一阶段 - 轮次: {epoch} [{batch_idx}/{len(train_loader)}], 损失: {loss.item():.6f}")
         
-        train_loss /= len(train_loader)
-        train_losses.append(train_loss)
+        # 更新学习率
+        scheduler.step()
         
         # 验证
         model.eval()
@@ -363,76 +375,113 @@ def train(model, train_loader, val_loader, element, config, device='cuda', resum
                 data, target = data.to(device), target.to(device)
                 output = model(data)
                 val_loss += criterion(output, target).item()
-        val_loss /= len(val_loader)
-        val_losses.append(val_loss)
-    
-    # 第二阶段：全模型微调
-    logger.info("第二阶段：全模型微调")
-    for param in model.fc.parameters():
-        param.requires_grad = True
-    
-    optimizer = optim.Adam(model.parameters(), lr=config.training_config['lr'] * 0.1)
-    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2)
-    
-    for epoch in range(num_epochs // 2, num_epochs):
-        model.train()
-        train_loss = 0
-        for batch_idx, (data, target) in enumerate(train_loader):
-            data, target = data.to(device), target.to(device)
-            optimizer.zero_grad()
-            output = model(data)
-            loss = criterion(output, target)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            scheduler.step(epoch + batch_idx / len(train_loader))
-            train_loss += loss.item()
-            
-            if batch_idx % 10 == 0:
-                logger.info(f'第二阶段 - 轮次: {epoch} [{batch_idx}/{len(train_loader)}], 损失: {loss.item():.6f}')
         
-        train_loss /= len(train_loader)
+        val_loss /= len(val_loader)
+        train_loss = total_loss / batch_count if batch_count > 0 else float('inf')
+        
         train_losses.append(train_loss)
-        
-        # 验证
-        model.eval()
-        val_loss = 0
-        with torch.no_grad():
-            for data, target in val_loader:
-                data, target = data.to(device), target.to(device)
-                output = model(data)
-                val_loss += criterion(output, target).item()
-        val_loss /= len(val_loader)
         val_losses.append(val_loss)
         
-        # 保存最佳模型
+        logger.info(f"第一阶段 - 轮次: {epoch}, 训练损失: {train_loss:.6f}, 验证损失: {val_loss:.6f}")
+        
+        # 早停检查
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'best_val_loss': best_val_loss,
-            }, os.path.join(config.model_config['model_dir'], f'best_model_{element}.pth'))
+            # 保存最佳模型
+            save_model(model, optimizer, scheduler, epoch, val_loss, config['model_dir'], element)
         else:
             patience_counter += 1
-            
-        # 保存检查点
-        torch.save({
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
-            'best_val_loss': best_val_loss,
-        }, os.path.join(config.model_config['model_dir'], f'checkpoint_{element}.pth'))
+            if patience_counter >= patience:
+                logger.info(f"第一阶段 - 早停触发，最佳验证损失: {best_val_loss:.6f}")
+                break
+    
+    # 第二阶段：微调全模型
+    logger.info("开始第二阶段训练 - 全模型微调")
+    for param in model.parameters():
+        param.requires_grad = True
+    
+    # 重置优化器和学习率
+    optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'] * 0.1, weight_decay=config['weight_decay'])
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2)
+    
+    # 重置早停
+    best_val_loss = float('inf')
+    patience_counter = 0
+    
+    for epoch in range(config['epochs']):
+        model.train()
+        total_loss = 0
+        batch_count = 0
         
-        # 早停
-        if patience_counter >= patience:
-            logger.info(f'早停：验证损失在 {patience} 轮内没有改善')
-            break
+        for batch_idx, (data, target) in enumerate(train_loader):
+            data, target = data.to(device), target.to(device)
             
+            # 检查数据是否包含NaN
+            if torch.isnan(data).any() or torch.isnan(target).any():
+                logger.warning(f"检测到输入数据包含NaN值，跳过该批次")
+                continue
+                
+            optimizer.zero_grad()
+            output = model(data)
+            
+            # 检查输出是否包含NaN
+            if torch.isnan(output).any():
+                logger.warning(f"检测到模型输出包含NaN值，跳过该批次")
+                continue
+                
+            loss = criterion(output, target)
+            
+            # 检查损失值是否为NaN
+            if torch.isnan(loss):
+                logger.warning(f"检测到损失值为NaN，跳过该批次")
+                continue
+                
+            loss.backward()
+            
+            # 梯度裁剪
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
+            optimizer.step()
+            
+            total_loss += loss.item()
+            batch_count += 1
+            
+            if batch_idx % 10 == 0:
+                logger.info(f"第二阶段 - 轮次: {epoch} [{batch_idx}/{len(train_loader)}], 损失: {loss.item():.6f}")
+        
+        # 更新学习率
+        scheduler.step()
+        
+        # 验证
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for data, target in val_loader:
+                data, target = data.to(device), target.to(device)
+                output = model(data)
+                val_loss += criterion(output, target).item()
+        
+        val_loss /= len(val_loader)
+        train_loss = total_loss / batch_count if batch_count > 0 else float('inf')
+        
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        
+        logger.info(f"第二阶段 - 轮次: {epoch}, 训练损失: {train_loss:.6f}, 验证损失: {val_loss:.6f}")
+        
+        # 早停检查
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            # 保存最佳模型
+            save_model(model, optimizer, scheduler, epoch, val_loss, config['model_dir'], element)
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                logger.info(f"第二阶段 - 早停触发，最佳验证损失: {best_val_loss:.6f}")
+                break
+    
     return train_losses, val_losses
 
 # =============== 3. 评估相关 ===============
@@ -955,3 +1004,15 @@ def load_trained_model_compat(input_size_or_path, element_or_device=None, config
 # 修改原来的load_trained_model函数名为load_trained_model_core，保持旧函数名对旧函数的向后兼容性
 load_trained_model_core = load_trained_model
 load_trained_model = load_trained_model_compat 
+
+def save_model(model, optimizer, scheduler, epoch, val_loss, model_dir, element):
+    """保存模型检查点"""
+    os.makedirs(model_dir, exist_ok=True)
+    model_path = os.path.join(model_dir, f'best_model_{element}.pth')
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'val_loss': val_loss,
+    }, model_path) 
