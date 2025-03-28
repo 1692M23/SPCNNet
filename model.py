@@ -66,124 +66,97 @@ class ResidualBlock(nn.Module):
     2. 跳跃连接，将输入直接加到输出上
     3. 通过1x1卷积调整输入通道数（如需要）
     """
-    def __init__(self, in_channels, out_channels, stride=1):
+    def __init__(self, channels):
         super(ResidualBlock, self).__init__()
+        self.conv1 = nn.Conv1d(channels, channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm1d(channels)
+        self.conv2 = nn.Conv1d(channels, channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm1d(channels)
         
-        # 主路径
-        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, 
-                               stride=stride, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm1d(out_channels)
-        self.relu1 = nn.ReLU(inplace=False)
-        
-        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3,
-                               stride=1, padding=1, bias=False)
-        
-        self.bn2 = nn.BatchNorm1d(out_channels)
-        self.relu2 = nn.ReLU(inplace=False)
-        
-        # 如果尺寸不匹配，使用1x1卷积进行调整
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_channels != out_channels:
-            self.shortcut = nn.Sequential(
-                nn.Conv1d(in_channels, out_channels, kernel_size=1,
-                          stride=stride, bias=False),
-                nn.BatchNorm1d(out_channels)
-            )
-    
     def forward(self, x):
         identity = x
         
         out = self.conv1(x)
         out = self.bn1(out)
-        out = self.relu1(out)
+        out = F.relu(out)
         
         out = self.conv2(out)
         out = self.bn2(out)
         
-        out = out + self.shortcut(identity)
-        out = self.relu2(out)
+        out += identity
+        out = F.relu(out)
         
         return out
 
 class SpectralResCNN(nn.Module):
     """光谱残差CNN模型"""
-    def __init__(self, input_size=1024, hidden_size=256, output_size=1, dropout_rate=0.2):
-        """
-        初始化模型
-        
-        参数:
-            input_size (int): 输入光谱的大小
-            hidden_size (int): 隐藏层大小
-            output_size (int): 输出大小（元素数量）
-            dropout_rate (float): Dropout比率
-        """
+    def __init__(self, input_size):
         super(SpectralResCNN, self).__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.output_size = output_size
-        self.dropout_rate = dropout_rate
         
-        # 输入层
-        self.input_layer = nn.Sequential(
+        # 特征提取层
+        self.feature_extractor = nn.Sequential(
             nn.Conv1d(1, 64, kernel_size=7, padding=3),
             nn.BatchNorm1d(64),
-            nn.ReLU(inplace=False)  # 修改为False
+            nn.ReLU(),
+            nn.MaxPool1d(2)
         )
         
-        # 残差块组
+        # 残差模块 - 参数驱动的纵向特征提取
         self.res_blocks = nn.ModuleList([
-            ResidualBlock(64, 64),
-            ResidualBlock(64, 64),
-            ResidualBlock(64, 128, stride=2),
-            ResidualBlock(128, 128),
-            ResidualBlock(128, 256, stride=2),
-            ResidualBlock(256, 256)
+            ResidualBlock(64) for _ in range(3)
         ])
         
-        # 全局平均池化
-        self.global_avg_pool = nn.AdaptiveAvgPool1d(1)
-        
-        # 全连接层
-        self.fc_layers = nn.Sequential(
-            nn.Linear(256, hidden_size),
-            nn.ReLU(inplace=False),  # 修改为False
-            nn.Dropout(dropout_rate),
-            nn.Linear(hidden_size, output_size)
+        # 循环模块 - 跨波段信念增强
+        self.gru = nn.GRU(64, 64, bidirectional=True, batch_first=True)
+        self.cross_band_attention = nn.Sequential(
+            nn.Conv1d(128, 64, kernel_size=1),
+            nn.Sigmoid()
         )
         
-        # 初始化权重
-        self.apply(self._init_weights)
-    
-    def _init_weights(self, m):
-        if isinstance(m, nn.Conv1d):
-            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.BatchNorm1d):
-            nn.init.constant_(m.weight, 1)
-            nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.Linear):
-            nn.init.normal_(m.weight, 0, 0.01)
-            nn.init.constant_(m.bias, 0)
-    
-    def forward(self, x):
-        # 确保输入形状正确
-        if len(x.shape) == 2:
-            x = x.unsqueeze(1)
-        
-        # 输入层
-        x = self.input_layer(x)
-        
-        # 残差块
-        for res_block in self.res_blocks:
-            x = res_block(x)
-        
-        # 全局平均池化
-        x = self.global_avg_pool(x)
-        x = x.view(x.size(0), -1)
+        # 信息融合层
+        self.fusion = nn.Sequential(
+            nn.Conv1d(128, 64, kernel_size=1),
+            nn.BatchNorm1d(64),
+            nn.ReLU()
+        )
         
         # 全连接层
-        x = self.fc_layers(x)
+        self.fc = nn.Sequential(
+            nn.Linear(64 * (input_size // 2), 256),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(256, 64),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(64, 1)
+        )
+        
+    def forward(self, x):
+        # 特征提取
+        x = self.feature_extractor(x)
+        
+        # 残差特征提取
+        res_features = x
+        for res_block in self.res_blocks:
+            res_features = res_block(res_features)
+            
+        # 循环特征提取
+        # 调整维度顺序以适应GRU层
+        rec_features = x.permute(0, 2, 1)  # [batch, length, channels]
+        rec_features, _ = self.gru(rec_features)
+        rec_features = rec_features.permute(0, 2, 1)  # [batch, channels*2, length]
+        
+        # 跨波段信念增强
+        attention_weights = self.cross_band_attention(rec_features)
+        rec_features = rec_features * attention_weights
+        
+        # 特征融合
+        combined_features = torch.cat([res_features, rec_features[:, :64, :]], dim=1)
+        x = self.fusion(combined_features)
+        
+        # 全连接层
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
         
         return x
 
@@ -198,7 +171,7 @@ class SpectralResCNNEnsemble:
         
         # 创建多个模型实例
         for i in range(num_models):
-            model = SpectralResCNN(input_size, dropout_rate=dropout_rate)
+            model = SpectralResCNN(input_size)
             self.models.append(model)
     
     def train(self, train_loader, val_loader, element, config):
@@ -321,23 +294,15 @@ def _save_checkpoint(model, optimizer, scheduler, epoch, loss, element, config):
 
 def train(model, train_loader, val_loader, element, config, device='cuda', resume_from=None):
     """
-    训练模型
-    
-    参数:
-        model: 模型实例
-        train_loader: 训练数据加载器
-        val_loader: 验证数据加载器
-        element: 元素名称
-        config: 配置对象
-        device: 计算设备
-        resume_from: 恢复训练的检查点路径
+    训练模型，使用分阶段训练策略
     """
     import torch.optim as optim
     import torch.nn as nn
-    import os
+    from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
     
     # 优化器和损失函数
     optimizer = optim.Adam(model.parameters(), lr=config.training_config['lr'])
+    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
     criterion = nn.MSELoss()
     
     # 训练参数
@@ -356,12 +321,16 @@ def train(model, train_loader, val_loader, element, config, device='cuda', resum
         checkpoint = torch.load(resume_from)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         start_epoch = checkpoint['epoch']
         best_val_loss = checkpoint['best_val_loss']
-        
-    # 训练循环
-    for epoch in range(start_epoch, num_epochs):
-        # 训练阶段
+    
+    # 第一阶段：特征提取器训练
+    logger.info("第一阶段：训练特征提取器")
+    for param in model.fc.parameters():
+        param.requires_grad = False
+    
+    for epoch in range(start_epoch, num_epochs // 2):
         model.train()
         train_loss = 0
         for batch_idx, (data, target) in enumerate(train_loader):
@@ -370,20 +339,57 @@ def train(model, train_loader, val_loader, element, config, device='cuda', resum
             output = model(data)
             loss = criterion(output, target)
             loss.backward()
-            
-            # 梯度裁剪
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
             optimizer.step()
+            scheduler.step(epoch + batch_idx / len(train_loader))
             train_loss += loss.item()
             
             if batch_idx % 10 == 0:
-                logger.info(f'训练轮次: {epoch} [{batch_idx}/{len(train_loader)}], 损失: {loss.item():.6f}')
+                logger.info(f'第一阶段 - 轮次: {epoch} [{batch_idx}/{len(train_loader)}], 损失: {loss.item():.6f}')
         
         train_loss /= len(train_loader)
         train_losses.append(train_loss)
         
-        # 验证阶段
+        # 验证
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for data, target in val_loader:
+                data, target = data.to(device), target.to(device)
+                output = model(data)
+                val_loss += criterion(output, target).item()
+        val_loss /= len(val_loader)
+        val_losses.append(val_loss)
+    
+    # 第二阶段：全模型微调
+    logger.info("第二阶段：全模型微调")
+    for param in model.fc.parameters():
+        param.requires_grad = True
+    
+    optimizer = optim.Adam(model.parameters(), lr=config.training_config['lr'] * 0.1)
+    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2)
+    
+    for epoch in range(num_epochs // 2, num_epochs):
+        model.train()
+        train_loss = 0
+        for batch_idx, (data, target) in enumerate(train_loader):
+            data, target = data.to(device), target.to(device)
+            optimizer.zero_grad()
+            output = model(data)
+            loss = criterion(output, target)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            scheduler.step(epoch + batch_idx / len(train_loader))
+            train_loss += loss.item()
+            
+            if batch_idx % 10 == 0:
+                logger.info(f'第二阶段 - 轮次: {epoch} [{batch_idx}/{len(train_loader)}], 损失: {loss.item():.6f}')
+        
+        train_loss /= len(train_loader)
+        train_losses.append(train_loss)
+        
+        # 验证
         model.eval()
         val_loss = 0
         with torch.no_grad():
@@ -394,8 +400,6 @@ def train(model, train_loader, val_loader, element, config, device='cuda', resum
         val_loss /= len(val_loader)
         val_losses.append(val_loss)
         
-        logger.info(f'轮次 {epoch}: 训练损失={train_loss:.6f}, 验证损失={val_loss:.6f}')
-        
         # 保存最佳模型
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -404,6 +408,7 @@ def train(model, train_loader, val_loader, element, config, device='cuda', resum
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_loss': best_val_loss,
             }, os.path.join(config.model_config['model_dir'], f'best_model_{element}.pth'))
         else:
@@ -414,6 +419,7 @@ def train(model, train_loader, val_loader, element, config, device='cuda', resum
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
             'best_val_loss': best_val_loss,
         }, os.path.join(config.model_config['model_dir'], f'checkpoint_{element}.pth'))
         
@@ -528,15 +534,15 @@ def evaluate_model(model, test_loader, device=None):
             return {
                 'mse': mse,
                 'rmse': rmse,
-                        'mae': mae,
+                'mae': mae,
                 'r2': r2,
-                        'r_value': r_value,
-                        'slope': slope,
-                        'intercept': intercept,
-                        'std_err': std_err,
-                        'p_value': p_value
-                    }
-            
+                'r_value': r_value,
+                'slope': slope,
+                'intercept': intercept,
+                'std_err': std_err,
+                'p_value': p_value
+            }
+                
         except Exception as e:
             logger.error(f"Error calculating evaluation metrics: {str(e)}")
     
@@ -608,7 +614,7 @@ def predict(model, data_loader, device=None):
     """
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
+        
     model.to(device)
     model.eval()
     
@@ -697,14 +703,14 @@ def load_trained_model(model_path, device=None):
         
         # 检查checkpoint是否包含模型架构信息
         if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-        # 创建模型实例
+            # 创建模型实例
             if 'model_config' in checkpoint:
                 config = checkpoint['model_config']
                 input_size = config.get('input_size', 1024)
                 hidden_size = config.get('hidden_size', 256)
                 output_size = config.get('output_size', 1)
                 dropout_rate = config.get('dropout_rate', 0.2)
-                model = SpectralResCNN(input_size, hidden_size, output_size, dropout_rate)
+                model = SpectralResCNN(input_size)
             else:
                 # 使用默认参数
                 logger.warning(f"Model configuration missing, using default parameters")

@@ -213,6 +213,20 @@ def create_data_loaders(spectra, labels, batch_size=32, shuffle=True):
     """
     logger.info(f"输入数据形状: {spectra.shape}")
     
+    # 数据增强：添加随机噪声
+    def add_noise(data, snr_min=10, snr_max=30):
+        signal_power = np.mean(data ** 2)
+        for i in range(len(data)):
+            snr = np.random.uniform(snr_min, snr_max)
+            noise_power = signal_power / (10 ** (snr / 10))
+            noise = np.random.normal(0, np.sqrt(noise_power), data[i].shape)
+            data[i] = data[i] + noise
+        return data
+    
+    # 对训练数据进行增强
+    if shuffle:  # 只对训练集进行增强
+        spectra = add_noise(spectra.copy())
+    
     # 如果标签是一维的但需要二维，进行reshape
     if len(labels.shape) == 1:
         labels = labels.reshape(-1, 1)
@@ -577,7 +591,7 @@ def process_element(element, config=None, tune_hyperparams=False):
             train_data = load_data(os.path.join('processed_data', 'train_dataset.npz'), element)
             val_data = load_data(os.path.join('processed_data', 'val_dataset.npz'), element)
             test_data = load_data(os.path.join('processed_data', 'test_dataset.npz'), element)
-        
+    
         if train_data[0] is None or train_data[1] is None:
             logger.error("加载训练数据失败")
             return None, None
@@ -604,36 +618,36 @@ def process_element(element, config=None, tune_hyperparams=False):
             resume_path = os.path.join(config.model_config['model_dir'], f'checkpoint_{element}.pth')
             if os.path.exists(resume_path):
                 resume_from = resume_path
-        
+    
         # 训练模型
         train_losses, val_losses = train(
-            model=model,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            element=element,
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        element=element,
             config=config,
             device=device,
             resume_from=resume_from
-        )
-        
+    )
+    
         # 评估模型（如果有测试集）
         test_metrics = None
         if test_loader:
-            # 加载最佳模型进行评估
-            best_model_path = os.path.join(config.model_config['model_dir'], f'best_model_{element}.pth')
-            if os.path.exists(best_model_path):
-                try:
-                    logger.info(f"加载最佳模型进行评估: {best_model_path}")
-                    checkpoint = torch.load(best_model_path, map_location=device)
-                    model.load_state_dict(checkpoint['model_state_dict'])
-                except Exception as e:
-                    logger.error(f"加载最佳模型失败: {str(e)}")
+                # 加载最佳模型进行评估
+                best_model_path = os.path.join(config.model_config['model_dir'], f'best_model_{element}.pth')
+                if os.path.exists(best_model_path):
+                    try:
+                        logger.info(f"加载最佳模型进行评估: {best_model_path}")
+                        checkpoint = torch.load(best_model_path, map_location=device)
+                        model.load_state_dict(checkpoint['model_state_dict'])
+                    except Exception as e:
+                        logger.error(f"加载最佳模型失败: {str(e)}")
+                
+                test_metrics = evaluate_model(model, test_loader, device)
+                logger.info(f"{element} 测试集评估结果: {test_metrics}")
             
-            test_metrics = evaluate_model(model, test_loader, device)
-            logger.info(f"{element} 测试集评估结果: {test_metrics}")
-        
-        # 可视化训练过程
-        visualize_training(element, train_losses, val_losses)
+                # 可视化训练过程
+                visualize_training(element, train_losses, val_losses)
         
         return model, test_metrics
         
