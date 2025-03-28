@@ -568,9 +568,27 @@ def process_element(element, config=None, tune_hyperparams=False):
         device = config.training_config['device'] if config else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # 加载数据
-        train_data = load_data(config.data_paths['train_data'], element)
-        val_data = load_data(config.data_paths['val_data'], element)
-        test_data = load_data(config.data_paths['test_data'], element)
+        if config and hasattr(config, 'data_paths'):
+            train_data = load_data(config.data_paths['train_data'], element)
+            val_data = load_data(config.data_paths['val_data'], element)
+            test_data = load_data(config.data_paths['test_data'], element)
+        else:
+            # 使用默认路径
+            train_data = load_data(os.path.join('processed_data', 'train_dataset.npz'), element)
+            val_data = load_data(os.path.join('processed_data', 'val_dataset.npz'), element)
+            test_data = load_data(os.path.join('processed_data', 'test_dataset.npz'), element)
+        
+        if train_data[0] is None or train_data[1] is None:
+            logger.error("加载训练数据失败")
+            return None, None
+            
+        if val_data[0] is None:
+            logger.warning("加载验证数据失败，使用训练数据代替")
+            val_data = train_data
+            
+        if test_data[0] is None:
+            logger.warning("加载测试数据失败，使用验证数据代替")
+            test_data = val_data
         
         # 创建数据加载器
         train_loader = create_data_loaders(train_data[0], train_data[1], batch_size=config.training_config['batch_size'])
