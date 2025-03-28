@@ -5,7 +5,7 @@ import logging
 from sklearn.model_selection import train_test_split
 
 # 导入预处理模块
-from preprocessdata import LAMOSTPreprocessor
+from preprocessdata7 import LAMOSTPreprocessor
 
 # 设置日志
 logger = logging.getLogger('multi_element_processor')
