@@ -298,7 +298,7 @@ def _save_checkpoint(model, optimizer, scheduler, epoch, loss, element, config):
         'loss': loss,
     }, model_path)
 
-def train(model, train_loader, val_loader, config, device, element):
+def train(model, train_loader, val_loader, config, device, element, resume_from=None):
     """训练模型"""
     logger = logging.getLogger('model')
     
@@ -318,12 +318,23 @@ def train(model, train_loader, val_loader, config, device, element):
     train_losses = []
     val_losses = []
     
+    # 恢复训练
+    start_epoch = 0
+    if resume_from and os.path.exists(resume_from):
+        checkpoint = torch.load(resume_from)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        start_epoch = checkpoint['epoch']
+        best_val_loss = checkpoint['val_loss']
+        logger.info(f"从检查点恢复训练，起始轮次: {start_epoch}")
+    
     # 第一阶段：只训练特征提取器
     logger.info("开始第一阶段训练 - 特征提取器")
     for param in model.fc.parameters():
         param.requires_grad = False
     
-    for epoch in range(config['epochs']):
+    for epoch in range(start_epoch, config['epochs']):
         model.train()
         total_loss = 0
         batch_count = 0
