@@ -109,20 +109,23 @@ class SpectralResCNN(nn.Module):
         # 循环模块 - 跨波段信念增强
         self.gru = nn.GRU(64, 64, bidirectional=True, batch_first=True)
         self.cross_band_attention = nn.Sequential(
-            nn.Conv1d(128, 128, kernel_size=1),  # 修改输出通道数为128以匹配GRU输出
+            nn.Conv1d(128, 128, kernel_size=1),
             nn.Sigmoid()
         )
         
         # 信息融合层
         self.fusion = nn.Sequential(
-            nn.Conv1d(192, 64, kernel_size=1),  # 修改输入通道数为192 (64 + 128)
+            nn.Conv1d(192, 64, kernel_size=1),
             nn.BatchNorm1d(64),
             nn.ReLU()
         )
         
+        # 添加自适应池化层，确保输出大小固定
+        self.adaptive_pool = nn.AdaptiveAvgPool1d(1)
+        
         # 全连接层
         self.fc = nn.Sequential(
-            nn.Linear(64 * (input_size // 2), 256),
+            nn.Linear(64, 256),
             nn.ReLU(),
             nn.Dropout(0.5),
             nn.Linear(256, 64),
@@ -141,7 +144,6 @@ class SpectralResCNN(nn.Module):
             res_features = res_block(res_features)
             
         # 循环特征提取
-        # 调整维度顺序以适应GRU层
         rec_features = x.permute(0, 2, 1)  # [batch, length, channels]
         rec_features, _ = self.gru(rec_features)
         rec_features = rec_features.permute(0, 2, 1)  # [batch, channels*2, length]
@@ -151,11 +153,14 @@ class SpectralResCNN(nn.Module):
         rec_features = rec_features * attention_weights
         
         # 特征融合
-        combined_features = torch.cat([res_features, rec_features], dim=1)  # 直接拼接，不需要切片
+        combined_features = torch.cat([res_features, rec_features], dim=1)
         x = self.fusion(combined_features)
         
+        # 使用自适应池化层将特征图压缩为固定大小
+        x = self.adaptive_pool(x)
+        x = x.view(x.size(0), -1)  # 展平
+        
         # 全连接层
-        x = x.view(x.size(0), -1)
         x = self.fc(x)
         
         return x
