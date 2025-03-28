@@ -45,7 +45,7 @@ class LAMOSTPreprocessor:
                  fits_dir='fits', 
                  output_dir='processed_data',
                  wavelength_range=None,  # 修改为None，表示将使用最大公有波长范围
-                 n_points=None,  # 修改为None，点数将根据波长范围和步长自动计算
+                 n_points=4098,  # 设置默认点数为4098
                  log_step=0.0001,  # 新增：对数空间中的重采样步长（dex）
                  compute_common_range=True,  # 新增：是否计算最大公有波长范围
                  n_splits=5,     # 交叉验证折数
@@ -88,8 +88,9 @@ class LAMOSTPreprocessor:
         print("正在加载文件查找缓存...")
         self._load_files_cache()
         
-        self.wavelength_range = wavelength_range if wavelength_range else (4000, 8098)  # 默认范围
-        self.n_points = n_points
+        # 设置波长范围和点数
+        self.wavelength_range = wavelength_range if wavelength_range else (4000, 8098)  # 默认波长范围
+        self.n_points = n_points  # 使用传入的点数或默认值
         self.log_step = log_step
         self.compute_common_range = compute_common_range
         self.n_splits = n_splits
@@ -160,49 +161,44 @@ class LAMOSTPreprocessor:
             print(f"保存文件缓存出错: {e}")
     
     def read_csv_data(self):
-        """读取CSV文件并返回DataFrame列表"""
-        dataframes = []
+        """读取CSV文件中的数据"""
+        all_data = {}
+        total_records = 0
+        
         for csv_file in self.csv_files:
-            if not os.path.exists(csv_file):
-                print(f"注意: 找不到CSV文件 {csv_file}，跳过")
+            element = csv_file.split('_')[0]  # 从文件名获取元素名称
+            csv_path = os.path.join(self.data_dir, csv_file)
+            
+            if not os.path.exists(csv_path):
+                print(f"警告: 找不到文件 {csv_file}")
                 continue
                 
-            print(f"读取CSV文件: {csv_file}")
             try:
-                df = pd.read_csv(csv_file)
-                print(f"成功加载{csv_file}，共{len(df)}条记录")
-                print(f"列名: {', '.join(df.columns)}")
+                print(f"\n读取{csv_file}...")
+                df = pd.read_csv(csv_path)
+                print(f"列名: {df.columns.tolist()}")
                 
-                # 检查spec列中的文件是否存在
-                if 'spec' in df.columns:
-                    # 确保spec列的类型为字符串
-                    if not pd.api.types.is_string_dtype(df['spec']):
-                        print(f"注意: {csv_file} 中的spec列不是字符串类型，正在转换...")
-                        df['spec'] = df['spec'].astype(str)
-                    
-                    # 不在启动时检查所有文件，只显示警告信息
-                    print(f"CSV文件包含{len(df)}条记录，如果找不到某些FITS文件，将在处理时报错")
-                    
-                    # 仅检查前3个文件作为示例
-                    spec_files = df['spec'].values[:3]
-                    for spec_file in spec_files:
-                        # 使用_find_fits_file方法查找文件
-                        found_path = self._find_fits_file(spec_file)
-                        if found_path:
-                            print(f"示例文件找到: {found_path}")
-                        else:
-                            print(f"示例文件未找到: {spec_file}，请确保FITS文件路径正确")
-                else:
-                    print(f"警告: CSV文件 {csv_file} 中没有找到'spec'列")
-                    print(f"可用的列: {df.columns.tolist()}")
+                # 检查必要的列
+                required_columns = ['spec', 'rv']
+                missing_columns = [col for col in required_columns if col not in df.columns]
+                if missing_columns:
+                    print(f"警告: {csv_file} 缺少必要的列: {missing_columns}")
+                    continue
                 
-                dataframes.append(df)
+                # 添加到数据字典
+                all_data[element] = df
+                total_records += len(df)
+                print(f"{csv_file}: {len(df)}条记录")
+                
             except Exception as e:
-                print(f"读取CSV文件 {csv_file} 出错: {e}")
-                import traceback
-                traceback.print_exc()
+                print(f"读取{csv_file}时出错: {e}")
+                continue
         
-        return dataframes
+        if not all_data:
+            raise ValueError("没有成功读取任何CSV文件")
+        
+        print(f"\n总计读取{len(all_data)}个文件，{total_records}条记录")
+        return all_data
     
     def _find_fits_file(self, spec_name):
         """查找匹配的fits文件，处理嵌套目录和命名差异"""
@@ -1109,6 +1105,8 @@ class LAMOSTPreprocessor:
                         if os.path.exists(csv_file):
                             df = pd.read_csv(csv_file)
                             if 'spec' in df.columns and 'rv' in df.columns:
+                                # 确保spec列是字符串类型
+                                df['spec'] = df['spec'].astype(str)
                                 # 在CSV中查找精确匹配记录
                                 matches = df[df['spec'].str.contains(f"^{base_file}[.]|/{base_file}[.]", case=False, regex=True, na=False)]
                                 if not matches.empty:
@@ -1125,7 +1123,7 @@ class LAMOSTPreprocessor:
                                 print(f"CSV文件 {csv_file} 缺少必要的列(spec或rv)")
                 except Exception as e:
                     print(f"从CSV查找视向速度数据出错: {e}")
-                    # 出错时保持使用FITS中的值或默认值
+                    print("将使用默认视向速度值0")
             
             # 1. 波长校正
             wavelength_calibrated = self.correct_wavelength(wavelength, flux)
@@ -1227,7 +1225,7 @@ class LAMOSTPreprocessor:
         
         # 确保spec列为字符串类型
         if 'spec' in df.columns and not pd.api.types.is_string_dtype(df['spec']):
-            print(f"注意: {element}_FE.csv 中的spec列不是字符串类型，正在转换...")
+            print(f"注意: {element} 中的spec列不是字符串类型，正在转换...")
             df['spec'] = df['spec'].astype(str)
         
         # 获取光谱文件名和标签
@@ -1248,8 +1246,14 @@ class LAMOSTPreprocessor:
                 try:
                     with open(progress_file, 'rb') as f:
                         saved_data = pickle.load(f)
-                        results = saved_data.get('results', [])
-                        start_idx = saved_data.get('last_idx', 0)
+                        # 确保只加载当前元素的数据
+                        if isinstance(saved_data, dict):
+                            results = [item for item in saved_data.get('results', []) 
+                                     if item.get('element', '') == element]
+                            start_idx = saved_data.get('last_idx', 0)
+                        else:
+                            results = [item for item in saved_data if item.get('element', '') == element]
+                            start_idx = len(results)
                         total_processed = len(results)
                         print(f"从上次中断处继续（已处理{total_processed}条记录，进度：{total_processed/len(spec_files):.2%}）")
                 except Exception as e:
@@ -1260,169 +1264,58 @@ class LAMOSTPreprocessor:
                 try:
                     with open(drive_progress_file, 'rb') as f:
                         saved_data = pickle.load(f)
-                        results = saved_data.get('results', [])
-                        start_idx = saved_data.get('last_idx', 0)
+                        # 确保只加载当前元素的数据
+                        if isinstance(saved_data, dict):
+                            results = [item for item in saved_data.get('results', []) 
+                                     if item.get('element', '') == element]
+                            start_idx = saved_data.get('last_idx', 0)
+                        else:
+                            results = [item for item in saved_data if item.get('element', '') == element]
+                            start_idx = len(results)
                         total_processed = len(results)
                         print(f"从Google Drive加载进度（已处理{total_processed}条记录，进度：{total_processed/len(spec_files):.2%}）")
                 except Exception as e:
                     print(f"加载Google Drive进度文件出错: {e}，将从头开始处理")
                     start_idx = 0
         
-        # 计算剩余的批次
-        remaining = len(spec_files) - start_idx
-        if remaining <= 0:
-            print(f"{element}数据已全部处理完成")
-            return results
+        # 处理光谱
+        batch_size = 150  # 每批处理的光谱数量
+        total_batches = (len(spec_files) - start_idx + batch_size - 1) // batch_size
+        
+        for batch_idx in range(start_idx // batch_size, total_batches):
+            batch_start = batch_idx * batch_size
+            batch_end = min(batch_start + batch_size, len(spec_files))
             
-        num_batches = (remaining + self.batch_size - 1) // self.batch_size
-        
-        # 测试第一个文件，确认路径正确
-        test_spec = spec_files[start_idx]
-        print(f"测试第一个文件: {test_spec}")
-        # 首先检查文件是否存在
-        found_path = self._find_fits_file(test_spec)
-        if found_path:
-            print(f"找到文件路径: {found_path}")
-        else:
-            print(f"警告: 找不到文件 {test_spec}")
-            return results
-        
-        # 尝试处理第一个文件
-        print("尝试处理测试文件...")
-        
-        # 直接打开文件并检查数据格式
-        try:
-            with fits.open(found_path, ignore_missing_end=True, memmap=False) as hdul:
-                print(f"FITS文件结构: 共{len(hdul)}个HDU")
-                for i, hdu in enumerate(hdul):
-                    hdu_type = type(hdu).__name__
-                    print(f"  HDU{i}: 类型={hdu_type}")
-                    
-                    # 如果是BinTableHDU，输出表格信息
-                    if isinstance(hdu, fits.BinTableHDU):
-                        print(f"  表格列: {hdu.columns.names}")
-                        print(f"  表格行数: {len(hdu.data)}")
-                        
-                        # 输出第一行数据类型
-                        first_row = hdu.data[0]
-                        print(f"  第一行数据类型: {type(first_row)}")
-                        
-                        # 检查每列的数据类型
-                        for col_name in hdu.columns.names:
-                            col_data = hdu.data[col_name]
-                            if len(col_data) > 0:
-                                print(f"  列 '{col_name}' 类型: {type(col_data[0])}")
-                                # 如果是数组类型，尝试获取其形状
-                                try:
-                                    if hasattr(col_data[0], 'shape'):
-                                        print(f"    数据形状: {col_data[0].shape}")
-                                    elif hasattr(col_data[0], '__len__'):
-                                        print(f"    数据长度: {len(col_data[0])}")
-                                except:
-                                    pass
-        except Exception as e:
-            print(f"检查FITS文件格式出错: {e}")
-        
-        # 正常处理第一个文件
-        test_result = self.process_single_spectrum(test_spec, labels[start_idx])
-        if test_result is None:
-            print(f"警告: 无法处理第一个测试文件 {test_spec}，请检查文件内容或处理逻辑")
-            # 尝试读取文件进行诊断
-            try:
-                with fits.open(found_path) as hdul:
-                    header = hdul[0].header
-                    print(f"文件头信息示例: NAXIS={header.get('NAXIS')}, NAXIS1={header.get('NAXIS1')}")
-                    # 检查文件内容
-                    data_shape = hdul[0].data.shape if hdul[0].data is not None else "无数据"
-                    print(f"数据形状: {data_shape}")
-            except Exception as e:
-                print(f"读取文件出错: {e}")
-            return results
-        else:
-            print(f"测试文件 {test_spec} 处理成功，继续批量处理")
-            results.append(test_result)
-            results[0]['element'] = element
-            total_processed += 1
-        
-        # 逐批处理剩余数据
-        for batch_idx in tqdm(range(num_batches), desc=f"处理{element}光谱批次"):
-            # 计算当前批次的索引范围
-            current_start = start_idx + 1 + batch_idx * self.batch_size  # 跳过已测试的第一个文件
-            if current_start >= len(spec_files):
-                break  # 防止越界
-            
-            current_end = min(current_start + self.batch_size, len(spec_files))
-            batch_specs = spec_files[current_start:current_end]
-            batch_labels = labels[current_start:current_end]
-            
-            if len(batch_specs) == 0 or len(batch_labels) == 0:
-                continue  # 跳过空批次
+            print(f"\n处理{element}光谱批次: {batch_idx + 1}/{total_batches}")
             
             batch_results = []
+            for i in tqdm(range(batch_start, batch_end), desc=f"处理{element}光谱批次"):
+                spec_file = spec_files[i]
+                label = labels[i]
+                
+                # 处理单个光谱
+                result = self.process_single_spectrum(spec_file, label)
+                if result is not None:
+                    # 添加元素信息
+                    result['element'] = element
+                    if 'metadata' in result:
+                        result['metadata']['element'] = element
+                    batch_results.append(result)
+            
+            # 添加批次结果
+            results.extend(batch_results)
+            
+            # 保存进度
+            try:
+                with open(progress_file, 'wb') as f:
+                    pickle.dump({'results': results, 'last_idx': batch_end}, f)
+                print(f"已保存{element}处理进度")
+            except Exception as e:
+                print(f"保存进度失败: {e}")
             
             # 检查内存使用情况
-            if self.check_memory_usage():
-                # 如果内存紧张，先保存当前进度
-                with open(progress_file, 'wb') as f:
-                    pickle.dump({'results': results, 'last_idx': current_start}, f)
-                # 保存文件查找缓存
-                self._save_files_cache()
-                print("内存使用率高，已保存进度，可以安全退出程序")
-                
-                # 询问是否继续
-                if input("内存使用率较高，是否继续处理？(y/n): ").lower() != 'y':
-                    return results
-            
-            # 使用多进程处理当前批次
-            successful_count = 0
-            failed_specs = []
-            
-            with Pool(processes=self.max_workers) as pool:
-                jobs = []
-                for spec_file, label in zip(batch_specs, batch_labels):
-                    jobs.append(pool.apply_async(self.process_single_spectrum, 
-                                                (spec_file, label)))
-                
-                for job in jobs:
-                    try:
-                        result = job.get(timeout=30)  # 设置超时避免卡死
-                        if result is not None:
-                            # 设置元素信息
-                            if 'metadata' in result:
-                                result['metadata']['element'] = element
-                            else:
-                                # 兼容旧格式
-                                result['element'] = element
-                            
-                            batch_results.append(result)
-                            successful_count += 1
-                        else:
-                            failed_specs.append(spec_file)
-                    except Exception as e:
-                        print(f"处理作业出错: {e}")
-                        continue
-            
-            # 添加到结果集
-            results.extend(batch_results)
-            total_processed += successful_count
-            
-            # 输出当前批次统计和整体进度
-            overall_progress = (total_processed / len(spec_files)) * 100
-            if len(batch_specs) > 0:
-                print(f"批次 {batch_idx+1}/{num_batches}: 成功 {successful_count}/{len(batch_specs)} 个文件")
-                print(f"总进度: [{overall_progress:.2f}%] {total_processed}/{len(spec_files)} 已完成")
-                if len(failed_specs) > 0 and len(failed_specs) < 5:
-                    print(f"失败文件示例: {failed_specs}")
-            
-            # 定期保存进度
-            if batch_idx % 5 == 0 or batch_idx == num_batches - 1:
-                with open(progress_file, 'wb') as f:
-                    pickle.dump({'results': results, 'last_idx': current_end}, f)
-                # 保存文件查找缓存
-                self._save_files_cache()
-                print(f"✓ 进度已保存 [{overall_progress:.2f}%]")
+            self.check_memory_usage()
         
-        print(f"成功处理{total_processed}/{len(spec_files)}条{element}光谱数据 (完成率: {total_processed/len(spec_files):.2%})")
         return results
     
     def process_all_data(self, resume=True):
@@ -2665,7 +2558,7 @@ def main():
         fits_dir=fits_dir,
         output_dir=output_dir,
         wavelength_range=None,  # 修改为None，表示将使用最大公有波长范围
-        n_points=None,  # 修改为None，点数将根据波长范围和步长自动计算
+        n_points=4098,  # 设置默认点数为4098
         log_step=0.0001,  # 新增：对数空间中的重采样步长（dex）
         compute_common_range=True,  # 新增：是否计算最大公有波长范围
         n_splits=5,
