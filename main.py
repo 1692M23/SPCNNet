@@ -612,10 +612,12 @@ def process_element(element, config=None, tune_hyperparams=False):
                 
             # 更新配置
             config.training_config = training_config
+        else:
+            logger.warning(f"{element} 的超参数调优未找到更好的参数组合，将使用默认参数")
     
     # 使用最佳超参数训练模型
     logger.info(f"开始训练 {element} 模型" + 
-               (f" (使用优化超参数)" if hyperparams else ""))
+               (f" (使用优化超参数)" if hyperparams else " (使用默认参数)"))
     
     # 如果有dropout_rate超参数，传递给模型
     dropout_rate = hyperparams.get('dropout_rate', 0.5) if hyperparams else 0.5
@@ -655,13 +657,13 @@ def process_element(element, config=None, tune_hyperparams=False):
         # 尝试使用旧的训练函数作为备用
         logger.warning("尝试使用旧的train_model函数作为备用")
         from model import train_model
-        train_losses, val_losses = train_model(
-            model=model,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            element=element,
-            config=config
-        )
+    train_losses, val_losses = train_model(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        element=element,
+        config=config
+    )
     
     # 评估模型（如果有测试集）
     test_metrics = None
@@ -701,11 +703,10 @@ def process_element(element, config=None, tune_hyperparams=False):
             except Exception as e:
                 logger.error(f"模型性能分析失败: {str(e)}")
     
-    return {
-        'train_losses': train_losses,
-        'val_losses': val_losses,
-        'test_metrics': test_metrics
-    }
+    # 可视化训练过程
+    visualize_training(element, train_losses, val_losses)
+    
+    return model, test_metrics
 
 def process_multiple_elements(csv_file, fits_dir, element_columns=None, 
                              test_size=0.2, val_size=0.1, batch_size=32, 
@@ -822,18 +823,11 @@ def process_multiple_elements(csv_file, fits_dir, element_columns=None,
         
         try:
             # 训练模型
-            best_model, best_val_loss, test_metrics = train_and_evaluate_model(
-                train_loader=train_loader,
-                val_loader=val_loader,
-                test_loader=test_loader,
-                element=element,
-                config=element_config
-            )
+            best_model, test_metrics = process_element(element, config, tune_hyperparams=tune_hyperparams)
             
             # 保存结果
             result_info = {
                 'element': element,
-                'best_val_loss': best_val_loss,
                 'test_metrics': test_metrics
             }
             
@@ -1439,7 +1433,7 @@ def main():
             element_indices = train_data[2]  # 从load_data返回的结果中获取
             if element_indices is not None:
                 if isinstance(element_indices, dict) and element in element_indices:
-                    # 从标签中提取特定元素的值
+                # 从标签中提取特定元素的值
                     element_idx = element_indices[element]
         
                     # 修改标签提取逻辑，处理1D和2D数组
@@ -1455,14 +1449,14 @@ def main():
                         test_element_label = test_data[1][:, element_idx]
                     
                     # 创建特定元素的数据加载器
-                    train_loader_element = create_data_loaders(train_data[0], element_label,
+                        train_loader_element = create_data_loaders(train_data[0], element_label,
                                                             batch_size=config.training_config['batch_size'])
-                    val_loader_element = create_data_loaders(val_data[0], val_element_label,
+                        val_loader_element = create_data_loaders(val_data[0], val_element_label,
                                                           batch_size=config.training_config['batch_size'], shuffle=False)
-                    test_loader_element = create_data_loaders(test_data[0], test_element_label,
+                        test_loader_element = create_data_loaders(test_data[0], test_element_label,
                                                            batch_size=config.training_config['batch_size'], shuffle=False)
                     
-                    logger.info(f"为元素 {element} 创建特定数据加载器")
+                        logger.info(f"为元素 {element} 创建特定数据加载器")
                 else:
                     # 使用原始数据加载器
                     train_loader_element = train_loader
@@ -1523,15 +1517,15 @@ def main():
             # 使用原系统进行预测
             data_path = args.data_path[0] if args.data_path else config.data_paths.get('reference_data')
             logger.info(f"加载预测数据: {data_path}")
-            spectra, _, _ = load_data(data_path)
-            
-            if spectra is None:
-                logger.error("加载数据失败，退出程序")
-                return
-            
-            # 使用训练好的模型进行预测
-            for element in elements:
-                logger.info(f"使用 {element} 模型进行预测")
+        spectra, _, _ = load_data(data_path)
+        
+        if spectra is None:
+            logger.error("加载数据失败，退出程序")
+            return
+        
+        # 使用训练好的模型进行预测
+        for element in elements:
+            logger.info(f"使用 {element} 模型进行预测")
 
 if __name__ == '__main__':
     main() 
