@@ -199,6 +199,9 @@ def analyze_feature_importance(model, data_loader, device, element, input_size=4
     返回:
         dict: 特征重要性结果
     """
+    # 记录开始时间，用于计算处理时间
+    start_time = time.time()
+    
     # 如果输入是数据加载器，直接使用；否则创建数据加载器
     if not isinstance(data_loader, DataLoader):
         if isinstance(data_loader, tuple) and len(data_loader) >= 2:
@@ -224,10 +227,10 @@ def analyze_feature_importance(model, data_loader, device, element, input_size=4
         # 确保目录存在
         batch_dir = os.path.join('results', 'feature_importance', f'{element}_batch_results')
         os.makedirs(batch_dir, exist_ok=True)
-        
+    
         # 创建批次跟踪器
         batch_tracker = BatchTracker(element, "feature_importance")
-        
+    
         # 如果没有指定批次ID，获取下一个可用ID
         if batch_id is None:
             batch_id = batch_tracker.get_next_batch_id()
@@ -294,6 +297,27 @@ def analyze_feature_importance(model, data_loader, device, element, input_size=4
                     # 获取最重要的波长区域
                     top_indices = np.argsort(mean_importances)[-top_n:][::-1]
                     
+                    # 估计波长范围
+                    try:
+                        # 尝试导入preprocessdata7
+                        import importlib
+                        pp7 = importlib.import_module('preprocessdata7')
+                        if hasattr(pp7, 'LAMOSTPreprocessor'):
+                            preprocessor = pp7.LAMOSTPreprocessor()
+                            if hasattr(preprocessor, 'get_wavelength_range'):
+                                wavelength_min, wavelength_max = preprocessor.get_wavelength_range()
+                            else:
+                                # 使用估计值
+                                wavelength_min, wavelength_max = 3800, 9000
+                        else:
+                            wavelength_min, wavelength_max = 3800, 9000
+                    except:
+                        # 默认LAMOST波长范围估计值
+                        wavelength_min, wavelength_max = 3800, 9000
+                    
+                    # 估计每个索引对应的波长
+                    wavelengths = np.linspace(wavelength_min, wavelength_max, input_size)
+                    
                     # 绘制特征重要性图
                     plt.figure(figsize=(12, 6))
                     plt.subplot(2, 1, 1)
@@ -325,28 +349,6 @@ def analyze_feature_importance(model, data_loader, device, element, input_size=4
                         f.write("=" * 50 + "\n\n")
                         f.write("最重要的波长区域及其可能对应的光谱特征：\n\n")
                         
-                        # 获取默认的波长范围 - 从预处理模块或使用估计值
-                        try:
-                            # 尝试导入preprocessdata7
-                            import importlib
-                            pp7 = importlib.import_module('preprocessdata7')
-                            if hasattr(pp7, 'LAMOSTPreprocessor'):
-                                preprocessor = pp7.LAMOSTPreprocessor()
-                                if hasattr(preprocessor, 'get_wavelength_range'):
-                                    wavelength_min, wavelength_max = preprocessor.get_wavelength_range()
-                                else:
-                                    # 使用估计值
-                                    wavelength_min, wavelength_max = 3800, 9000
-                            else:
-                                wavelength_min, wavelength_max = 3800, 9000
-                        except:
-                            # 默认LAMOST波长范围估计值
-                            wavelength_min, wavelength_max = 3800, 9000
-                        
-                        # 估计每个索引对应的波长
-                        wavelength_step = (wavelength_max - wavelength_min) / input_size
-                        wavelengths = np.linspace(wavelength_min, wavelength_max, input_size)
-                        
                         for i, idx in enumerate(top_indices):
                             wavelength = wavelengths[idx]
                             feature_explanation = get_feature_explanation(wavelength, element)
@@ -357,23 +359,36 @@ def analyze_feature_importance(model, data_loader, device, element, input_size=4
                     # 如果启用批处理结果保存，记录该批次的结果
                     if save_batch_results:
                         # 创建批次结果记录
+                        max_importance = np.max(mean_importances)
+                        # 检查max_importance是否为NaN
+                        if np.isnan(max_importance):
+                            logger.warning(f"批次 {batch_id or batch_idx+1} 的特征重要性为NaN，可能需要检查数据或模型")
+                            max_importance = 0.0  # 使用默认值代替NaN
+                            
                         batch_result = {
                             'batch_id': batch_id or batch_idx+1,
                             'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-                            'top_indices': top_indices.tolist(),
-                            'top_importances': mean_importances[top_indices].tolist(),
-                            'mean_importance': np.mean(mean_importances),
-                            'max_importance': np.max(mean_importances),
-                            'plot_path': plot_path,
-                            'explanation_path': explanation_path
+                            'num_samples': len(batch_data),
+                            'top_feature_wavelength': float(wavelengths[top_indices[0]]) if len(top_indices) > 0 else 0.0,
+                            'top_feature_importance': float(max_importance),
+                            'top_feature_name': identify_spectral_feature(wavelengths[top_indices[0]], element) if len(top_indices) > 0 else "未知",
+                            'top_wavelengths': wavelengths[top_indices].tolist(),
+                            'top_importance': mean_importances[top_indices].tolist(),
+                            'processing_time': time.time() - start_time
                         }
                         
                         # 添加到批次跟踪器
                         batch_tracker.add_batch_result(batch_result)
                         
-                        # 生成趋势图和批次摘要
-                        batch_tracker.generate_trend_plots()
-                        batch_tracker.generate_batch_summary()
+                        try:
+                            # 生成趋势图
+                            if len(batch_tracker.tracking_df) > 1:
+                                batch_tracker.generate_trend_plots()
+                                
+                            # 生成批次摘要
+                            batch_tracker.generate_batch_summary()
+                        except Exception as e:
+                            logger.error(f"生成批次趋势图或摘要时出错: {str(e)}")
                     
                     # 如果只处理特定批次，完成后返回
                     if batch_size is not None and batch_id is not None:
@@ -381,6 +396,9 @@ def analyze_feature_importance(model, data_loader, device, element, input_size=4
                             'batch_id': batch_id,
                             'feature_importance': mean_importances,
                             'top_indices': top_indices.tolist(),
+                            'top_wavelengths': wavelengths[top_indices].tolist(),
+                            'top_importance': mean_importances[top_indices].tolist(),
+                            'max_importance': float(max_importance),
                             'plot_path': plot_path,
                             'explanation_path': explanation_path
                         }
@@ -416,34 +434,33 @@ def analyze_feature_importance(model, data_loader, device, element, input_size=4
         plt.savefig(plot_path, dpi=300)
         plt.close()
         
+        # 估计波长范围
+        try:
+            # 尝试导入preprocessdata7
+            import importlib
+            pp7 = importlib.import_module('preprocessdata7')
+            if hasattr(pp7, 'LAMOSTPreprocessor'):
+                preprocessor = pp7.LAMOSTPreprocessor()
+                if hasattr(preprocessor, 'get_wavelength_range'):
+                    wavelength_min, wavelength_max = preprocessor.get_wavelength_range()
+                else:
+                    # 使用估计值
+                    wavelength_min, wavelength_max = 3800, 9000
+            else:
+                wavelength_min, wavelength_max = 3800, 9000
+        except:
+            # 默认LAMOST波长范围估计值
+            wavelength_min, wavelength_max = 3800, 9000
+        
+        # 估计每个索引对应的波长
+        wavelengths = np.linspace(wavelength_min, wavelength_max, input_size)
+        
         # 保存总体解释文件
         explanation_path = os.path.join(plot_dir, f'{element}_feature_explanation.txt')
         with open(explanation_path, 'w') as f:
             f.write(f"元素 {element} 特征重要性分析\n")
             f.write("=" * 50 + "\n\n")
             f.write("最重要的波长区域及其可能对应的光谱特征：\n\n")
-            
-            # 估计波长范围
-            try:
-                # 尝试导入preprocessdata7
-                import importlib
-                pp7 = importlib.import_module('preprocessdata7')
-                if hasattr(pp7, 'LAMOSTPreprocessor'):
-                    preprocessor = pp7.LAMOSTPreprocessor()
-                    if hasattr(preprocessor, 'get_wavelength_range'):
-                        wavelength_min, wavelength_max = preprocessor.get_wavelength_range()
-                    else:
-                        # 使用估计值
-                        wavelength_min, wavelength_max = 3800, 9000
-                else:
-                    wavelength_min, wavelength_max = 3800, 9000
-            except:
-                # 默认LAMOST波长范围估计值
-                wavelength_min, wavelength_max = 3800, 9000
-            
-            # 估计每个索引对应的波长
-            wavelength_step = (wavelength_max - wavelength_min) / input_size
-            wavelengths = np.linspace(wavelength_min, wavelength_max, input_size)
             
             for i, idx in enumerate(top_indices):
                 wavelength = wavelengths[idx]
@@ -452,13 +469,23 @@ def analyze_feature_importance(model, data_loader, device, element, input_size=4
                 f.write(f"   重要性得分: {mean_importances[idx]:.6f}\n")
                 f.write(f"   可能特征: {feature_explanation}\n\n")
         
+        # 检查并处理NaN值
+        max_importance = np.max(mean_importances)
+        if np.isnan(max_importance):
+            logger.warning(f"元素 {element} 的总体特征重要性为NaN，返回零值")
+            max_importance = 0.0
+        
         return {
             'feature_importance': mean_importances,
             'top_indices': top_indices.tolist(),
+            'top_wavelengths': wavelengths[top_indices].tolist(),
+            'top_importance': mean_importances[top_indices].tolist(),
+            'max_importance': float(max_importance),
             'plot_path': plot_path,
             'explanation_path': explanation_path
         }
     else:
+        logger.warning(f"未收集到任何有效的特征重要性数据")
         return None
 
 def analyze_residuals(model, test_loader, device, element, batch_size=None, batch_id=None, save_batch_results=True):
@@ -992,36 +1019,59 @@ class BatchTracker:
             f.write(f"分析时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             
             if self.analysis_type == "feature_importance":
-                # 找出最重要的特征所在批次
-                best_batch = self.tracking_df.loc[self.tracking_df['top_feature_importance'].idxmax()]
-                f.write(f"最强特征重要性批次: {best_batch['batch_id']} (分数: {best_batch['top_feature_importance']:.4f})\n")
-                f.write(f"特征波长: {best_batch['top_feature_wavelength']:.2f}Å\n")
-                f.write(f"特征名称: {best_batch['top_feature_name']}\n\n")
+                # 检查top_feature_importance列是否存在或全为NaN
+                if 'top_feature_importance' not in self.tracking_df.columns:
+                    f.write("警告: 没有找到特征重要性数据\n\n")
+                elif self.tracking_df['top_feature_importance'].isna().all():
+                    f.write("警告: 所有特征重要性值均为NaN\n\n")
+                else:
+                    # 找出最重要的特征所在批次，排除NaN值
+                    valid_rows = self.tracking_df['top_feature_importance'].notna()
+                    if valid_rows.any():
+                        best_batch = self.tracking_df.loc[self.tracking_df.loc[valid_rows, 'top_feature_importance'].idxmax()]
+                        f.write(f"最强特征重要性批次: {best_batch['batch_id']} (分数: {best_batch['top_feature_importance']:.4f})\n")
+                        
+                        # 确保top_feature_wavelength和top_feature_name存在
+                        if 'top_feature_wavelength' in best_batch:
+                            f.write(f"特征波长: {best_batch['top_feature_wavelength']:.2f}Å\n")
+                        
+                        if 'top_feature_name' in best_batch:
+                            f.write(f"特征名称: {best_batch['top_feature_name']}\n\n")
                 
-                # 批次处理时间统计
-                f.write(f"平均处理时间: {self.tracking_df['processing_time'].mean():.2f}秒\n")
+                # 批次处理时间统计，如果存在processing_time列
+                if 'processing_time' in self.tracking_df.columns and not self.tracking_df['processing_time'].isna().all():
+                    f.write(f"平均处理时间: {self.tracking_df['processing_time'].mean():.2f}秒\n")
                 
             else:  # residual_analysis
-                # 找出RMSE最小的批次
-                best_rmse_batch = self.tracking_df.loc[self.tracking_df['rmse'].idxmin()]
-                f.write(f"最佳RMSE批次: {best_rmse_batch['batch_id']} (RMSE: {best_rmse_batch['rmse']:.4f})\n")
+                # 找出RMSE最小的批次，处理可能的NaN值
+                if 'rmse' in self.tracking_df.columns and not self.tracking_df['rmse'].isna().all():
+                    valid_rmse = self.tracking_df['rmse'].notna()
+                    if valid_rmse.any():
+                        best_rmse_batch = self.tracking_df.loc[self.tracking_df.loc[valid_rmse, 'rmse'].idxmin()]
+                        f.write(f"最佳RMSE批次: {best_rmse_batch['batch_id']} (RMSE: {best_rmse_batch['rmse']:.4f})\n")
                 
-                # 找出R²最大的批次
-                best_r2_batch = self.tracking_df.loc[self.tracking_df['r2'].idxmax()]
-                f.write(f"最佳R²批次: {best_r2_batch['batch_id']} (R²: {best_r2_batch['r2']:.4f})\n\n")
+                # 找出R²最大的批次，处理可能的NaN值
+                if 'r2' in self.tracking_df.columns and not self.tracking_df['r2'].isna().all():
+                    valid_r2 = self.tracking_df['r2'].notna()
+                    if valid_r2.any():
+                        best_r2_batch = self.tracking_df.loc[self.tracking_df.loc[valid_r2, 'r2'].idxmax()]
+                        f.write(f"最佳R²批次: {best_r2_batch['batch_id']} (R²: {best_r2_batch['r2']:.4f})\n\n")
                 
                 # 添加平均指标
                 f.write("### 平均性能指标\n")
-                f.write(f"平均RMSE: {self.tracking_df['rmse'].mean():.4f}\n")
-                f.write(f"平均MAE: {self.tracking_df['mae'].mean():.4f}\n")
-                f.write(f"平均R²: {self.tracking_df['r2'].mean():.4f}\n")
-                f.write(f"平均残差均值: {self.tracking_df['residual_mean'].mean():.4f}\n")
-                f.write(f"平均残差标准差: {self.tracking_df['residual_std'].mean():.4f}\n\n")
+                for metric in ['rmse', 'mae', 'r2', 'residual_mean', 'residual_std']:
+                    if metric in self.tracking_df.columns and not self.tracking_df[metric].isna().all():
+                        valid_values = self.tracking_df[metric].dropna()
+                        if len(valid_values) > 0:
+                            f.write(f"平均{metric.upper()}: {valid_values.mean():.4f}\n")
             
             # 添加批次列表
-            f.write("### 所有批次\n")
+            f.write("\n### 所有批次\n")
             for _, batch in self.tracking_df.iterrows():
-                f.write(f"批次 {batch['batch_id']}: {batch['timestamp']}\n")
+                batch_str = f"批次 {batch['batch_id']}"
+                if 'timestamp' in batch:
+                    batch_str += f": {batch['timestamp']}"
+                f.write(f"{batch_str}\n")
         
         return summary_path
 
