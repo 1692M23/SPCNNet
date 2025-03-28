@@ -1495,7 +1495,7 @@ class LAMOSTPreprocessor:
         
         # 处理每个元素的数据
         processed_records = 0
-        for i, (df, element) in enumerate(zip(dataframes, ['C_FE', 'MG_FE', 'CA_FE'])):
+        for i, (df, element) in enumerate(zip(dataframes, [os.path.splitext(os.path.basename(csv))[0] for csv in self.csv_files])):
             # 统计已处理的元素记录数
             element_records = sum(1 for item in all_data if item.get('element') == element)
             # 元素的总记录数
