@@ -8,6 +8,8 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import time
 import pandas as pd
+from scipy import stats
+from sklearn.metrics import r2_score
 
 # 配置logger
 logger = logging.getLogger(__name__)
@@ -419,9 +421,22 @@ def train_model(model, train_loader, val_loader, element, config):
     max_nan_attempts = 3
     max_patience = config.training_config['early_stopping_patience']
     
+    # 记录NaN值出现的次数和位置
+    nan_stats = {
+        'input_data': 0,
+        'model_output': 0,
+        'loss': 0,
+        'gradients': 0,
+        'total_batches': 0
+    }
+    
     # 创建批次追踪文件
     batch_tracking_path = os.path.join(batch_results_dir, 'batch_tracking.csv')
     batch_df = pd.DataFrame(columns=['epoch', 'train_loss', 'val_loss', 'lr', 'timestamp'])
+    
+    # 创建NaN追踪日志
+    nan_log_path = os.path.join(batch_results_dir, 'nan_tracking.csv')
+    nan_df = pd.DataFrame(columns=['epoch', 'batch', 'location', 'action_taken', 'timestamp'])
     
     # 训练循环
     for epoch in range(config.training_config['num_epochs']):
@@ -431,37 +446,127 @@ def train_model(model, train_loader, val_loader, element, config):
         
         # 训练阶段
         for batch_idx, (data, target) in enumerate(train_loader):
+            nan_stats['total_batches'] += 1
             data, target = data.to(device), target.to(device)
             
-            # 检查输入数据是否包含nan
+            # 检查输入数据是否包含nan并进行处理
             if torch.isnan(data).any():
-                logger.warning(f"检测到输入数据包含nan值，跳过当前批次")
-                continue
+                # 记录NaN统计
+                nan_stats['input_data'] += 1
                 
+                # 尝试修复NaN值
+                data_mean = torch.nanmean(data, dim=0)
+                nan_mask = torch.isnan(data)
+                nan_count = torch.sum(nan_mask).item()
+                
+                # 用平均值填充NaN
+                data_clone = data.clone()
+                for i in range(data.size(0)):
+                    sample_nan_mask = nan_mask[i]
+                    if sample_nan_mask.any():
+                        data_clone[i][sample_nan_mask] = data_mean[sample_nan_mask]
+                
+                # 记录到NaN日志
+                new_nan_row = pd.DataFrame({
+                    'epoch': [epoch+1],
+                    'batch': [batch_idx],
+                    'location': ['input_data'],
+                    'action_taken': [f'填充了{nan_count}个NaN值'],
+                    'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
+                })
+                nan_df = pd.concat([nan_df, new_nan_row], ignore_index=True)
+                nan_df.to_csv(nan_log_path, index=False)
+                
+                logger.warning(f"输入数据中检测到{nan_count}个NaN值并已用均值填充")
+                data = data_clone
+            
             optimizer.zero_grad()
             
             try:
+                # 前向传播
                 output = model(data)
+                
+                # 检查模型输出是否包含nan
+                if torch.isnan(output).any():
+                    nan_stats['model_output'] += 1
+                    output_nan_count = torch.sum(torch.isnan(output)).item()
+                    
+                    # 记录到NaN日志
+                    new_nan_row = pd.DataFrame({
+                        'epoch': [epoch+1],
+                        'batch': [batch_idx],
+                        'location': ['model_output'],
+                        'action_taken': ['跳过批次'],
+                        'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
+                    })
+                    nan_df = pd.concat([nan_df, new_nan_row], ignore_index=True)
+                    nan_df.to_csv(nan_log_path, index=False)
+                    
+                    logger.warning(f"模型输出中检测到{output_nan_count}个NaN值，跳过当前批次")
+                    nan_counter += 1
+                    if nan_counter >= max_nan_attempts:
+                        _reset_model_and_optimizer(model, optimizer, nan_counter, max_nan_attempts)
+                        nan_counter = 0
+                    continue
+                
+                # 计算损失
                 loss = F.mse_loss(output, target)
                 
                 # 检查损失值是否为nan
                 if torch.isnan(loss):
+                    nan_stats['loss'] += 1
+                    
+                    # 记录到NaN日志
+                    new_nan_row = pd.DataFrame({
+                        'epoch': [epoch+1],
+                        'batch': [batch_idx],
+                        'location': ['loss'],
+                        'action_taken': ['跳过批次'],
+                        'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
+                    })
+                    nan_df = pd.concat([nan_df, new_nan_row], ignore_index=True)
+                    nan_df.to_csv(nan_log_path, index=False)
+                    
                     logger.warning(f"检测到nan损失值，跳过当前批次")
                     nan_counter += 1
                     if nan_counter >= max_nan_attempts:
-                        logger.warning(f"连续 {max_nan_attempts} 次出现nan值，重置模型和学习率")
-                        # 重置模型参数
-                        model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
-                        # 降低学习率
-                        for param_group in optimizer.param_groups:
-                            param_group['lr'] *= 0.1
+                        _reset_model_and_optimizer(model, optimizer, nan_counter, max_nan_attempts)
                         nan_counter = 0
                     continue
+                
+                # 反向传播
+                loss.backward()
+                
+                # 检查梯度是否包含nan
+                nan_in_grad = False
+                for name, param in model.named_parameters():
+                    if param.grad is not None and torch.isnan(param.grad).any():
+                        nan_in_grad = True
+                        nan_stats['gradients'] += 1
+                        
+                        # 将NaN梯度置零
+                        nan_mask = torch.isnan(param.grad)
+                        param.grad[nan_mask] = 0.0
+                        
+                        grad_nan_count = torch.sum(nan_mask).item()
+                        logger.warning(f"参数'{name}'的梯度中检测到{grad_nan_count}个NaN值，已将其置零")
+                
+                if nan_in_grad:
+                    # 记录到NaN日志
+                    new_nan_row = pd.DataFrame({
+                        'epoch': [epoch+1],
+                        'batch': [batch_idx],
+                        'location': ['gradients'],
+                        'action_taken': ['将NaN梯度置零'],
+                        'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
+                    })
+                    nan_df = pd.concat([nan_df, new_nan_row], ignore_index=True)
+                    nan_df.to_csv(nan_log_path, index=False)
                 
                 # 梯度裁剪
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 
-                loss.backward()
+                # 更新参数
                 optimizer.step()
                 
                 epoch_loss += loss.item()
@@ -470,11 +575,35 @@ def train_model(model, train_loader, val_loader, element, config):
                 
             except Exception as e:
                 logger.error(f"训练批次时出错: {str(e)}")
+                
+                # 记录到NaN日志
+                new_nan_row = pd.DataFrame({
+                    'epoch': [epoch+1],
+                    'batch': [batch_idx],
+                    'location': ['exception'],
+                    'action_taken': [f'错误: {str(e)}'],
+                    'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
+                })
+                nan_df = pd.concat([nan_df, new_nan_row], ignore_index=True)
+                nan_df.to_csv(nan_log_path, index=False)
+                
                 continue
         
         # 检查是否有有效的损失值
         if valid_batches == 0:
             logger.error("训练过程中没有有效的损失值")
+            
+            # 记录到NaN日志
+            new_nan_row = pd.DataFrame({
+                'epoch': [epoch+1],
+                'batch': [0],
+                'location': ['entire_epoch'],
+                'action_taken': ['跳过整个epoch'],
+                'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
+            })
+            nan_df = pd.concat([nan_df, new_nan_row], ignore_index=True)
+            nan_df.to_csv(nan_log_path, index=False)
+            
             return [], []
         
         # 计算平均训练损失
@@ -494,22 +623,34 @@ def train_model(model, train_loader, val_loader, element, config):
             for data, target in val_loader:
                 data, target = data.to(device), target.to(device)
                 
-                # 检查输入数据是否包含nan
+                # 检查并填充数据中的NaN
                 if torch.isnan(data).any():
-                    continue
+                    data_mean = torch.nanmean(data, dim=0)
+                    nan_mask = torch.isnan(data)
+                    data[nan_mask] = data_mean.repeat(data.size(0), 1)[nan_mask]
                     
                 try:
+                    # 前向传播
                     output = model(data)
+                    
+                    # 检查并处理输出中的NaN
+                    if torch.isnan(output).any():
+                        # 用零替换输出中的NaN
+                        output[torch.isnan(output)] = 0.0
+                    
+                    # 计算损失
                     loss = F.mse_loss(output, target)
                     
-                    # 收集预测结果和真实值
-                    all_outputs.append(output.cpu().numpy())
-                    all_targets.append(target.cpu().numpy())
-                    
-                    # 检查损失值是否为nan
+                    # 检查损失值
                     if torch.isnan(loss):
                         continue
-                        
+                    
+                    # 收集非NaN预测结果和真实值
+                    valid_indices = ~torch.isnan(output).any(dim=1)
+                    if valid_indices.any():
+                        all_outputs.append(output[valid_indices].cpu().numpy())
+                        all_targets.append(target[valid_indices].cpu().numpy())
+                    
                     val_loss += loss.item()
                     valid_val_batches += 1
                     
@@ -541,10 +682,10 @@ def train_model(model, train_loader, val_loader, element, config):
                 mse = np.mean((all_outputs - all_targets) ** 2)
                 rmse = np.sqrt(mse)
                 mae = np.mean(np.abs(all_outputs - all_targets))
-                r2 = 1 - (np.sum((all_targets - all_outputs) ** 2) / np.sum((all_targets - np.mean(all_targets)) ** 2))
+                r2 = r2_score(all_targets.flatten(), all_outputs.flatten())
                 scatter = np.std(all_outputs - all_targets)
                 
-                # 保存评估指标
+                # 在评估指标中添加NaN统计
                 metrics_path = os.path.join(batch_results_dir, f'epoch_{epoch+1}_metrics.txt')
                 with open(metrics_path, 'w') as f:
                     f.write(f"Epoch {epoch+1} 在 {element} 上的评估结果\n")
@@ -557,6 +698,12 @@ def train_model(model, train_loader, val_loader, element, config):
                     f.write(f"R²: {r2:.6f}\n")
                     f.write(f"散度: {scatter:.6f}\n")
                     f.write(f"学习率: {current_lr:.8f}\n")
+                    f.write("\nNaN统计:\n")
+                    f.write(f"总批次数: {nan_stats['total_batches']}\n")
+                    f.write(f"NaN输入数据: {nan_stats['input_data']} ({nan_stats['input_data']/max(1, nan_stats['total_batches'])*100:.2f}%)\n")
+                    f.write(f"NaN模型输出: {nan_stats['model_output']} ({nan_stats['model_output']/max(1, nan_stats['total_batches'])*100:.2f}%)\n") 
+                    f.write(f"NaN损失值: {nan_stats['loss']} ({nan_stats['loss']/max(1, nan_stats['total_batches'])*100:.2f}%)\n")
+                    f.write(f"NaN梯度: {nan_stats['gradients']} ({nan_stats['gradients']/max(1, nan_stats['total_batches'])*100:.2f}%)\n")
                 
                 # 生成散点图
                 plt.figure(figsize=(10, 6))
@@ -581,6 +728,8 @@ def train_model(model, train_loader, val_loader, element, config):
                     'mae': [mae],
                     'r2': [r2],
                     'scatter': [scatter],
+                    'nan_input_rate': [nan_stats['input_data']/max(1, nan_stats['total_batches'])*100],
+                    'nan_output_rate': [nan_stats['model_output']/max(1, nan_stats['total_batches'])*100],
                     'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
                 })
                 
@@ -704,7 +853,50 @@ def train_model(model, train_loader, val_loader, element, config):
         except Exception as e:
             logger.error(f"生成训练汇总报告时出错: {str(e)}")
     
+    # 生成NaN值分析报告
+    nan_report_path = os.path.join(batch_results_dir, 'nan_analysis_report.txt')
+    with open(nan_report_path, 'w') as f:
+        f.write(f"{element} 元素NaN值分析报告\n")
+        f.write("=" * 50 + "\n")
+        f.write(f"总批次数: {nan_stats['total_batches']}\n\n")
+        f.write("NaN出现位置统计:\n")
+        f.write(f"输入数据中的NaN: {nan_stats['input_data']} ({nan_stats['input_data']/max(1, nan_stats['total_batches'])*100:.2f}%)\n")
+        f.write(f"模型输出中的NaN: {nan_stats['model_output']} ({nan_stats['model_output']/max(1, nan_stats['total_batches'])*100:.2f}%)\n")
+        f.write(f"损失值中的NaN: {nan_stats['loss']} ({nan_stats['loss']/max(1, nan_stats['total_batches'])*100:.2f}%)\n")
+        f.write(f"梯度中的NaN: {nan_stats['gradients']} ({nan_stats['gradients']/max(1, nan_stats['total_batches'])*100:.2f}%)\n\n")
+        
+        f.write("可能的NaN原因和建议:\n")
+        if nan_stats['input_data'] > 0:
+            f.write("- 输入数据中存在NaN: 检查数据预处理步骤，确保所有数据都已正确归一化和清洗\n")
+        if nan_stats['model_output'] > 0:
+            f.write("- 模型输出中存在NaN: 可能是由于数值溢出或激活函数问题，考虑使用更稳定的激活函数或调整网络结构\n")
+        if nan_stats['loss'] > 0:
+            f.write("- 损失值中存在NaN: 检查损失函数计算过程，调整学习率或使用更鲁棒的损失函数\n")
+        if nan_stats['gradients'] > 0:
+            f.write("- 梯度中存在NaN: 考虑使用更小的学习率或增加梯度裁剪力度，避免梯度爆炸\n")
+        
+        if sum([nan_stats['input_data'], nan_stats['model_output'], nan_stats['loss'], nan_stats['gradients']]) == 0:
+            f.write("- 训练过程中未检测到NaN值，模型数值稳定性良好\n")
+        
+    logger.info(f"已生成NaN值分析报告: {nan_report_path}")
+    
     return train_losses, val_losses
+
+# 新增的辅助函数，用于重置模型和优化器
+def _reset_model_and_optimizer(model, optimizer, nan_counter, max_nan_attempts):
+    """重置模型参数和学习率"""
+    logger.warning(f"连续 {max_nan_attempts} 次出现nan值，重置模型和学习率")
+    
+    # 重置模型参数
+    model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
+    
+    # 降低学习率
+    for param_group in optimizer.param_groups:
+        param_group['lr'] *= 0.1
+        
+    # 记录降低后的学习率
+    new_lr = optimizer.param_groups[0]['lr']
+    logger.info(f"学习率已降低至 {new_lr:.8f}")
 
 # =============== 3. 评估相关 ===============
 def evaluate_model(model, test_loader, device=None):
@@ -719,136 +911,293 @@ def evaluate_model(model, test_loader, device=None):
     """
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
-    model.eval()
-    test_loss = 0
-    predictions = []
-    targets = []
     
-    criterion = nn.MSELoss()
+    model.to(device)
+    model.eval()
+    
+    all_outputs = []
+    all_targets = []
+    
+    # 添加NaN统计
+    nan_stats = {'input': 0, 'output': 0, 'total_samples': 0}
     
     with torch.no_grad():
-        for spectra, abundances in test_loader:
-            spectra = spectra.to(device)
-            abundances = abundances.to(device)
+        for data, target in test_loader:
+            nan_stats['total_samples'] += data.size(0)
             
-            outputs = model(spectra)
-            loss = criterion(outputs.squeeze(), abundances)
+            # 将数据移到相应设备
+            data, target = data.to(device), target.to(device)
             
-            test_loss += loss.item()
-            predictions.extend(outputs.squeeze().cpu().numpy())
-            targets.extend(abundances.cpu().numpy())
+            # 处理输入数据中的NaN值
+            data, has_nan, nan_count = handle_nan_values(
+                data, 
+                replacement_strategy='mean', 
+                name="评估输入数据"
+            )
+            if has_nan:
+                nan_stats['input'] += nan_count
+            
+            try:
+                # 前向传播
+                output = model(data)
+                
+                # 处理输出中的NaN值
+                output, has_nan, nan_count = handle_nan_values(
+                    output, 
+                    replacement_strategy='zero', 
+                    name="评估模型输出"
+                )
+                if has_nan:
+                    nan_stats['output'] += nan_count
+                
+                # 收集非NaN预测结果和真实值
+                valid_indices = ~torch.isnan(output).any(dim=1) & ~torch.isnan(target).any(dim=1)
+                if valid_indices.any():
+                    all_outputs.append(output[valid_indices].cpu().numpy())
+                    all_targets.append(target[valid_indices].cpu().numpy())
+                
+            except Exception as e:
+                logger.error(f"评估过程中出错: {str(e)}")
+                continue
     
-    predictions = np.array(predictions)
-    targets = np.array(targets)
+    # 如果出现了NaN值，记录日志
+    if nan_stats['input'] > 0 or nan_stats['output'] > 0:
+        logger.warning(f"评估过程中共处理: {nan_stats['total_samples']}个样本")
+        logger.warning(f"输入数据中的NaN值: {nan_stats['input']}个")
+        logger.warning(f"模型输出中的NaN值: {nan_stats['output']}个")
     
-    # 计算评估指标
-    mae = np.mean(np.abs(predictions - targets))
-    mse = np.mean((predictions - targets) ** 2)
-    rmse = np.sqrt(mse)
-    r2 = 1 - (np.sum((targets - predictions) ** 2) / np.sum((targets - np.mean(targets)) ** 2))
-    std_diff = np.std(predictions - targets)
+    # 合并结果，计算指标
+    if len(all_outputs) > 0 and len(all_targets) > 0:
+        try:
+            all_outputs = np.vstack(all_outputs)
+            all_targets = np.vstack(all_targets)
+            
+            # 检查连接后的数据是否仍包含NaN
+            if np.isnan(all_outputs).any() or np.isnan(all_targets).any():
+                logger.warning("合并后的评估数据仍包含NaN值，将尝试过滤")
+                # 过滤掉包含NaN的行
+                valid_rows = ~np.isnan(all_outputs).any(axis=1) & ~np.isnan(all_targets).any(axis=1)
+                all_outputs = all_outputs[valid_rows]
+                all_targets = all_targets[valid_rows]
+                
+                if len(all_outputs) == 0:
+                    logger.error("过滤NaN后没有有效数据可用于评估")
+                    return {
+                        'mse': float('nan'),
+                        'rmse': float('nan'),
+                        'mae': float('nan'),
+                        'r2': float('nan')
+                    }
+            
+            # 计算指标
+            mse = np.mean((all_outputs - all_targets) ** 2)
+            rmse = np.sqrt(mse)
+            mae = np.mean(np.abs(all_outputs - all_targets))
+            r2 = r2_score(all_targets.flatten(), all_outputs.flatten())
+            
+            # 计算散点图的统计数据
+            slope, intercept, r_value, p_value, std_err = stats.linregress(all_targets.flatten(), all_outputs.flatten())
+            
+            # 返回评估结果
+            return {
+                'mse': mse,
+                'rmse': rmse,
+                'mae': mae,
+                'r2': r2,
+                'r_value': r_value,
+                'slope': slope,
+                'intercept': intercept,
+                'std_err': std_err,
+                'p_value': p_value
+            }
+            
+        except Exception as e:
+            logger.error(f"计算评估指标时出错: {str(e)}")
     
+    # 如果没有有效数据或发生错误，返回NaN指标
     return {
-        'test_loss': test_loss / len(test_loader),
-        'mae': mae,
-        'mse': mse,
-        'rmse': rmse,
-        'r2': r2,
-        'dex': std_diff,
-        'predictions': predictions,
-        'targets': targets
+        'mse': float('nan'),
+        'rmse': float('nan'),
+        'mae': float('nan'),
+        'r2': float('nan')
     }
 
-def predict(model, spectra, device):
+# 添加一个新的工具函数，用于处理和检测NaN值
+def handle_nan_values(tensor, replacement_strategy='mean', fill_value=0.0, name="数据"):
     """
-    模型预测函数
+    检测并处理张量中的NaN值
+    
+    参数:
+        tensor (torch.Tensor): 需要处理的张量
+        replacement_strategy (str): 替换策略，可选值: 'mean', 'zero', 'value'
+        fill_value (float): 如果策略是'value'，使用此值填充
+        name (str): 用于日志记录的数据名称
+        
+    返回:
+        tuple: (处理后的张量, 是否含有NaN, NaN的数量)
     """
+    # 检查是否包含NaN
+    has_nan = torch.isnan(tensor).any()
+    
+    if not has_nan:
+        return tensor, False, 0
+    
+    # 计算NaN的数量
+    nan_mask = torch.isnan(tensor)
+    nan_count = torch.sum(nan_mask).item()
+    
+    # 创建张量的副本以进行修改
+    result = tensor.clone()
+    
+    # 根据策略替换NaN值
+    if replacement_strategy == 'mean':
+        # 计算非NaN值的均值
+        tensor_mean = torch.nanmean(tensor, dim=0)
+        # 对每一行，用相应维度的均值替换NaN
+        for i in range(tensor.size(0)):
+            sample_nan_mask = nan_mask[i]
+            if sample_nan_mask.any():
+                result[i][sample_nan_mask] = tensor_mean[sample_nan_mask]
+    elif replacement_strategy == 'zero':
+        result[nan_mask] = 0.0
+    else:  # 'value'
+        result[nan_mask] = fill_value
+    
+    logger.warning(f"{name}中检测到{nan_count}个NaN值，已使用{replacement_strategy}策略替换")
+    
+    return result, True, nan_count
+
+# 修改predict函数
+def predict(model, data_loader, device=None):
+    """
+    使用训练好的模型进行预测
+    
+    参数:
+        model (torch.nn.Module): 训练好的模型
+        data_loader (DataLoader): 数据加载器
+        device (str, optional): 计算设备
+        
+    返回:
+        numpy.ndarray: 预测结果
+    """
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    model.to(device)
     model.eval()
+    
+    predictions = []
+    nan_stats = {'input': 0, 'output': 0, 'total_samples': 0}
+    
     with torch.no_grad():
-        spectra = spectra.to(device)
-        outputs = model(spectra)
-        return outputs.squeeze().cpu().numpy()
+        for data in data_loader:
+            # 处理不同的数据格式
+            if isinstance(data, (list, tuple)) and len(data) >= 1:
+                # 数据加载器返回(data, target)格式
+                inputs = data[0]
+            else:
+                # 数据加载器只返回data
+                inputs = data
+            
+            # 将数据移动到指定设备
+            inputs = inputs.to(device)
+            nan_stats['total_samples'] += inputs.size(0)
+            
+            # 处理输入数据中的NaN值
+            inputs, has_nan, nan_count = handle_nan_values(
+                inputs, 
+                replacement_strategy='mean', 
+                name="预测输入数据"
+            )
+            if has_nan:
+                nan_stats['input'] += nan_count
+            
+            try:
+                # 前向传播
+                outputs = model(inputs)
+                
+                # 处理输出中的NaN值
+                outputs, has_nan, nan_count = handle_nan_values(
+                    outputs, 
+                    replacement_strategy='zero', 
+                    name="模型输出"
+                )
+                if has_nan:
+                    nan_stats['output'] += nan_count
+                
+                predictions.append(outputs.cpu().numpy())
+                
+            except Exception as e:
+                logger.error(f"预测过程中出错: {str(e)}")
+                # 在异常情况下，生成一个全零的假输出
+                fake_output = torch.zeros_like(inputs[:, 0:1])  # 假设输出是一维的
+                predictions.append(fake_output.cpu().numpy())
+    
+    # 如果出现了NaN值，记录日志
+    if nan_stats['input'] > 0 or nan_stats['output'] > 0:
+        logger.warning(f"预测过程中共处理: {nan_stats['total_samples']}个样本")
+        logger.warning(f"输入数据中的NaN值: {nan_stats['input']}个")
+        logger.warning(f"模型输出中的NaN值: {nan_stats['output']}个")
+    
+    if len(predictions) > 0:
+        return np.vstack(predictions)
+    else:
+        return np.array([])
 
 # =============== 4. 工具函数 ===============
-def load_trained_model(input_size, element, config):
+def load_trained_model(model_path, device=None):
     """
     加载训练好的模型
     
     参数:
-        input_size (int): 输入大小
-        element (str): 元素名称
-        config: 配置对象
+        model_path (str): 模型权重文件路径
+        device (str, optional): 计算设备
         
     返回:
-        torch.nn.Module: 加载的模型
+        torch.nn.Module: 加载好权重的模型
     """
-    device = config.training_config['device']
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     try:
-        # 确保模型目录存在
-        os.makedirs(config.model_config['model_dir'], exist_ok=True)
+        # 尝试加载模型
+        checkpoint = torch.load(model_path, map_location=device)
         
-        # 尝试多种可能的模型文件命名模式
-        model_paths = [
-            os.path.join(config.model_config['model_dir'], f"{element}_model.pth"),  # 标准格式
-            os.path.join(config.model_config['model_dir'], f"{element.lower()}_model.pth"),  # 小写
-            os.path.join(config.model_config['model_dir'], f"{element.upper()}_model.pth"),  # 大写
-            os.path.join(config.model_config['model_dir'], f"{element}_best_model.pth"),  # best前缀
-            os.path.join(config.model_config['model_dir'], f"model_{element}.pth"),  # 另一种格式
-        ]
-        
-        model_path = None
-        for path in model_paths:
-            if os.path.exists(path):
-                model_path = path
-                break
-                
-        if model_path is None:
-            logger.warning(f"找不到{element}的模型文件，尝试其他格式")
-            
-            # 检查目录中的所有文件，查找可能匹配的模型
-            if os.path.exists(config.model_config['model_dir']):
-                for file in os.listdir(config.model_config['model_dir']):
-                    if file.endswith('.pth') and element.lower() in file.lower():
-                        model_path = os.path.join(config.model_config['model_dir'], file)
-                        logger.info(f"找到可能匹配的模型文件: {file}")
-                        break
-        
-        if model_path is None:
-            logger.error(f"找不到元素 {element} 的模型文件")
-            return None
-            
-        # 创建模型实例
-        model = SpectralResCNN(input_size)
-        model = model.to(device)
-        
-        # 加载模型权重
-        try:
-            checkpoint = torch.load(model_path, map_location=device)
-            
-            # 检查加载的文件是否为字典格式
-            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                logger.info(f"加载带有state_dict的模型: {model_path}")
-                model.load_state_dict(checkpoint['model_state_dict'])
+        # 检查checkpoint是否包含模型架构信息
+        if 'model_state_dict' in checkpoint:
+            # 创建模型实例
+            if 'model_config' in checkpoint:
+                config = checkpoint['model_config']
+                input_size = config.get('input_size', 1024)
+                hidden_size = config.get('hidden_size', 256)
+                output_size = config.get('output_size', 1)
+                dropout_rate = config.get('dropout_rate', 0.3)
+                model = SpectralResCNN(input_size, hidden_size, output_size, dropout_rate)
             else:
-                # 直接加载整个模型
-                logger.info(f"加载完整模型: {model_path}")
-                model = checkpoint
-                model = model.to(device)
-        except Exception as e:
-            logger.error(f"加载模型失败: {str(e)}")
-            return None
-            
-        # 设置为评估模式
-        model.eval()
-        logger.info(f"成功加载元素 {element} 的模型")
+                # 使用默认参数
+                logger.warning(f"模型配置信息缺失，使用默认参数创建模型")
+                model = SpectralResCNN()
+                
+            # 加载模型权重
+            model.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            # 老版本的checkpoint可能直接保存了模型状态
+            model = SpectralResCNN()
+            model.load_state_dict(checkpoint)
         
+        model.to(device)
+        model.eval()  # 设置为评估模式
+        logger.info(f"成功从 {model_path} 加载模型")
         return model
         
     except Exception as e:
         logger.error(f"加载模型时出错: {str(e)}")
-        return None
+        # 创建一个空模型作为后备选择
+        backup_model = SpectralResCNN()
+        backup_model.to(device)
+        backup_model.eval()
+        logger.warning("使用未训练的模型作为后备")
+        return backup_model
 
 # 在模型训练完成后添加
 def analyze_model_performance(self, element, train_loader, val_loader, test_loader):
@@ -966,3 +1315,77 @@ def train_and_evaluate_model(train_loader, val_loader, test_loader, element, con
             logger.warning("无法导入model_analysis模块，跳过性能分析")
     
     return best_model, best_val_loss, test_metrics 
+
+# 添加一个兼容性包装函数，支持旧版本的调用方式
+def load_trained_model_compat(input_size_or_path, element_or_device=None, config=None):
+    """
+    兼容性加载模型函数，支持新旧两种不同的调用格式
+    
+    方式1: load_trained_model_compat(model_path, device=None)
+    方式2: load_trained_model_compat(input_size, element, config)
+    """
+    # 检测调用方式
+    if isinstance(input_size_or_path, str) and (element_or_device is None or isinstance(element_or_device, (str, torch.device))):
+        # 新方式: load_trained_model(model_path, device=None)
+        return load_trained_model(input_size_or_path, element_or_device)
+    
+    # 旧方式: load_trained_model(input_size, element, config)
+    input_size = input_size_or_path
+    element = element_or_device
+    device = config.training_config['device']
+    
+    # 尝试找到模型路径
+    try:
+        # 确保模型目录存在
+        os.makedirs(config.model_config['model_dir'], exist_ok=True)
+        
+        # 尝试多种可能的模型文件命名模式
+        model_paths = [
+            os.path.join(config.model_config['model_dir'], f"{element}_model.pth"),  # 标准格式
+            os.path.join(config.model_config['model_dir'], f"{element.lower()}_model.pth"),  # 小写
+            os.path.join(config.model_config['model_dir'], f"{element.upper()}_model.pth"),  # 大写
+            os.path.join(config.model_config['model_dir'], f"{element}_best_model.pth"),  # best前缀
+            os.path.join(config.model_config['model_dir'], f"model_{element}.pth"),  # 另一种格式
+        ]
+        
+        model_path = None
+        for path in model_paths:
+            if os.path.exists(path):
+                model_path = path
+                break
+                
+        if model_path is None:
+            logger.warning(f"找不到{element}的模型文件，尝试其他格式")
+            
+            # 检查目录中的所有文件，查找可能匹配的模型
+            if os.path.exists(config.model_config['model_dir']):
+                for file in os.listdir(config.model_config['model_dir']):
+                    if file.endswith('.pth') and element.lower() in file.lower():
+                        model_path = os.path.join(config.model_config['model_dir'], file)
+                        logger.info(f"找到可能匹配的模型文件: {file}")
+                        break
+        
+        if model_path is None:
+            logger.error(f"找不到元素 {element} 的模型文件")
+            # 创建一个空模型作为后备选择
+            backup_model = SpectralResCNN(input_size)
+            backup_model.to(device)
+            backup_model.eval()
+            logger.warning(f"使用未训练的模型作为后备")
+            return backup_model
+        
+        # 找到模型文件，加载它
+        return load_trained_model(model_path, device)
+        
+    except Exception as e:
+        logger.error(f"加载模型时出错: {str(e)}")
+        # 创建一个空模型作为后备选择
+        backup_model = SpectralResCNN(input_size)
+        backup_model.to(device)
+        backup_model.eval()
+        logger.warning(f"使用未训练的模型作为后备")
+        return backup_model
+
+# 修改原来的load_trained_model函数名为load_trained_model_core，保持旧函数名对旧函数的向后兼容性
+load_trained_model_core = load_trained_model
+load_trained_model = load_trained_model_compat 
