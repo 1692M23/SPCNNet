@@ -1538,11 +1538,12 @@ class LAMOSTPreprocessor:
         return results
     
     def process_all_data(self, resume=True):
-        """处理所有数据并返回拆分后的训练集、验证集和测试集"""
+        """处理所有数据并准备训练集，支持断点续传，采用两阶段处理策略"""
         start_time = time.time()
         
         # 进度文件路径
         progress_file = os.path.join(self.progress_dir, 'all_data_progress.pkl')
+        wave_range_file = os.path.join(self.progress_dir, 'wave_range_progress.pkl')
         drive_progress_file = '/content/drive/My Drive/SPCNNet_Results/processed_data/progress/all_data_progress.pkl'
         
         # 初始化全部数据列表
@@ -1625,6 +1626,137 @@ class LAMOSTPreprocessor:
         total_records = sum(len(df) for df in dataframes)
         print(f"总数据量: {total_records}条记录")
         
+        # 第一阶段：计算所有光谱的最大公共波长范围
+        # 检查是否已经完成了第一阶段
+        first_stage_done = False
+        if os.path.exists(wave_range_file):
+            try:
+                with open(wave_range_file, 'rb') as f:
+                    saved_range_data = pickle.load(f)
+                    self.processed_ranges = saved_range_data.get('processed_ranges', [])
+                    self.wavelength_range = saved_range_data.get('wavelength_range', self.wavelength_range)
+                    first_stage_processed = saved_range_data.get('processed_count', 0)
+                    
+                    print(f"已从缓存加载波长范围信息:")
+                    print(f"已处理: {first_stage_processed}/{total_records} 条记录")
+                    print(f"当前最大公共波长范围: {self.wavelength_range}")
+                    
+                    # 如果已经处理了所有记录，第一阶段完成
+                    if first_stage_processed >= total_records:
+                        first_stage_done = True
+                        print("第一阶段(计算公共波长范围)已完成")
+                    else:
+                        print(f"将继续进行第一阶段处理剩余的 {total_records - first_stage_processed} 条记录")
+            except Exception as e:
+                print(f"加载波长范围进度文件出错: {e}，将重新计算公共波长范围")
+                self.processed_ranges = []
+                first_stage_processed = 0
+        else:
+            self.processed_ranges = []
+            first_stage_processed = 0
+        
+        # 如果第一阶段未完成，进行第一阶段处理
+        if not first_stage_done:
+            print(f"\n===== 第一阶段：计算最大公共波长范围 =====")
+            first_stage_count = 0
+            
+            # 处理每个元素的数据
+            for i, (df, element) in enumerate(zip(dataframes, elements)):
+                print(f"\n处理元素 {i+1}/{len(dataframes)}: {element} (第一阶段)")
+                
+                # 处理每个光谱文件计算波长范围
+                spec_files = df['spec'].values
+                for j, spec_file in enumerate(tqdm(spec_files, desc=f"处理{element}光谱波长范围")):
+                    # 如果已经处理过，跳过
+                    if first_stage_processed + first_stage_count > j:
+                        continue
+                    
+                    # 尝试从缓存获取
+                    cache_key = f"wavelength_range_{spec_file.replace('/', '_')}"
+                    cached_range = self.cache_manager.get_cache(cache_key)
+                    
+                    if cached_range:
+                        # 如果有缓存，直接使用缓存的波长范围
+                        w_min, w_max = cached_range
+                        self.processed_ranges.append((w_min, w_max))
+                        print(f"使用缓存的波长范围 {spec_file}: {w_min:.2f}~{w_max:.2f}")
+                    else:
+                        # 没有缓存，需要读取文件提取波长范围
+                        try:
+                            # 查找FITS文件
+                            file_path = self._get_file_extension(spec_file)
+                            if not file_path:
+                                print(f"无法找到文件: {spec_file}")
+                                continue
+                                
+                            # 读取FITS文件，获取波长和流量
+                            wavelength, flux, v_helio, z, snr_b, snr_r, snr_i = self.read_fits_file(file_path)
+                            if wavelength is None or flux is None:
+                                print(f"无法读取波长和流量数据: {file_path}")
+                                continue
+                            
+                            # 检查并过滤无效值
+                            valid_mask = ~np.isnan(flux) & ~np.isinf(flux)
+                            if not np.any(valid_mask):
+                                print(f"所有流量值都是无效的: {file_path}")
+                                continue
+                                
+                            wavelength_valid = wavelength[valid_mask]
+                            if len(wavelength_valid) < 2:
+                                print(f"有效波长点数太少: {file_path}")
+                                continue
+                                
+                            # 获取波长范围
+                            w_min, w_max = wavelength_valid.min(), wavelength_valid.max()
+                            self.processed_ranges.append((w_min, w_max))
+                            
+                            # 保存波长范围到缓存
+                            self.cache_manager.set_cache(cache_key, (w_min, w_max))
+                            
+                            # 更新最大公有范围
+                            if len(self.processed_ranges) > 1:
+                                common_min = max(r[0] for r in self.processed_ranges)
+                                common_max = min(r[1] for r in self.processed_ranges)
+                                
+                                if common_min < common_max:
+                                    self.wavelength_range = (common_min, common_max)
+                                    
+                        except Exception as e:
+                            print(f"处理文件 {spec_file} 波长范围时出错: {e}")
+                            continue
+                    
+                    first_stage_count += 1
+                    
+                    # 每处理100个文件保存一次进度
+                    if first_stage_count % 100 == 0:
+                        # 保存波长范围进度
+                        with open(wave_range_file, 'wb') as f:
+                            pickle.dump({
+                                'processed_ranges': self.processed_ranges,
+                                'wavelength_range': self.wavelength_range,
+                                'processed_count': first_stage_processed + first_stage_count
+                            }, f)
+                        print(f"\n已保存波长范围进度: {first_stage_processed + first_stage_count}/{total_records}")
+                        print(f"当前最大公共波长范围: {self.wavelength_range}")
+            
+            # 保存最终的波长范围进度
+            with open(wave_range_file, 'wb') as f:
+                pickle.dump({
+                    'processed_ranges': self.processed_ranges,
+                    'wavelength_range': self.wavelength_range,
+                    'processed_count': total_records  # 标记为全部处理完成
+                }, f)
+            print(f"\n第一阶段完成：已确定最大公共波长范围 {self.wavelength_range}")
+        
+        # 第二阶段：重采样和后续处理
+        print(f"\n===== 第二阶段：重采样和后续处理 =====")
+        print(f"使用确定的公共波长范围: {self.wavelength_range}")
+        
+        # 如果没有有效的公共波长范围，使用默认范围
+        if not hasattr(self, 'wavelength_range') or self.wavelength_range is None:
+            self.wavelength_range = (3690, 9100)
+            print(f"警告: 未找到有效的公共波长范围，使用默认范围 {self.wavelength_range}")
+        
         # 处理每个元素的数据
         processed_records = 0
         for i, (df, element) in enumerate(zip(dataframes, elements)):
@@ -1638,7 +1770,7 @@ class LAMOSTPreprocessor:
                 print(f"{element}数据已在之前的运行中处理完成 ({element_records}/{element_total}条记录)")
                 processed_records += element_records
             else:
-                print(f"\n处理元素 {i+1}/{len(dataframes)}: {element}")
+                print(f"\n处理元素 {i+1}/{len(dataframes)}: {element} (第二阶段)")
                 print(f"已处理: {element_records}/{element_total}条记录")
                 print(f"当前进度: [{processed_records/total_records:.2%}]")
                 
