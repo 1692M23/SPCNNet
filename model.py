@@ -473,8 +473,14 @@ def evaluate_model(model, test_loader, device=None):
     """
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
-    model.to(device)
+    
+    logger.info(f"在设备 {device} 上评估模型")
+    
+    # 确保模型在正确的设备上
+    if next(model.parameters()).device != device:
+        logger.info(f"将模型从 {next(model.parameters()).device} 移动到 {device}")
+        model.to(device)
+    
     model.eval()
     
     all_outputs = []
@@ -519,14 +525,16 @@ def evaluate_model(model, test_loader, device=None):
                     all_targets.append(target[valid_indices].cpu().numpy())
                 
             except Exception as e:
-                logger.error(f"Error during evaluation: {str(e)}")
+                logger.error(f"评估过程中出错: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
                 continue
     
     # 如果出现了NaN值，记录日志
     if nan_stats['input'] > 0 or nan_stats['output'] > 0:
-        logger.warning(f"Total samples processed during evaluation: {nan_stats['total_samples']}")
-        logger.warning(f"NaN values in input data: {nan_stats['input']}")
-        logger.warning(f"NaN values in model output: {nan_stats['output']}")
+        logger.warning(f"评估过程中处理的样本总数: {nan_stats['total_samples']}")
+        logger.warning(f"输入数据中的NaN值数量: {nan_stats['input']}")
+        logger.warning(f"模型输出中的NaN值数量: {nan_stats['output']}")
     
     # 合并结果，计算指标
     if len(all_outputs) > 0 and len(all_targets) > 0:
@@ -536,14 +544,14 @@ def evaluate_model(model, test_loader, device=None):
             
             # 检查连接后的数据是否仍包含NaN
             if np.isnan(all_outputs).any() or np.isnan(all_targets).any():
-                logger.warning("Merged evaluation data still contains NaN values, attempting to filter")
+                logger.warning("合并后的评估数据仍包含NaN值，尝试过滤")
                 # 过滤掉包含NaN的行
                 valid_rows = ~np.isnan(all_outputs).any(axis=1) & ~np.isnan(all_targets).any(axis=1)
                 all_outputs = all_outputs[valid_rows]
                 all_targets = all_targets[valid_rows]
                 
                 if len(all_outputs) == 0:
-                    logger.error("Filtered NaN, no valid data for evaluation")
+                    logger.error("过滤NaN后，没有有效数据进行评估")
                     return {
                         'mse': float('nan'),
                         'rmse': float('nan'),
@@ -555,33 +563,50 @@ def evaluate_model(model, test_loader, device=None):
             mse = np.mean((all_outputs - all_targets) ** 2)
             rmse = np.sqrt(mse)
             mae = np.mean(np.abs(all_outputs - all_targets))
-            r2 = r2_score(all_targets.flatten(), all_outputs.flatten())
-    
+            
+            # 安全计算R2分数
+            try:
+                r2 = r2_score(all_targets.flatten(), all_outputs.flatten())
+            except Exception:
+                # 如果r2_score函数失败，手动计算
+                y_mean = np.mean(all_targets)
+                ss_total = np.sum((all_targets - y_mean) ** 2)
+                ss_residual = np.sum((all_targets - all_outputs) ** 2)
+                r2 = 1 - (ss_residual / ss_total if ss_total > 0 else 0)
+            
             # 计算散点图的统计数据
-            slope, intercept, r_value, p_value, std_err = stats.linregress(all_targets.flatten(), all_outputs.flatten())
+            try:
+                slope, intercept, r_value, p_value, std_err = stats.linregress(all_targets.flatten(), all_outputs.flatten())
+            except Exception as e:
+                logger.warning(f"无法计算线性回归统计: {str(e)}")
+                slope, intercept, r_value, p_value, std_err = float('nan'), float('nan'), float('nan'), float('nan'), float('nan')
             
             # 返回评估结果
             return {
                 'mse': mse,
                 'rmse': rmse,
-                        'mae': mae,
+                'mae': mae,
                 'r2': r2,
-                        'r_value': r_value,
-                        'slope': slope,
-                        'intercept': intercept,
-                        'std_err': std_err,
-                        'p_value': p_value
+                'r_value': r_value,
+                'slope': slope,
+                'intercept': intercept,
+                'std_err': std_err,
+                'p_value': p_value,
+                'num_samples': len(all_outputs)
             }
                 
         except Exception as e:
-            logger.error(f"Error calculating evaluation metrics: {str(e)}")
+            logger.error(f"计算评估指标时出错: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
     
     # 如果没有有效数据或发生错误，返回NaN指标
     return {
         'mse': float('nan'),
         'rmse': float('nan'),
         'mae': float('nan'),
-        'r2': float('nan')
+        'r2': float('nan'),
+        'num_samples': 0
     }
 
 # 添加一个新的工具函数，用于处理和检测NaN值
@@ -644,8 +669,14 @@ def predict(model, data_loader, device=None):
     """
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    logger.info(f"在设备 {device} 上进行预测")
+    
+    # 确保模型在正确的设备上
+    if next(model.parameters()).device != device:
+        logger.info(f"将模型从 {next(model.parameters()).device} 移动到 {device}")
+        model.to(device)
         
-    model.to(device)
     model.eval()
     
     predictions = []
@@ -690,16 +721,19 @@ def predict(model, data_loader, device=None):
                 predictions.append(outputs.cpu().numpy())
                 
             except Exception as e:
-                logger.error(f"Error during prediction: {str(e)}")
+                logger.error(f"预测过程中出错: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
+                
                 # 在异常情况下，生成一个全零的假输出
-                fake_output = torch.zeros_like(inputs[:, 0:1])  # 假设输出是一维的
+                fake_output = torch.zeros((inputs.size(0), 1), device=device)
                 predictions.append(fake_output.cpu().numpy())
     
     # 如果出现了NaN值，记录日志
     if nan_stats['input'] > 0 or nan_stats['output'] > 0:
-        logger.warning(f"Total samples processed during prediction: {nan_stats['total_samples']}")
-        logger.warning(f"NaN values in input data: {nan_stats['input']}")
-        logger.warning(f"NaN values in model output: {nan_stats['output']}")
+        logger.warning(f"预测过程中处理的样本总数: {nan_stats['total_samples']}")
+        logger.warning(f"输入数据中的NaN值数量: {nan_stats['input']}")
+        logger.warning(f"模型输出中的NaN值数量: {nan_stats['output']}")
     
     if len(predictions) > 0:
         return np.vstack(predictions)
@@ -718,8 +752,13 @@ def load_trained_model(model_path, device=None):
     返回:
         torch.nn.Module: 加载好权重的模型
     """
+    # 设置默认设备
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    elif isinstance(device, str):
+        device = torch.device(device)
+    
+    logger.info(f"从 {model_path} 加载模型到设备 {device}")
     
     try:
         # 防止递归错误：设置递归深度限制
@@ -727,67 +766,96 @@ def load_trained_model(model_path, device=None):
         original_recursion_limit = sys.getrecursionlimit()
         sys.setrecursionlimit(10000)  # 增加递归深度限制
         
+        # 首先检查文件是否存在
+        if not os.path.exists(model_path):
+            logger.error(f"模型文件不存在: {model_path}")
+            raise FileNotFoundError(f"找不到模型文件: {model_path}")
+        
         # 尝试加载模型
-        logger.info(f"Loading model from {model_path}")
-        checkpoint = torch.load(model_path, map_location=device)
+        try:
+            checkpoint = torch.load(model_path, map_location=device)
+            logger.info(f"成功加载checkpoint: {type(checkpoint)}")
+        except Exception as e:
+            logger.error(f"加载模型文件失败: {str(e)}")
+            raise RuntimeError(f"无法加载模型权重: {str(e)}")
+        
+        # 确定输入大小，用于创建模型
+        input_size = None
         
         # 检查checkpoint是否包含模型架构信息
-        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-        # 创建模型实例
-            if 'model_config' in checkpoint:
-                config = checkpoint['model_config']
-                input_size = config.get('input_size', 1024)
-                hidden_size = config.get('hidden_size', 256)
-                output_size = config.get('output_size', 1)
-                dropout_rate = config.get('dropout_rate', 0.2)
-                model = SpectralResCNN(input_size)
-            else:
-                # 使用默认参数
-                logger.warning(f"Model configuration missing, using default parameters")
-                model = SpectralResCNN()
+        if isinstance(checkpoint, dict):
+            if 'model_state_dict' in checkpoint:
+                logger.info("检测到model_state_dict格式")
+                state_dict = checkpoint['model_state_dict']
                 
-            # 加载模型权重
-            model.load_state_dict(checkpoint['model_state_dict'])
-        else:
-            # 直接加载模型状态字典
-            logger.info(f"Loading from direct state dict")
-            model = SpectralResCNN()
-            
-            # 如果checkpoint不是字典而是OrderedDict，直接加载
-            if not isinstance(checkpoint, dict):
-                model.load_state_dict(checkpoint)
+                # 尝试从模型配置提取输入大小
+                if 'model_config' in checkpoint:
+                    config = checkpoint['model_config']
+                    input_size = config.get('input_size', None)
+                    logger.info(f"从模型配置中提取输入大小: {input_size}")
             else:
-                # 尝试直接加载整个checkpoint作为state_dict
-                try:
-                    model.load_state_dict(checkpoint)
-                except Exception as e:
-                    logger.error(f"Failed to load state_dict: {str(e)}")
-                    # 回退到默认模型
-                    model = SpectralResCNN()
+                # 尝试直接将整个checkpoint作为state_dict
+                logger.info("尝试将checkpoint直接视为state_dict")
+                state_dict = checkpoint
+        else:
+            # 如果checkpoint不是字典，可能直接是state_dict
+            logger.info("checkpoint不是字典，直接用作state_dict")
+            state_dict = checkpoint
+        
+        # 创建模型
+        model = SpectralResCNN_GCN(input_size=input_size, device=device)
+        
+        # 尝试加载权重
+        try:
+            # 处理键名不匹配的情况（常见于旧模型与新代码）
+            if isinstance(state_dict, dict):
+                # 创建新的state_dict，修正键名问题
+                new_state_dict = {}
+                for k, v in state_dict.items():
+                    # 处理可能的前缀问题
+                    if k.startswith('module.'):
+                        # 有时多GPU训练会添加'module.'前缀
+                        new_state_dict[k[7:]] = v
+                    else:
+                        new_state_dict[k] = v
+                
+                # 尝试加载修正后的state_dict
+                missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
+                
+                if missing_keys:
+                    logger.warning(f"加载权重时缺少键: {missing_keys}")
+                if unexpected_keys:
+                    logger.warning(f"加载权重时有意外的键: {unexpected_keys}")
+            else:
+                logger.error(f"无法加载state_dict，格式错误: {type(state_dict)}")
+                raise TypeError(f"state_dict类型错误: {type(state_dict)}")
+        except Exception as e:
+            logger.error(f"加载模型权重失败: {str(e)}")
+            raise RuntimeError(f"加载模型权重失败: {str(e)}")
         
         # 恢复原始递归深度限制
         sys.setrecursionlimit(original_recursion_limit)
         
-        model.to(device)
-        model.eval()  # 设置为评估模式
-        logger.info(f"Successfully loaded model from {model_path}")
+        # 将模型设置为评估模式
+        model.eval()
+        logger.info(f"成功从 {model_path} 加载模型")
         return model
         
     except RecursionError as e:
-        logger.error(f"Recursion error while loading model: {str(e)}")
+        logger.error(f"加载模型时递归错误: {str(e)}")
         # 在递归错误时，返回一个新的未训练模型
-        model = SpectralResCNN()
-        model.to(device)
+        model = SpectralResCNN_GCN(device=device)
         model.eval()
-        logger.warning("Using untrained model as backup due to recursion error")
+        logger.warning("由于递归错误，使用未训练的模型作为备份")
         return model
     except Exception as e:
-        logger.error(f"Error loading model: {str(e)}")
+        logger.error(f"加载模型时出错: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         # 创建一个空模型作为后备选择
-        backup_model = SpectralResCNN()
-        backup_model.to(device)
+        backup_model = SpectralResCNN_GCN(device=device)
         backup_model.eval()
-        logger.warning("Using untrained model as backup")
+        logger.warning("使用未训练的模型作为备份")
         return backup_model
 
 # 在模型训练完成后添加
@@ -849,16 +917,25 @@ def train_and_evaluate_model(train_loader, val_loader, test_loader, element, con
     """
     训练和评估模型的主函数
     """
+    # 获取设备
+    device = config.training_config.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+    logger.info(f"使用设备: {device}")
+    
     # 创建模型
-    model = SpectralResCNN(config.model_config['input_size']).to(config.training_config['device'])
+    model = SpectralResCNN_GCN(
+        input_size=config.model_config.get('input_size'), 
+        device=device
+    )
     
     # 设置超参数
     hyperparams = {
-        'lr': config.training_config['lr'],
-        'weight_decay': config.training_config['weight_decay'],
-        'epochs': config.training_config['num_epochs'],
-        'patience': config.training_config['early_stopping_patience']
+        'lr': config.training_config.get('lr', 0.001),
+        'weight_decay': config.training_config.get('weight_decay', 1e-5),
+        'epochs': config.training_config.get('num_epochs', 100),
+        'patience': config.training_config.get('early_stopping_patience', 15)
     }
+    
+    logger.info(f"训练 {element} 模型，超参数: {hyperparams}")
     
     # 训练模型
     train_losses, val_losses = train(
@@ -866,23 +943,28 @@ def train_and_evaluate_model(train_loader, val_loader, test_loader, element, con
         train_loader=train_loader,
         val_loader=val_loader,
         element=element,
-        config=config
+        config=config,
+        device=device
     )
     
     # 获取最佳验证损失
     best_val_loss = min(val_losses) if val_losses else float('inf')
     
     # 加载最佳模型
-    best_model = load_trained_model(config.model_config['input_size'], element, config)
+    model_path = os.path.join(config.model_config.get('model_dir', 'models'), f'best_model_{element}.pth')
+    if os.path.exists(model_path):
+        best_model = load_trained_model(model_path, device)
+    else:
+        logger.warning(f"找不到最佳模型文件: {model_path}，使用当前模型代替")
+        best_model = model
     
     # 在测试集上评估
-    test_metrics = evaluate_model(best_model, test_loader, config.training_config['device'])
+    logger.info(f"在测试集上评估 {element} 模型")
+    test_metrics = evaluate_model(best_model, test_loader, device)
     
     # 分析模型性能（特征重要性和残差）
     if hasattr(config, 'analysis_config') and config.analysis_config.get('enabled', False):
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.info(f"Starting performance analysis for {element} model...")
+        logger.info(f"开始 {element} 模型性能分析...")
         
         # 获取分析配置
         batch_size = config.analysis_config.get('batch_size', 32)
@@ -896,16 +978,15 @@ def train_and_evaluate_model(train_loader, val_loader, test_loader, element, con
                 train_loader,
                 val_loader,
                 test_loader,
-                config.training_config['device'],
-                config.model_config['input_size'],
+                device,
                 batch_size=batch_size,
                 save_batch_results=save_batch_results
             )
-            logger.info(f"{element} model performance analysis completed, results saved in results directory")
+            logger.info(f"{element} 模型性能分析完成，结果已保存到results目录")
         except ImportError:
-            logger.warning("model_analysis module not found, skipping performance analysis")
+            logger.warning("找不到model_analysis模块，跳过性能分析")
     
-    return best_model, best_val_loss, test_metrics 
+    return best_model, best_val_loss, test_metrics
 
 # 添加一个兼容性包装函数，支持旧版本的调用方式
 def load_trained_model_compat(input_size_or_path, element_or_device=None, config=None):
@@ -1104,6 +1185,7 @@ class GraphConvLayer(nn.Module):
         super(GraphConvLayer, self).__init__()
         self.linear = nn.Linear(in_features, out_features)
         self.adj_matrix = None
+        self.adj_cache = {}  # 缓存不同长度的邻接矩阵
         
     def forward(self, x):
         """
@@ -1111,21 +1193,30 @@ class GraphConvLayer(nn.Module):
         输出: [batch_size, seq_len, out_features]
         """
         batch_size, seq_len, _ = x.size()
+        device = x.device
         
-        # 如果尚未构建邻接矩阵，则构建它（只需在第一次前向传播时构建）
-        if self.adj_matrix is None or self.adj_matrix.size(0) != seq_len:
+        # 为当前序列长度获取或构建邻接矩阵
+        adj_key = f"{seq_len}"
+        if adj_key not in self.adj_cache:
             # 创建默认邻接矩阵（相邻点连接 + 固定距离跳跃连接）
-            adj = self._build_spectral_adjacency(seq_len).to(x.device)
+            adj = self._build_spectral_adjacency(seq_len).to(device)
             # 归一化邻接矩阵
             adj = self._normalize_adj(adj)
-            self.adj_matrix = adj
+            self.adj_cache[adj_key] = adj
+        
+        # 使用缓存的邻接矩阵
+        adj_matrix = self.adj_cache[adj_key]
+        # 确保邻接矩阵在正确的设备上
+        if adj_matrix.device != device:
+            adj_matrix = adj_matrix.to(device)
+            self.adj_cache[adj_key] = adj_matrix
         
         # 图卷积: X' = AXW
         # 首先应用线性变换
         support = self.linear(x)  # [batch, seq_len, out_features]
         
         # 然后应用邻接矩阵
-        output = torch.matmul(self.adj_matrix, support)  # [batch, seq_len, out_features]
+        output = torch.matmul(adj_matrix, support)  # [batch, seq_len, out_features]
         
         return output
     
@@ -1176,6 +1267,7 @@ class SpectralAttention(nn.Module):
         输入 x: [batch, channels, length]
         输出: [batch, channels, length]
         """
+        device = x.device
         batch_size, C, width = x.size()
         
         # 投影查询、键和值
@@ -1185,7 +1277,20 @@ class SpectralAttention(nn.Module):
         
         # 计算注意力得分
         energy = torch.bmm(query, key)  # [B, W, W]
-        attention = F.softmax(energy, dim=2)
+        
+        # 为了数值稳定性，在softmax前进行缩放
+        energy_scaled = energy / (C ** 0.5)  # 缩放因子为通道数的平方根
+        
+        # 检查并处理潜在的数值问题
+        if torch.isnan(energy_scaled).any() or torch.isinf(energy_scaled).any():
+            # 使用更安全的方法：移除极端值并应用对数空间softmax
+            max_val, _ = torch.max(energy_scaled, dim=2, keepdim=True)
+            energy_safe = energy_scaled - max_val  # 减去最大值增加数值稳定性
+            exp_x = torch.exp(energy_safe)
+            sum_exp_x = torch.sum(exp_x, dim=2, keepdim=True)
+            attention = exp_x / (sum_exp_x + 1e-10)  # 加入小的epsilon值防止除零
+        else:
+            attention = F.softmax(energy_scaled, dim=2)
         
         # 使用注意力权重更新值
         out = torch.bmm(value, attention.permute(0, 2, 1))
@@ -1200,11 +1305,14 @@ class SpectralResCNN_GCN(nn.Module):
     
     结合残差CNN和图卷积网络处理光谱数据
     """
-    def __init__(self, input_size=None):
+    def __init__(self, input_size=None, device=None):
         super(SpectralResCNN_GCN, self).__init__()
         
         # 记录输入大小，可能为None表示自动适应
         self.input_size = input_size
+        
+        # 设置设备
+        self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # 特征提取层
         self.feature_extractor = nn.Sequential(
@@ -1260,7 +1368,14 @@ class SpectralResCNN_GCN(nn.Module):
             nn.Linear(64, 1)
         )
         
-    def forward(self, x):
+        # 将模型移动到指定设备
+        self.to(self.device)
+        
+    def forward(self, x, training=False):
+        # 确保输入在正确的设备上
+        if x.device != self.device:
+            x = x.to(self.device)
+            
         # 获取实际输入维度
         batch_size, channels, seq_len = x.size()
         
@@ -1305,7 +1420,18 @@ class SpectralResCNN_GCN(nn.Module):
         x = self.adaptive_pool(x)
         x = x.view(x.size(0), -1)  # 展平
         
-        # 全连接层
-        x = self.fc(x)
+        # 全连接层 (如果在训练模式下且training=True，则保持dropout启用)
+        if training:
+            # 保存当前模式
+            training_mode = self.training
+            # 设置为训练模式启用dropout
+            self.train()
+            # 前向传播
+            x = self.fc(x)
+            # 恢复原始模式
+            if not training_mode:
+                self.eval()
+        else:
+            x = self.fc(x)
         
         return x 

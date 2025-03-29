@@ -42,158 +42,26 @@ logger = logging.getLogger('main')
 # 创建缓存管理器
 cache_manager = CacheManager(cache_dir=os.path.join(config.output_config['cache_dir'], 'main'))
 
-def load_data(data_path, element=None):
-    """
-    加载数据，同时支持原系统和preprocessdata7.py生成的数据格式
-    
-    参数:
-        data_path (str): 数据文件路径
-        element (str/list): 元素名称或元素列表
-        
-    返回:
-        tuple: (X, y, element_indices)，其中X是特征数据，y是标签数据，element_indices是元素索引
-    """
-    # 如果路径不是绝对路径且不存在，尝试在processed_data目录下查找
-    if not os.path.isabs(data_path) and not os.path.exists(data_path):
-        processed_path = os.path.join('processed_data', os.path.basename(data_path))
-        if os.path.exists(processed_path):
-            data_path = processed_path
-            logger.info(f"使用processed_data目录下的文件: {data_path}")
-    
+def load_data(data_path):
+    """加载数据集并返回numpy数组"""
     try:
-        data = np.load(data_path, allow_pickle=True)
-        logger.info(f"加载数据: {data_path}")
-        
-        # 检查数据键
-        keys = list(data.keys())
-        logger.info(f"数据包含键: {keys}")
-        
-        # 以下为preprocessdata7.py格式适配
-        if 'spectra' in keys:  # preprocessdata7.py可能使用'spectra'而非'X'
+        data = np.load(data_path)
+        # 检查并适应不同的键名约定
+        if 'spectra' in data:
             X = data['spectra']
-            logger.info(f"使用'spectra'作为特征数据，形状: {X.shape}")
-        elif 'X' in keys:      # 原系统使用'X'
+            y = data['abundance'] if 'abundance' in data else data['y']
+        else:
             X = data['X']
-            logger.info(f"使用'X'作为特征数据，形状: {X.shape}")
-        elif 'flux' in keys:   # 或可能使用'flux'
-            X = data['flux']
-            logger.info(f"使用'flux'作为特征数据，形状: {X.shape}")
-        elif 'wavelength' in keys and 'flux' in keys:  # 可能分开存储波长和流量
-            wavelength = data['wavelength']
-            flux = data['flux']
-            # 如果需要的话，合并波长和流量
-            X = np.stack([wavelength, flux], axis=1)
-            logger.info(f"合并波长和流量作为特征数据，形状: {X.shape}")
-        else:
-            # 如果没有标准键名，尝试使用第一个数组作为特征
-            logger.warning(f"找不到标准特征键名，尝试使用第一个数组: {keys[0]}")
-            X = data[keys[0]]
-            
-        # 处理标签数据
-        if 'abundance' in keys:  # preprocessdata7.py可能使用'abundance'
-            y = data['abundance']
-            logger.info(f"使用'abundance'作为标签数据，形状: {y.shape}")
-        elif 'y' in keys:        # 原系统使用'y'
             y = data['y']
-            logger.info(f"使用'y'作为标签数据，形状: {y.shape}")
-        elif 'labels' in keys:   # 或可能使用'labels'
-            y = data['labels']
-            logger.info(f"使用'labels'作为标签数据，形状: {y.shape}")
-        elif len(keys) > 1:      # 如果没有标准键名，使用第二个数组
-            logger.warning(f"找不到标准标签键名，尝试使用第二个数组: {keys[1]}")
-            y = data[keys[1]]
-        else:
-            logger.error(f"找不到标签数据")
-            return None, None, None
-            
-        # 处理元素索引
-        element_indices = None
-        if 'element_names' in keys:
-            element_names = data['element_names']
-            
-            # 如果需要提取特定元素的标签
-            if element is not None:
-                if isinstance(element, str):
-                    # 查找单个元素的索引
-                    element_indices = {}
-                    for i, name in enumerate(element_names):
-                        element_indices[name] = i
-                    
-                    if element in element_indices:
-                        logger.info(f"找到元素 {element} 的索引: {element_indices[element]}")
-                    else:
-                        logger.warning(f"找不到元素 {element} 的索引")
-                        
-                elif isinstance(element, list):
-                    # 查找多个元素的索引
-                    element_indices = []
-                    for elem in element:
-                        if elem in element_names:
-                            element_indices.append(np.where(element_names == elem)[0][0])
-                        else:
-                            element_indices.append(None)
-                            logger.warning(f"找不到元素 {elem} 的索引")
         
-        # 处理preprocessdata7.py特有的元素名格式
-        elif 'elements' in keys:
-            elements = data['elements']
-            
-            if element is not None:
-                if isinstance(element, str):
-                    element_indices = {}
-                    for i, elem in enumerate(elements):
-                        element_indices[elem] = i
-                    
-                    if element in element_indices:
-                        logger.info(f"找到元素 {element} 的索引: {element_indices[element]}")
-                    else:
-                        logger.warning(f"找不到元素 {element} 的索引")
-                        
-                elif isinstance(element, list):
-                    element_indices = []
-                    for elem in element:
-                        if elem in elements:
-                            element_indices.append(np.where(elements == elem)[0][0])
-                        else:
-                            element_indices.append(None)
-                            logger.warning(f"找不到元素 {elem} 的索引")
+        # 检查元素标签是否存在
+        elements = data['elements'] if 'elements' in data else None
         
-        # 处理obsid和FITS信息 - 如果preprocessdata7.py提供了直接的光谱特征等信息，可能不需要
-        fits_data = None
-        if 'obsid' in keys or 'spec' in keys:
-            try:
-                # 尝试导入preprocessdata7模块，使用其处理FITS的功能
-                import importlib
-                try:
-                    pp7 = importlib.import_module('preprocessdata7')
-                    if hasattr(pp7, 'LAMOSTPreprocessor'):
-                        logger.info("使用preprocessdata7.LAMOSTPreprocessor处理FITS数据")
-                        preprocessor = pp7.LAMOSTPreprocessor()
-                        
-                        # 获取obsid或spec信息
-                        ids = data['obsid'] if 'obsid' in keys else data['spec']
-                        
-                        # 尝试获取FITS数据
-                        fits_data = []
-                        for id in ids:
-                            try:
-                                # 尝试从preprocessor获取FITS数据
-                                fits_info = preprocessor._find_fits_file(id)
-                                if fits_info:
-                                    fits_data.append(fits_info)
-                            except Exception as e:
-                                logger.warning(f"获取FITS数据时出错: {str(e)}")
-                                fits_data.append(None)
-                except (ImportError, ModuleNotFoundError):
-                    logger.warning("无法导入preprocessdata7模块，跳过FITS数据处理")
-            except Exception as e:
-                logger.warning(f"处理FITS数据时出错: {str(e)}")
-        
-        return X, y, element_indices
-        
+        print(f"成功加载数据: {X.shape}, {y.shape}")
+        return X, y, elements
     except Exception as e:
-        logger.error(f"加载数据时出错: {str(e)}")
-        return None, None, None
+        print(f"加载数据时出错: {e}")
+        raise
 
 def create_data_loaders(spectra, labels, batch_size=32, shuffle=True):
     """
@@ -609,10 +477,11 @@ def process_element(element, config=None, tune_hyperparams=False):
     处理单个元素的训练过程
     """
     try:
-        from model import train  # 只导入train函数
+        from model import train, SpectralResCNN_GCN  # 导入需要的模块
         
         # 设置设备
         device = config.training_config['device'] if config else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        logger.info(f"使用设备: {device}")
         
         # 加载数据
         if config and hasattr(config, 'data_paths'):
@@ -642,52 +511,70 @@ def process_element(element, config=None, tune_hyperparams=False):
         val_loader = create_data_loaders(val_data[0], val_data[1], batch_size=config.training_config['batch_size'])
         test_loader = create_data_loaders(test_data[0], test_data[1], batch_size=config.training_config['batch_size'])
         
+        # 获取输入大小
+        input_size = config.model_config.get('input_size')
+        # 如果输入大小为None，且有数据，则从数据中获取
+        if input_size is None and train_data[0] is not None:
+            if len(train_data[0].shape) > 1:  # 确保数据不是空的
+                input_size = train_data[0].shape[1]  # 获取特征维度
+                logger.info(f"从训练数据自动确定输入大小: {input_size}")
+        
         # 创建模型
-        model = SpectralResCNN_GCN(config.model_config['input_size']).to(device)
+        model = SpectralResCNN_GCN(input_size=input_size, device=device)
+        logger.info(f"创建模型: SpectralResCNN_GCN, 输入大小: {input_size}")
         
         # 尝试恢复训练
         resume_from = None
-        if config and config.training_config.get('resume_training', False):
-            resume_path = os.path.join(config.model_config['model_dir'], f'checkpoint_{element}.pth')
-            if os.path.exists(resume_path):
-                resume_from = resume_path
-    
-        # 训练模型
-        train_losses, val_losses = train(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        element=element,
-            config=config,
-            device=device,
-            resume_from=resume_from
-    )
-    
-        # 评估模型（如果有测试集）
-        test_metrics = None
-        if test_loader:
-                # 加载最佳模型进行评估
-                best_model_path = os.path.join(config.model_config['model_dir'], f'best_model_{element}.pth')
-                if os.path.exists(best_model_path):
-                    try:
-                        logger.info(f"加载最佳模型进行评估: {best_model_path}")
-                        checkpoint = torch.load(best_model_path, map_location=device)
-                        model.load_state_dict(checkpoint['model_state_dict'])
-                    except Exception as e:
-                        logger.error(f"加载最佳模型失败: {str(e)}")
-                
-                test_metrics = evaluate_model(model, test_loader, device)
-                logger.info(f"{element} 测试集评估结果: {test_metrics}")
+        model_dir = config.model_config['model_dir'] if config else 'models'
+        model_path = os.path.join(model_dir, f"{element}_model.pth")
+        
+        if config.training_config.get('resume_training', False) and os.path.exists(model_path):
+            logger.info(f"尝试从 {model_path} 恢复训练")
+            try:
+                from model import load_trained_model
+                model = load_trained_model(model_path, device)
+                resume_from = model_path
+                logger.info(f"成功恢复模型，继续训练")
+            except Exception as e:
+                logger.warning(f"恢复训练失败: {str(e)}，将重新开始训练")
+                resume_from = None
+        
+        # 是否进行超参数调优
+        if tune_hyperparams:
+            from hyperopt_tuning import hyperparameter_tuning
+            logger.info(f"开始 {element} 的超参数调优")
+            best_params, best_model = hyperparameter_tuning(
+                element,
+                train_loader,
+                val_loader,
+                device=device,
+                config=config
+            )
+            logger.info(f"{element} 超参数调优完成，最佳参数: {best_params}")
+            return best_model, best_params
+        
+        # 正常训练流程
+        else:
+            from model import train_and_evaluate_model
+            logger.info(f"开始 {element} 的训练和评估")
+            best_model, best_val_loss, test_metrics = train_and_evaluate_model(
+                train_loader=train_loader,
+                val_loader=val_loader,
+                test_loader=test_loader,
+                element=element,
+                config=config
+            )
             
-                # 可视化训练过程
-                visualize_training(element, train_losses, val_losses)
-        
-        return model, test_metrics
-        
+            logger.info(f"{element} 训练和评估完成，最佳验证损失: {best_val_loss:.6f}")
+            logger.info(f"测试指标: {test_metrics}")
+            
+            return best_model, test_metrics
+            
     except Exception as e:
-        logger.error(f"训练元素 {element} 时出错: {str(e)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        raise
+        logger.error(f"处理元素 {element} 时出错: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None, None
 
 def process_multiple_elements(csv_file, fits_dir, element_columns=None, 
                              test_size=0.2, val_size=0.1, batch_size=32, 

@@ -88,7 +88,8 @@ training_config = {
     'weight_decay': 1e-5,
     'num_epochs': 100,
     'early_stopping_patience': 15,
-    'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+    'device': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
+    'multi_gpu': torch.cuda.device_count() > 1,  # 自动检测是否有多个GPU
     'elements': ['C_FE', 'MG_FE', 'CA_FE'],
     'resume_training': True
 }
