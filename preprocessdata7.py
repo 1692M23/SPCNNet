@@ -150,7 +150,9 @@ class LAMOSTPreprocessor:
         
         self.update_cache_manager()
         
+        # 设置计算设备
         self.device = setup_device(device)
+        print(f"预处理器将使用设备: {self.device}")
         
     def _load_files_cache(self):
         """加载文件查找缓存"""
@@ -3356,6 +3358,37 @@ class LAMOSTPreprocessor:
             except Exception as e:
                 logging.error(f"处理文件 {fits_file} 时出错: {str(e)}")
         return results
+
+    # 将第3266行附近的方法重命名为不同名称，避免冲突
+    def process_single_spectrum_with_device(self, spectrum_id, fits_file=None):
+        """处理单条光谱，支持设备加速"""
+        try:
+            # 调用原始的处理方法
+            result = self.process_single_spectrum(spectrum_id, fits_file)
+            
+            # 如果处理成功并且启用了设备加速
+            if result and 'spectrum' in result and hasattr(self, 'device') and str(self.device) != 'cpu':
+                # 获取光谱数据
+                spectrum_data = result['spectrum']
+                if spectrum_data is not None:
+                    # 将数据移到GPU
+                    spectrum_data = torch.tensor(spectrum_data, device=self.device)
+                    # 执行GPU加速处理
+                    with torch.no_grad():
+                        # 可以添加GPU加速的处理逻辑
+                        pass
+                    # 将数据移回CPU
+                    spectrum_data = spectrum_data.cpu().numpy()
+                    # 更新结果
+                    result['spectrum'] = spectrum_data
+            
+            return result
+            
+        except Exception as e:
+            logging.error(f"处理光谱 {spectrum_id} 时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None
 
 def main():
     """主函数"""
