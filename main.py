@@ -524,20 +524,17 @@ def process_element(element, config=None, tune_hyperparams=False):
         logger.info(f"创建模型: SpectralResCNN_GCN, 输入大小: {input_size}")
         
         # 尝试恢复训练
-        resume_from = None
         model_dir = config.model_config['model_dir'] if config else 'models'
         model_path = os.path.join(model_dir, f"{element}_model.pth")
-        
+
         if config.training_config.get('resume_training', False) and os.path.exists(model_path):
             logger.info(f"尝试从 {model_path} 恢复训练")
             try:
                 from model import load_trained_model
                 model = load_trained_model(model_path, device)
-                resume_from = model_path
                 logger.info(f"成功恢复模型，继续训练")
             except Exception as e:
                 logger.warning(f"恢复训练失败: {str(e)}，将重新开始训练")
-                resume_from = None
         
         # 是否进行超参数调优
         if tune_hyperparams:

@@ -277,6 +277,22 @@ class LAMOSTPreprocessor:
             self.fits_file_cache[spec_name] = direct_path
             return direct_path
         
+        # 检查是否是元素名称而不是文件路径（例如"C_FE"）
+        if spec_name in ["C_FE", "MG_FE", "CA_FE"]:
+            print(f"检测到元素名称: {spec_name}，尝试查找对应的示例FITS文件")
+            # 查找与元素相关的CSV文件中的FITS文件样例
+            csv_path = f"{spec_name}.csv"
+            if os.path.exists(csv_path):
+                try:
+                    import pandas as pd
+                    df = pd.read_csv(csv_path)
+                    if 'spec' in df.columns and len(df) > 0:
+                        first_spec = df['spec'].iloc[0]
+                        print(f"从CSV文件中获取第一个样例: {first_spec}")
+                        return self._find_fits_file(first_spec)
+                except Exception as e:
+                    print(f"从CSV读取样例时出错: {e}")
+        
         # 尝试直接在fits目录下按基础名称匹配（常规后缀）
         for ext in ['', '.fits', '.fits.gz', '.fit', '.fit.gz']:
             path = os.path.join(self.fits_dir, base_name + ext)
@@ -286,14 +302,16 @@ class LAMOSTPreprocessor:
                 return path
         
         # 进行递归搜索，处理嵌套目录
+        print(f"开始递归搜索FITS目录: {self.fits_dir}")
+        fits_files_found = []
+        
         for root, dirs, files in os.walk(self.fits_dir):
             for file in files:
                 # 检查文件名是否匹配（忽略大小写）
                 if base_name.lower() in file.lower():
                     found_path = os.path.join(root, file)
+                    fits_files_found.append(found_path)
                     print(f"部分名称匹配成功: {found_path}")
-                    self.fits_file_cache[spec_name] = found_path
-                    return found_path
                 
                 # 尝试去除可能的后缀后再比较
                 file_base = file.lower()
@@ -304,9 +322,8 @@ class LAMOSTPreprocessor:
                 
                 if base_name.lower() == file_base:
                     found_path = os.path.join(root, file)
+                    fits_files_found.append(found_path)
                     print(f"去除后缀后匹配成功: {found_path}")
-                    self.fits_file_cache[spec_name] = found_path
-                    return found_path
                 
                 # 尝试更模糊的匹配方式
                 # 移除路径分隔符，便于匹配跨目录文件
@@ -315,9 +332,36 @@ class LAMOSTPreprocessor:
                 
                 if clean_base_name.lower() in clean_file_base or clean_file_base in clean_base_name.lower():
                     found_path = os.path.join(root, file)
+                    fits_files_found.append(found_path)
                     print(f"模糊匹配成功: {found_path}")
-                    self.fits_file_cache[spec_name] = found_path
-                    return found_path
+        
+        # 处理找到的文件
+        if fits_files_found:
+            # 优先选择与查询名称最匹配的文件
+            best_match = fits_files_found[0]  # 默认第一个
+            for found_path in fits_files_found:
+                file_name = os.path.basename(found_path).lower()
+                # 如果文件名包含查询名称，优先选择
+                if base_name.lower() in file_name:
+                    best_match = found_path
+                    break
+            
+            print(f"从{len(fits_files_found)}个匹配结果中选择: {best_match}")
+            self.fits_file_cache[spec_name] = best_match
+            return best_match
+        
+        # 尝试其他备选方案 - 如果目录中有任何FITS文件，作为最后的备选方案
+        fits_files = []
+        for root, _, files in os.walk(self.fits_dir):
+            for file in files:
+                if any(file.lower().endswith(ext) for ext in ['.fits', '.fits.gz', '.fit', '.fit.gz']):
+                    fits_files.append(os.path.join(root, file))
+        
+        if fits_files:
+            # 显示可用的备选文件
+            print(f"未直接找到 {spec_name} 匹配的文件。")
+            print(f"FITS目录中有 {len(fits_files)} 个FITS文件可用。")
+            print(f"可用的FITS文件示例: {fits_files[0] if fits_files else '无'}")
         
         # 如果以上都没找到，返回None
         print(f"未找到匹配文件: {spec_name}")
@@ -1184,7 +1228,7 @@ class LAMOSTPreprocessor:
                             # 确保spec列是字符串类型
                             if not pd.api.types.is_string_dtype(df['spec']):
                                 df['spec'] = df['spec'].astype(str)
-                                
+                            
                             # 在CSV中查找匹配记录
                             matches = df[df['spec'].str.contains(base_file, case=False, na=False)]
                             if not matches.empty:
@@ -2057,7 +2101,7 @@ class LAMOSTPreprocessor:
         if not spectra:
             print("处理后没有有效数据")
             return None, None, None, None
-            
+        
         # 检查所有光谱的长度是否一致
         expected_length = len(spectra[0])
         inconsistent_indices = []
@@ -3055,6 +3099,111 @@ class LAMOSTPreprocessor:
         # 替换验证方法为类方法
         self.cache_manager._validate_cache_data = self._validate_wavelength_range
 
+    def visualize_example_spectra(self, element=None):
+        """可视化指定元素的示例光谱
+        
+        Args:
+            element (str, optional): 元素名称，如 'C_FE'、'MG_FE'、'CA_FE'。
+                                     为None时会尝试所有已处理的元素。
+        """
+        print(f"准备可视化示例光谱...")
+        
+        # 定义要处理的元素列表
+        elements_to_process = []
+        if element:
+            elements_to_process = [element]
+        else:
+            # 尝试从已知的CSV文件中获取元素列表
+            standard_elements = ['C_FE', 'MG_FE', 'CA_FE']
+            for elem in standard_elements:
+                if os.path.exists(f"{elem}.csv"):
+                    elements_to_process.append(elem)
+        
+        if not elements_to_process:
+            print("未找到指定元素或任何标准元素的CSV文件")
+            return
+        
+        print(f"将处理以下元素: {', '.join(elements_to_process)}")
+        
+        # 处理每个元素
+        for elem in elements_to_process:
+            print(f"\n===== 处理元素: {elem} =====")
+            
+            # 1. 查找该元素的CSV文件
+            csv_path = f"{elem}.csv"
+            if not os.path.exists(csv_path):
+                print(f"找不到{csv_path}，跳过此元素")
+                continue
+                
+            # 2. 读取CSV文件获取光谱文件列表
+            try:
+                import pandas as pd
+                df = pd.read_csv(csv_path)
+                
+                if 'spec' not in df.columns:
+                    print(f"CSV文件{csv_path}中找不到'spec'列")
+                    continue
+                    
+                # 取前5个示例
+                sample_specs = df['spec'].values[:5]
+                if len(sample_specs) == 0:
+                    print(f"CSV文件{csv_path}中没有光谱数据")
+                    continue
+                    
+                print(f"找到{len(sample_specs)}个样本光谱")
+                
+                # 3. 可视化每个样本光谱
+                for i, spec in enumerate(sample_specs):
+                    print(f"\n处理样本 {i+1}/{len(sample_specs)}: {spec}")
+                    
+                    # 检查缓存和处理该光谱
+                    cache_key = f"processed_{spec.replace('/', '_')}"
+                    cached_data = self.cache_manager.get_cache(cache_key)
+                    
+                    if cached_data is None:
+                        print(f"没有找到处理后的光谱缓存，尝试处理: {spec}")
+                        
+                        # 查找FITS文件
+                        fits_file = self._find_fits_file(spec)
+                        if fits_file is None:
+                            print(f"找不到FITS文件: {spec}")
+                            continue
+                            
+                        print(f"开始处理FITS文件: {fits_file}")
+                        try:
+                            # 使用0.0作为占位符标签处理光谱
+                            processed_data = self.process_single_spectrum(spec, 0.0)
+                            if processed_data is None:
+                                print(f"处理光谱失败: {spec}")
+                                continue
+                                
+                            print(f"光谱处理成功，保存到缓存")
+                        except Exception as e:
+                            print(f"处理光谱时出错: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            continue
+                    else:
+                        print(f"使用缓存的预处理光谱")
+                    
+                    # 可视化处理后的光谱
+                    try:
+                        print(f"可视化光谱: {spec}")
+                        self.visualize_spectrum(spec, processed=True, save=True)
+                        print(f"光谱可视化完成")
+                    except Exception as e:
+                        print(f"可视化光谱时出错: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        
+            except Exception as e:
+                print(f"处理元素{elem}时出错: {e}")
+                import traceback
+                traceback.print_exc()
+                
+        print("\n===== 示例光谱可视化完成 =====")
+        print(f"图像保存在: {os.path.abspath(self.output_dir)}")
+
 def main():
     """主函数"""
     start_time = time.time()
@@ -3266,7 +3415,20 @@ def main():
     # 可视化几个示例光谱(可选)
     if len(filenames) > 0 and not low_memory_mode and input("是否可视化示例光谱? (y/n): ").lower() == 'y':
         print("正在可视化示例光谱...")
-        sample_indices = random.sample(range(len(filenames)), min(3, len(filenames)))
+        
+        # 询问用户是否想要通过元素名称可视化
+        vis_by_element = input("是否按元素可视化示例光谱? (y/n): ").lower() == 'y'
+        
+        if vis_by_element:
+            # 用户可以输入特定元素或使用所有元素
+            element_input = input("请输入元素名称(C_FE/MG_FE/CA_FE)，直接回车则处理所有元素: ").strip().upper()
+            element = element_input if element_input in ['C_FE', 'MG_FE', 'CA_FE'] else None
+            
+            # 使用新方法按元素可视化
+            preprocessor.visualize_example_spectra(element)
+        else:
+            # 使用原有方法随机选择样本可视化
+            sample_indices = random.sample(range(len(filenames)), min(3, len(filenames)))
         for i in sample_indices:
             preprocessor.visualize_spectrum(filenames[i])
     
