@@ -121,6 +121,8 @@ class LAMOSTPreprocessor:
         
         self.cache_manager = CacheManager(cache_dir=os.path.join(output_dir, 'cache'))
         
+        self.update_cache_manager()
+        
     def _load_files_cache(self):
         """加载文件查找缓存"""
         # 尝试标准路径
@@ -2853,6 +2855,20 @@ class LAMOSTPreprocessor:
                 print(f"  重新测试未找到文件")
         
         print("\n=== 诊断完成 ===\n")
+
+    def update_cache_manager(self):
+        """修改缓存管理器的验证功能，允许保存非字典格式的数据"""
+        original_validate = self.cache_manager._validate_cache_data
+        
+        def new_validate(data):
+            # 如果是波长范围元组，直接返回True
+            if isinstance(data, tuple) and len(data) == 2:
+                return True
+            # 否则使用原始验证
+            return original_validate(data)
+        
+        # 替换验证方法
+        self.cache_manager._validate_cache_data = new_validate
 
 def main():
     """主函数"""
