@@ -738,58 +738,60 @@ class LAMOSTPreprocessor:
             traceback.print_exc()
             return None, None
     
-    def normalize_spectrum(self, flux):
-        """对光谱进行归一化处理"""
-        try:
-            # 检查数据有效性
-            if flux is None or len(flux) == 0:
-                print("无效的流量数据，无法归一化")
-                return None
-                
-            # 处理全为NaN的情况
-            if np.isnan(flux).all():
-                print("所有流量值都是NaN，无法归一化")
-                return None
+    def normalize_spectrum(self, wavelength, flux):
+        """
+        对光谱进行最大最小归一化处理
+        
+        参数:
+            wavelength (ndarray): 波长数组
+            flux (ndarray): 原始光谱强度
             
-            # 连续谱归一化 (简单的最大值归一化)
-            valid_mask = ~np.isnan(flux) & ~np.isinf(flux)
-            valid_flux = flux[valid_mask]
-            
-            if len(valid_flux) == 0:
-                print("没有有效的流量值，无法归一化")
-                return None
-            
-            # 最大最小值归一化
-            flux_min = np.min(valid_flux)
-            flux_max = np.max(valid_flux)
-            
-            print(f"归一化：最小值={flux_min}，最大值={flux_max}")
-            
-            if np.isclose(flux_max, flux_min):
-                print(f"流量范围无效: min={flux_min}, max={flux_max}，设置为0-1范围")
-                normalized_flux = np.zeros_like(flux)
-                normalized_flux[valid_mask] = 0.5  # 所有有效值设为0.5
-                return normalized_flux, {'flux_min': flux_min, 'flux_max': flux_max}
-            
-            # 创建归一化后的数组
-            normalized_flux = np.zeros_like(flux)
-            normalized_flux[valid_mask] = (valid_flux - flux_min) / (flux_max - flux_min)
-            
-            # 确保所有值都严格在0-1范围内
-            normalized_flux = np.clip(normalized_flux, 0.0, 1.0)
-            
-            # 替换无效值
-            normalized_flux[~valid_mask] = 0.0
-            
-            # 最终检查确保没有NaN或无限值
-            if np.isnan(normalized_flux).any() or np.isinf(normalized_flux).any():
-                print("归一化后仍有无效值，进行最终替换")
-                normalized_flux = np.nan_to_num(normalized_flux, nan=0.0, posinf=1.0, neginf=0.0)
-                
-            return normalized_flux, {'flux_min': flux_min, 'flux_max': flux_max}
-        except Exception as e:
-            print(f"归一化失败: {e}")
-            return None, None
+        返回:
+            ndarray: 归一化后的光谱强度
+        """
+        if flux is None or len(flux) == 0:
+            print("警告: 归一化失败 - 输入光谱为空")
+            return None
+        
+        # 检查无效值
+        invalid_mask = np.isnan(flux) | np.isinf(flux)
+        if np.all(invalid_mask):
+            print("警告: 归一化失败 - 所有值都是NaN或无穷大")
+            return None
+        
+        # 将无效值替换为0以便计算
+        flux_valid = flux.copy()
+        flux_valid[invalid_mask] = 0
+        
+        # 记录归一化前的统计信息
+        flux_min_orig = np.min(flux_valid)
+        flux_max_orig = np.max(flux_valid)
+        
+        # 如果最大值和最小值相同，则返回全0数组
+        if flux_max_orig == flux_min_orig:
+            print(f"警告: 归一化失败 - 最大值和最小值相同: {flux_max_orig}")
+            return np.zeros_like(flux)
+        
+        # 进行最大最小归一化
+        flux_norm = (flux_valid - flux_min_orig) / (flux_max_orig - flux_min_orig)
+        
+        # 确保归一化后的值在[0,1]范围内
+        flux_norm = np.clip(flux_norm, 0, 1)
+        
+        # 恢复无效值为NaN
+        flux_norm[invalid_mask] = np.nan
+        
+        # 记录归一化参数供后续使用
+        self.normalization_params = {
+            'min': float(flux_min_orig),
+            'max': float(flux_max_orig),
+            'wavelength_range': (float(np.min(wavelength)), float(np.max(wavelength))) if wavelength is not None else None
+        }
+        
+        if self.verbose >= 2:
+            print(f"归一化统计: 原始范围[{flux_min_orig:.4f}, {flux_max_orig:.4f}]")
+        
+        return flux_norm
     
     def correct_wavelength(self, wavelength, flux):
         """对光谱进行波长标准化校正
@@ -1280,7 +1282,7 @@ class LAMOSTPreprocessor:
             
             # 8. 最终归一化 (最大最小值归一化)
             print(f"对流量进行最终归一化")
-            flux_normalized, norm_params = self.normalize_spectrum(flux_denoised_second)
+            flux_normalized = self.normalize_spectrum(wavelength_resampled, flux_denoised_second)
             if flux_normalized is None:
                 print(f"归一化{spec_file}失败")
                 return None
@@ -1292,8 +1294,8 @@ class LAMOSTPreprocessor:
                 # 波长范围信息
                 'wavelength_range': self.wavelength_range,
                 'log_step': self.log_step,
-                'flux_min': norm_params['flux_min'] if norm_params else None,
-                'flux_max': norm_params['flux_max'] if norm_params else None,
+                'flux_min': continuum_params['flux_min'] if continuum_params else None,
+                'flux_max': continuum_params['flux_max'] if continuum_params else None,
                 'mean': np.mean(flux_normalized),
                 'std': np.std(flux_normalized)
             }
@@ -1619,11 +1621,14 @@ class LAMOSTPreprocessor:
         """预处理所有数据"""
         print("\n=== 开始预处理所有数据 ===")
         
+        # 初始化返回变量，确保所有路径都能访问它们
+        X, y, elements, filenames = None, None, None, None
+        
         # 加载CSV数据
-        dataframes, elements = self.read_csv_data()
+        dataframes, elements_list = self.read_csv_data()
         if not dataframes:
             print("错误: 没有找到有效的CSV文件")
-            return None
+            return None, None, None, None
         
         # 检查是否从缓存加载
         all_progress_file = os.path.join(self.progress_dir, "all_progress.pkl")
@@ -1682,20 +1687,59 @@ class LAMOSTPreprocessor:
                 import traceback
                 traceback.print_exc()
         
-        # 处理所有数据
-        all_data = self.process_all_elements(elements, dataframes, resume)
+        # 第一步：计算最大公共波长范围
+        print("\n=== 第一步：计算最大公共波长范围 ===")
         
-        # 计算波长的公共范围
-        if self.compute_common_range and all_data:
-            print("\n计算所有光谱的公共波长范围...")
-            # 如果self.processed_ranges为空或无效，则使用默认值
-            if not self.processed_ranges:
-                print("警告: 没有找到处理过的光谱范围数据，使用默认范围")
-                self.wavelength_range = (3900, 7000)  # 常见可见光范围
-            else:
-                # 找出最大的最小值和最小的最大值
-                min_waves = [r[0] for r in self.processed_ranges]
-                max_waves = [r[1] for r in self.processed_ranges]
+        # 已存在波长范围文件，尝试加载
+        wavelength_range_file = os.path.join(self.cache_dir, 'wavelength_range.pkl')
+        if os.path.exists(wavelength_range_file) and resume:
+            try:
+                with open(wavelength_range_file, 'rb') as f:
+                    self.wavelength_range = pickle.load(f)
+                print(f"从缓存加载公共波长范围: {self.wavelength_range}")
+                
+                # 根据公共波长范围和步长计算点数
+                start_wavelength, end_wavelength = self.wavelength_range
+                self.n_points = int(np.ceil(np.log10(end_wavelength / start_wavelength) / self.log_step))
+                print(f"对应点数: {self.n_points} (步长={self.log_step})")
+                
+            except Exception as e:
+                print(f"加载公共波长范围失败: {e}，将重新计算")
+                # 如果加载失败，继续执行计算波长范围的步骤
+        
+        # 如果没有缓存的波长范围或加载失败，则计算波长范围
+        if self.compute_common_range and (not hasattr(self, 'wavelength_range') or self.wavelength_range is None):
+            print("计算所有光谱的公共波长范围...")
+            
+            # 临时收集波长范围信息
+            all_wave_ranges = []
+            
+            # 对每个元素进行处理，但只提取波长范围信息
+            for i, (element, df) in enumerate(zip(elements_list, dataframes)):
+                print(f"\n[{i+1}/{len(elements_list)}] 读取元素 {element} 的波长范围 (共{len(df)}条记录)...")
+                
+                # 只处理前几条记录快速确定波长范围
+                sample_size = min(len(df), 20)  # 限制样本数量加快处理
+                for j, (_, row) in enumerate(df.head(sample_size).iterrows()):
+                    try:
+                        spec_file = str(row['spec'])
+                        # 读取波长数据但不进行完整预处理
+                        wavelength, flux, _, _, _, _ = self.read_fits_file(spec_file)
+                        if wavelength is not None and len(wavelength) > 0:
+                            valid_mask = ~np.isnan(flux) & ~np.isinf(flux)
+                            if np.any(valid_mask):
+                                wavelength_valid = wavelength[valid_mask]
+                                w_min, w_max = wavelength_valid.min(), wavelength_valid.max()
+                                all_wave_ranges.append((w_min, w_max))
+                                print(f"  文件 {spec_file}: 波长范围 {w_min:.2f}~{w_max:.2f}")
+                    except Exception as e:
+                        print(f"  读取文件 {spec_file} 波长范围时出错: {e}")
+                        continue
+            
+            # 计算最大公共波长范围
+            if all_wave_ranges:
+                min_waves = [r[0] for r in all_wave_ranges]
+                max_waves = [r[1] for r in all_wave_ranges]
                 common_min = max(min_waves)
                 common_max = min(max_waves)
                 
@@ -1705,46 +1749,37 @@ class LAMOSTPreprocessor:
                 else:
                     # 添加一点余量
                     self.wavelength_range = (common_min, common_max)
-            
-            print(f"公共波长范围: {self.wavelength_range}")
-            
-            # 根据公共波长范围和步长计算点数
+                
+                # 保存波长范围信息
+                try:
+                    with open(wavelength_range_file, 'wb') as f:
+                        pickle.dump(self.wavelength_range, f)
+                    print(f"波长范围信息已保存")
+                except Exception as e:
+                    print(f"保存波长范围信息失败: {e}")
+            else:
+                print("没有找到任何波长范围信息，使用默认范围")
+                self.wavelength_range = (3900, 7000)
+        
+        # 根据公共波长范围和步长计算点数
+        if hasattr(self, 'wavelength_range') and self.wavelength_range is not None:
             start_wavelength, end_wavelength = self.wavelength_range
             self.n_points = int(np.ceil(np.log10(end_wavelength / start_wavelength) / self.log_step))
+            print(f"公共波长范围: {self.wavelength_range}")
             print(f"对应点数: {self.n_points} (步长={self.log_step})")
-            
-            # 保存波长范围信息，方便后续使用
-            wavelength_range_file = os.path.join(self.cache_dir, 'wavelength_range.pkl')
-            try:
-                with open(wavelength_range_file, 'wb') as f:
-                    pickle.dump(self.wavelength_range, f)
-                print(f"波长范围信息已保存")
-            except Exception as e:
-                print(f"保存波长范围信息失败: {e}")
-            
-            # 询问是否重新处理所有光谱
-            if input("是否需要使用计算出的公共波长范围重新处理所有光谱? (y/n): ").lower() == 'y':
-                print("开始重新处理所有光谱...")
-                
-                # 清除所有缓存
-                print("清除缓存...")
-                for file in glob.glob(os.path.join(self.cache_dir, "processed_*.pkl")):
-                    try:
-                        os.remove(file)
-                    except:
-                        pass
-                
-                # 重新处理所有元素
-                all_data = self.process_all_elements(elements, dataframes, resume=False)
         
-        # 询问是否需要分割数据集
+        # 第二步：处理所有光谱数据
+        print("\n=== 第二步：使用公共波长范围进行完整预处理 ===")
+        all_data = self.process_all_elements(elements_list, dataframes, resume)
+        
+        # 第三步：询问是否分割数据集
         if all_data and input("是否需要划分数据集? (y/n): ").lower() == 'y':
             print("准备数据用于模型训练")
             X, y, elements, filenames = self._prepare_arrays(all_data)
             if X is not None and y is not None:
                 self.split_dataset(X, y, elements)
         
-        # 如果用户要求，随机可视化几条光谱
+        # 第四步：询问是否随机可视化
         if all_data and input("是否随机可视化几条光谱? (y/n): ").lower() == 'y':
             n_samples = min(len(all_data), 3)
             samples = random.sample(all_data, n_samples)
@@ -1756,8 +1791,13 @@ class LAMOSTPreprocessor:
                 else:
                     print("样本中没有文件名信息")
         
-        X, y, elements, filenames = self._prepare_arrays(all_data)
-        return X, y, elements, filenames
+        # 最终处理数据
+        if all_data:
+            X, y, elements, filenames = self._prepare_arrays(all_data)
+            return X, y, elements, filenames
+        else:
+            print("没有有效数据可处理")
+            return None, None, None, None
     
     def _prepare_arrays(self, all_data):
         """准备训练、验证和测试数据数组"""
@@ -2406,10 +2446,10 @@ class LAMOSTPreprocessor:
             
             # 8. 最终归一化 (最大最小值归一化)
             print(f"对流量进行最终归一化")
-            flux_normalized, norm_params = self.normalize_spectrum(flux_denoised_second)
+            flux_normalized = self.normalize_spectrum(wavelength_resampled, flux_denoised_second)
             if flux_normalized is None:
                 print(f"归一化{spec_file}失败")
-                return
+                return None
             
             spectrum = flux_normalized
             
