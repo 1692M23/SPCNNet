@@ -160,8 +160,26 @@ class LAMOSTPreprocessor:
         dataframes = []
         for csv_file in self.csv_files:
             if not os.path.exists(csv_file):
-                print(f"注意: 找不到CSV文件 {csv_file}，跳过")
-                continue
+                print(f"错误: 找不到CSV文件 {csv_file}")
+                print(f"当前工作目录: {os.getcwd()}")
+                print(f"尝试查找的完整路径: {os.path.abspath(csv_file)}")
+                
+                # 尝试从可能的目录中查找
+                possible_dirs = ['/content', '/content/drive/My Drive', '/content/SPCNNet']
+                for posdir in possible_dirs:
+                    if os.path.exists(posdir):
+                        possible_path = os.path.join(posdir, os.path.basename(csv_file))
+                        if os.path.exists(possible_path):
+                            print(f"找到可用的CSV文件: {possible_path}")
+                            csv_file = possible_path
+                            break
+                        
+                if not os.path.exists(csv_file):
+                    # 如果还是没找到，列出当前目录的文件
+                    print("当前目录中的文件:")
+                    for f in os.listdir():
+                        print(f"  - {f}")
+                    continue
                 
             print(f"读取CSV文件: {csv_file}")
             try:
@@ -179,7 +197,7 @@ class LAMOSTPreprocessor:
                     # 不在启动时检查所有文件，只显示警告信息
                     print(f"CSV文件包含{len(df)}条记录，如果找不到某些FITS文件，将在处理时报错")
                     
-                    # 仅检查前3个文件作为示例
+                    # 仅检查前3个文件作为示例(不再检查所有文件)
                     spec_files = df['spec'].values[:3]
                     for spec_file in spec_files:
                         # 使用_find_fits_file方法查找文件
@@ -304,93 +322,217 @@ class LAMOSTPreprocessor:
             return None
     
     def read_fits_file(self, fits_file):
-        """
-        读取FITS文件并提取光谱数据
-        """
+        """读取FITS文件并返回波长和流量数据"""
+        # 获取正确的文件路径
+        file_path = self._get_file_extension(fits_file)
+        if file_path is None:
+            print(f"无法找到文件: {fits_file}，查找路径: {self.fits_dir}")
+            return None, None, 0, 0, 0, 0
+        
+        print(f"读取文件: {file_path}")
         try:
-            # 检查文件是否存在
-            if not os.path.exists(fits_file):
-                print(f"警告: FITS文件不存在: {fits_file}")
-                return None, None, 0, 0
-            
-            # 获取文件扩展名
-            file_ext = self._get_file_extension(fits_file)
-            
-            # 根据文件类型选择读取方法
-            if file_ext == '.fits':
-                with fits.open(fits_file) as hdul:
-                    # 获取光谱数据
-                    data = hdul[0].data
-                    header = hdul[0].header
-                    
-                    # 检查并处理NaN值
-                    if np.isnan(data).any():
-                        print(f"警告: 数据中包含NaN值，使用0替换")
-                        data = np.nan_to_num(data, nan=0.0)
-                    
-                    # 获取波长信息
-                    if 'CRVAL1' in header and 'CDELT1' in header:
-                        wavelength = np.arange(header['CRVAL1'], 
-                                             header['CRVAL1'] + header['CDELT1'] * len(data),
-                                             header['CDELT1'])
+            # 使用更多选项打开FITS文件
+            with fits.open(file_path, ignore_missing_end=True, memmap=False) as hdul:
+                # 打印HDU信息以帮助诊断
+                print(f"FITS文件结构: 共{len(hdul)}个HDU")
+                for i, hdu in enumerate(hdul):
+                    print(f"  HDU{i}: 类型={type(hdu).__name__}, 形状={hdu.shape if hasattr(hdu, 'shape') else '无形状'}")
+                
+                # 获取主HDU的头信息
+                header = hdul[0].header
+                
+                # 输出关键头信息帮助诊断
+                print(f"主HDU头信息: NAXIS={header.get('NAXIS')}, NAXIS1={header.get('NAXIS1')}, "
+                      f"BITPIX={header.get('BITPIX')}")
+                
+                # 尝试获取视向速度信息(如果有)
+                v_helio = header.get('V_HELIO', 0)  # 日心视向速度 (km/s)
+                
+                # 尝试获取红移值(可能有不同的关键字)
+                z = 0
+                for key in ['Z', 'REDSHIFT', 'z', 'redshift', 'Redshift', 'RED_SHIFT', 'red_shift']:
+                    if key in header:
+                        z = header.get(key, 0)
+                        print(f"从FITS头信息中找到红移值: {key} = {z}")
+                        break
+                
+                # 如果在头信息中没找到红移值，尝试在扩展表中查找
+                if z == 0 and len(hdul) > 1:
+                    for i in range(1, len(hdul)):
+                        if isinstance(hdul[i], fits.BinTableHDU):
+                            table_hdu = hdul[i]
+                            column_names = table_hdu.columns.names
+                            print(f"检查表格HDU{i}中的红移值, 列名: {column_names}")
+                            
+                            # 寻找红移列
+                            for col_name in ['Z', 'REDSHIFT', 'z', 'redshift', 'Redshift', 'RED_SHIFT', 'red_shift']:
+                                if col_name in column_names:
+                                    try:
+                                        z_values = table_hdu.data[col_name]
+                                        if len(z_values) > 0:
+                                            z = z_values[0]
+                                            print(f"从表格HDU{i}列'{col_name}'中找到红移值: {z}")
+                                            break
+                                    except Exception as e:
+                                        print(f"读取表格HDU{i}列'{col_name}'时出错: {e}")
+                            
+                            if z != 0:
+                                break
+                
+                # 获取信噪比信息(尝试多种可能的关键字)
+                snr = 0
+                for key in ['SNR', 'SNRATIO', 'SN', 'S/N', 'snr']:
+                    if key in header:
+                        snr = header.get(key, 0)
+                        print(f"从FITS头信息中找到信噪比: {key} = {snr}")
+                        break
+                
+                # 获取五段区间的信噪比信息
+                snr_bands = {'snru': 0, 'snrg': 0, 'snrr': 0, 'snri': 0, 'snrz': 0}
+                for band in snr_bands:
+                    for variation in [band, band.upper(), band.capitalize()]:
+                        if variation in header:
+                            snr_bands[band] = header.get(variation, 0)
+                            print(f"从FITS头信息中找到{band}波段信噪比: {snr_bands[band]}")
+                            break
+                
+                # 优先获取第一个HDU的数据(如果是主要光谱数据)
+                flux = None
+                wavelength = None
+                
+                # 规则1: 如果主HDU是PrimaryHDU且包含数据，直接使用
+                if isinstance(hdul[0], fits.PrimaryHDU) and hdul[0].data is not None:
+                    if len(hdul[0].data.shape) == 1:  # 一维数据
+                        flux = hdul[0].data
+                        # 从头信息创建波长数组
+                        if 'CRVAL1' in header and 'CDELT1' in header and 'NAXIS1' in header:
+                            crval1 = header['CRVAL1']  # 起始波长
+                            cdelt1 = header['CDELT1']  # 波长步长
+                            naxis1 = header['NAXIS1']  # 波长点数
+                            wavelength = np.arange(crval1, crval1 + cdelt1 * naxis1, cdelt1)[:naxis1]
+                        print(f"使用主HDU的一维数据: 点数={len(flux)}")
+                        
+                    elif len(hdul[0].data.shape) == 2:  # 二维数据
+                        # 取第一行或列，取决于哪个更长
+                        if hdul[0].data.shape[0] > hdul[0].data.shape[1]:
+                            flux = hdul[0].data[0]
+                        else:
+                            flux = hdul[0].data[:, 0]
+                        print(f"使用主HDU的二维数据的第一行/列: 点数={len(flux)}")
+                
+                # 规则2: 如果数据在表格HDU中
+                if flux is None and len(hdul) > 1:
+                    for i in range(1, len(hdul)):
+                        if isinstance(hdul[i], fits.BinTableHDU):
+                            table_hdu = hdul[i]
+                            column_names = table_hdu.columns.names
+                            print(f"检查表格HDU{i}, 列名: {column_names}")
+                            
+                            # 查找光谱数据列
+                            flux_col = None
+                            wave_col = None
+                            
+                            # 寻找光谱流量列
+                            for col_name in ['FLUX', 'SPEC', 'DATA', 'INTENSITY', 'COUNTS', 'flux']:
+                                if col_name in column_names:
+                                    flux_col = col_name
+                                    break
+                            
+                            # 寻找波长列
+                            for wave_name in ['WAVE', 'WAVELENGTH', 'LAMBDA', 'wave', 'wavelength']:
+                                if wave_name in column_names:
+                                    wave_col = wave_name
+                                    break
+                            
+                            # 如果找到流量列
+                            if flux_col is not None:
+                                try:
+                                    # 读取流量数据
+                                    flux_data = table_hdu.data[flux_col]
+                                    
+                                    # 如果流量是一个二维数组，取第一行
+                                    if hasattr(flux_data, 'shape') and len(flux_data.shape) > 1:
+                                        flux = flux_data[0].astype(np.float64)
+                                    else:
+                                        # 确保flux是一维数组
+                                        flux = np.array(flux_data, dtype=np.float64).flatten()
+                                    
+                                    print(f"从列 '{flux_col}' 提取流量数据, 点数={len(flux)}")
+                                    
+                                    # 如果找到波长列，读取波长数据
+                                    if wave_col is not None:
+                                        wave_data = table_hdu.data[wave_col]
+                                        if hasattr(wave_data, 'shape') and len(wave_data.shape) > 1:
+                                            wavelength = wave_data[0].astype(np.float64)
+                                        else:
+                                            wavelength = np.array(wave_data, dtype=np.float64).flatten()
+                                        print(f"从列 '{wave_col}' 提取波长数据, 点数={len(wavelength)}")
+                                        
+                                        # 确保波长和流量数组长度匹配
+                                        if len(wavelength) != len(flux):
+                                            min_len = min(len(wavelength), len(flux))
+                                            wavelength = wavelength[:min_len]
+                                            flux = flux[:min_len]
+                                            print(f"调整数组长度为匹配长度: {min_len}")
+                                    
+                                    break  # 找到数据后退出循环
+                                except Exception as e:
+                                    print(f"从表格提取数据出错: {e}")
+                                    flux = None  # 重置，尝试其他HDU
+                
+                # 如果没有找到波长数据，但有流量数据
+                if wavelength is None and flux is not None:
+                    # 尝试从头信息创建波长数组
+                    if 'CRVAL1' in header and 'CDELT1' in header and 'NAXIS1' in header:
+                        crval1 = header['CRVAL1']  # 起始波长
+                        cdelt1 = header['CDELT1']  # 波长步长
+                        naxis1 = header['NAXIS1']  # 波长点数
+                        
+                        # 确保naxis1与flux长度匹配
+                        if naxis1 != len(flux):
+                            naxis1 = len(flux)
+                            print(f"调整NAXIS1值为与流量数组匹配: {naxis1}")
+                        
+                        wavelength = np.arange(crval1, crval1 + cdelt1 * naxis1, cdelt1)[:naxis1]
+                        print(f"从头信息创建波长数组: 范围={wavelength[0]:.2f}~{wavelength[-1]:.2f}")
                     else:
-                        wavelength = np.arange(len(data))
-                    
-                    # 获取视向速度
-                    v_helio = 0
-                    for key in ['V_HELIO', 'VHELIO', 'RV', 'VELOCITY']:
-                        if key in header:
-                            v_helio = header[key]
-                            break
-                    
-                    # 获取红移
-                    z = 0
-                    for key in ['Z', 'REDSHIFT', 'z', 'redshift']:
-                        if key in header:
-                            z = header[key]
-                            break
-                    
-                    return wavelength, data, v_helio, z
-                    
-            elif file_ext == '.csv':
-                # 读取CSV文件
-                df = pd.read_csv(fits_file)
+                        # 如果没有头信息，使用默认波长范围
+                        print("头信息中没有波长参数，使用默认波长范围")
+                        naxis1 = len(flux)
+                        # LAMOST DR10光谱的典型波长范围约为3700-9000Å
+                        crval1 = 3700.0  # 起始波长
+                        cdelt1 = (9000.0 - 3700.0) / naxis1  # 波长步长
+                        wavelength = np.arange(crval1, crval1 + cdelt1 * naxis1, cdelt1)[:naxis1]
+                        print(f"创建默认波长数组: 范围={wavelength[0]:.2f}~{wavelength[-1]:.2f}")
                 
-                # 确保spec列是字符串类型
-                if 'spec' in df.columns:
-                    df['spec'] = df['spec'].astype(str)
+                # 进行最后的数据检查
+                if flux is None:
+                    print("无法从FITS文件提取流量数据")
+                    return None, None, 0, 0, 0, 0
                 
-                # 获取文件名（不含扩展名）
-                base_file = os.path.splitext(os.path.basename(fits_file))[0]
+                if wavelength is None:
+                    print("无法生成波长数据")
+                    return None, None, 0, 0, 0, 0
                 
-                # 在spec列中查找匹配项
-                matches = df[df['spec'].str.contains(base_file, case=False, na=False)]
+                # 确保数据类型是浮点数
+                flux = flux.astype(np.float64)
+                wavelength = wavelength.astype(np.float64)
                 
-                if not matches.empty:
-                    # 获取波长和通量数据
-                    wavelength = matches.iloc[0]['wavelength']
-                    flux = matches.iloc[0]['flux']
-                    
-                    # 检查并处理NaN值
-                    if isinstance(wavelength, (np.ndarray, pd.Series)) and np.isnan(wavelength).any():
-                        print(f"警告: 波长数据中包含NaN值，使用线性插值替换")
-                        wavelength = pd.Series(wavelength).interpolate(method='linear').values
-                    
-                    if isinstance(flux, (np.ndarray, pd.Series)) and np.isnan(flux).any():
-                        print(f"警告: 通量数据中包含NaN值，使用0替换")
-                        flux = np.nan_to_num(flux, nan=0.0)
-                    
-                    # 获取视向速度和红移
-                    v_helio = matches.iloc[0].get('rv', 0)
-                    z = matches.iloc[0].get('z', 0)
-                    
-                    return wavelength, flux, v_helio, z
-                    
-            return None, None, 0, 0
-            
+                # 检查是否有NaN或无限值
+                if np.isnan(flux).any() or np.isinf(flux).any():
+                    nan_count = np.isnan(flux).sum()
+                    inf_count = np.isinf(flux).sum()
+                    print(f"数据中包含{nan_count}个NaN和{inf_count}个无限值，尝试替换")
+                    flux = np.nan_to_num(flux, nan=0.0, posinf=0.0, neginf=0.0)
+                
+                print(f"成功提取光谱数据: 点数={len(wavelength)}, 波长范围={wavelength[0]:.2f}~{wavelength[-1]:.2f}")
+                return wavelength, flux, v_helio, z, snr, snr_bands
+                
         except Exception as e:
-            print(f"读取FITS文件出错: {str(e)}")
-            return None, None, 0, 0
+            print(f"读取{file_path}出错: {e}")
+            import traceback
+            traceback.print_exc()
+            return None, None, 0, 0, 0, 0
     
     def denoise_spectrum(self, wavelength, flux):
         """对光谱进行去噪处理"""
@@ -560,7 +702,13 @@ class LAMOSTPreprocessor:
             if np.isnan(new_flux).any():
                 n_nan = np.isnan(new_flux).sum()
                 print(f"重采样后有{n_nan}/{len(new_flux)}个点是NaN，将替换为0")
-                new_flux = np.nan_to_num(new_flux, nan=0.0)
+                new_flux = np.nan_to_num(new_flux, nan=0.0, posinf=0.0, neginf=0.0)
+                
+            # 额外检查是否存在无限值
+            if np.isinf(new_flux).any():
+                n_inf = np.isinf(new_flux).sum()
+                print(f"重采样后有{n_inf}/{len(new_flux)}个点是无限值，将替换为0")
+                new_flux = np.nan_to_num(new_flux, nan=0.0, posinf=0.0, neginf=0.0)
                 
             return new_wavelength, new_flux
         except Exception as e:
@@ -572,41 +720,55 @@ class LAMOSTPreprocessor:
     def normalize_spectrum(self, flux):
         """对光谱进行归一化处理"""
         try:
-            # 连续谱归一化 (简单的最大值归一化)
-            valid_flux = flux[~np.isnan(flux)]
-            if len(valid_flux) == 0:
+            # 检查数据有效性
+            if flux is None or len(flux) == 0:
+                print("无效的流量数据，无法归一化")
+                return None
+                
+            # 处理全为NaN的情况
+            if np.isnan(flux).all():
                 print("所有流量值都是NaN，无法归一化")
                 return None
             
+            # 连续谱归一化 (简单的最大值归一化)
+            valid_mask = ~np.isnan(flux) & ~np.isinf(flux)
+            valid_flux = flux[valid_mask]
+            
+            if len(valid_flux) == 0:
+                print("没有有效的流量值，无法归一化")
+                return None
+            
             # 最大最小值归一化
-            flux_min = np.nanmin(flux)
-            flux_max = np.nanmax(flux)
+            flux_min = np.min(valid_flux)
+            flux_max = np.max(valid_flux)
             
             print(f"归一化：最小值={flux_min}，最大值={flux_max}")
             
-            if np.isclose(flux_max, flux_min) or np.isinf(flux_max) or np.isinf(flux_min):
-                print(f"流量范围无效: min={flux_min}, max={flux_max}")
-                return None
+            if np.isclose(flux_max, flux_min):
+                print(f"流量范围无效: min={flux_min}, max={flux_max}，设置为0-1范围")
+                normalized_flux = np.zeros_like(flux)
+                normalized_flux[valid_mask] = 0.5  # 所有有效值设为0.5
+                return normalized_flux, {'flux_min': flux_min, 'flux_max': flux_max}
             
-            normalized_flux = (flux - flux_min) / (flux_max - flux_min)
+            # 创建归一化后的数组
+            normalized_flux = np.zeros_like(flux)
+            normalized_flux[valid_mask] = (valid_flux - flux_min) / (flux_max - flux_min)
             
             # 确保所有值都严格在0-1范围内
             normalized_flux = np.clip(normalized_flux, 0.0, 1.0)
             
-            # 检查归一化结果是否有效
+            # 替换无效值
+            normalized_flux[~valid_mask] = 0.0
+            
+            # 最终检查确保没有NaN或无限值
             if np.isnan(normalized_flux).any() or np.isinf(normalized_flux).any():
-                print("归一化后出现无效值(NaN或Inf)")
-                if len(normalized_flux) < 20:
-                    print(f"归一化结果: {normalized_flux}")
-                # 尝试替换无效值
+                print("归一化后仍有无效值，进行最终替换")
                 normalized_flux = np.nan_to_num(normalized_flux, nan=0.0, posinf=1.0, neginf=0.0)
                 
-            return normalized_flux
+            return normalized_flux, {'flux_min': flux_min, 'flux_max': flux_max}
         except Exception as e:
             print(f"归一化失败: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
+            return None, None
     
     def correct_wavelength(self, wavelength, flux):
         """对光谱进行波长标准化校正
@@ -843,7 +1005,7 @@ class LAMOSTPreprocessor:
                 normalized_flux = normalized_flux * (2.0 / final_max)
             
             print("连续谱归一化完成")
-            return normalized_flux
+            return normalized_flux, {'flux_min': np.min(flux_valid), 'flux_max': np.max(flux_valid)}
         
         except Exception as e:
             print(f"连续谱归一化失败: {e}")
@@ -853,9 +1015,9 @@ class LAMOSTPreprocessor:
             try:
                 mean_val = np.mean(flux[~np.isnan(flux)]) if np.any(~np.isnan(flux)) else 1.0
                 normalized = flux / mean_val
-                return np.clip(normalized, 0.0, 2.0)  # 确保输出限制在更合理的范围内
+                return np.clip(normalized, 0.0, 2.0), {'flux_min': np.min(flux), 'flux_max': np.max(flux)}  # 确保输出限制在更合理的范围内
             except:
-                return flux
+                return flux, {'flux_min': None, 'flux_max': None}
     
     def denoise_spectrum_second(self, wavelength, flux):
         """对光谱进行二次去噪处理，更强地移除噪声，但保留明显的特征"""
@@ -982,86 +1144,122 @@ class LAMOSTPreprocessor:
         try:
             # 读取FITS文件
             print(f"处理光谱: {spec_file}")
-            wavelength, flux, v_helio, z = self.read_fits_file(spec_file)
+            wavelength, flux, v_helio, z_fits, snr, snr_bands = self.read_fits_file(spec_file)
             if wavelength is None or flux is None:
                 print(f"无法读取FITS文件: {spec_file}")
                 return None
             
-            # 数据验证检查 - 原始数据
-            print("\n=== 数据验证检查 ===")
-            print(f"原始数据统计:")
-            print(f"波长范围: {wavelength[0]:.2f} - {wavelength[-1]:.2f}")
-            print(f"流量统计: 最小值={np.min(flux):.2f}, 最大值={np.max(flux):.2f}, 均值={np.mean(flux):.2f}, 标准差={np.std(flux):.2f}")
-            print(f"是否包含NaN: {np.isnan(flux).any()}")
-            print(f"是否包含无穷值: {np.isinf(flux).any()}")
+            # 检查数据有效性
+            if np.isnan(flux).all() or len(flux) == 0:
+                print(f"文件{spec_file}中的流量数据全为NaN或为空")
+                return None
+            
+            print(f"原始数据: 波长范围{wavelength[0]}~{wavelength[-1]}, 点数={len(wavelength)}")
+            
+            # 获取红移数据
+            z = z_fits  # 优先使用从fits文件中读取的红移值
+            cv = 0      # 视向速度默认值
+            try:
+                # 尝试从文件名匹配到CSV中的记录获取红移和视向速度
+                base_file = os.path.basename(spec_file)
+                if '.' in base_file:
+                    base_file = base_file.split('.')[0]
+                
+                for csv_file in self.csv_files:
+                    if os.path.exists(csv_file):
+                        df = pd.read_csv(csv_file)
+                        
+                        # 检查CSV是否有spec列
+                        if 'spec' in df.columns:
+                            # 在CSV中查找匹配记录
+                            matches = df[df['spec'].str.contains(base_file, case=False, na=False)]
+                            if not matches.empty:
+                                # 如果z值为0且CSV中有z列，则从CSV读取
+                                if z == 0 and 'z' in df.columns:
+                                    z = matches.iloc[0]['z']
+                                    print(f"从CSV找到红移值: z = {z}")
+                                
+                                # 读取视向速度 - 从cv列
+                                if 'cv' in df.columns:
+                                    cv = matches.iloc[0]['cv']
+                                    print(f"从CSV找到视向速度: cv = {cv} km/s")
+                                    # 如果视向速度值有效，更新v_helio
+                                    if not pd.isna(cv) and cv != 0:
+                                        v_helio = cv
+                                        print(f"使用CSV中的视向速度值: {v_helio} km/s")
+                                break
+            except Exception as e:
+                print(f"查找红移或视向速度数据出错: {e}")
+                # 出错时使用默认值或已读取的值
+                
+            # 如果fits中未找到信噪比数据，尝试从CSV获取
+            if all(v == 0 for v in snr_bands.values()) and 'spec' in df.columns:
+                for band in snr_bands:
+                    if band in df.columns and not matches.empty:
+                        snr_bands[band] = matches.iloc[0][band]
+                        print(f"从CSV找到{band}波段信噪比: {snr_bands[band]}")
+            
+            # 检查红移和视向速度值是否为NaN
+            if pd.isna(z):
+                print("警告: 红移值为NaN，设置为0")
+                z = 0
+            if pd.isna(v_helio):
+                print("警告: 视向速度值为NaN，设置为0")
+                v_helio = 0
             
             # 1. 波长校正
             wavelength_calibrated = self.correct_wavelength(wavelength, flux)
-            print(f"\n波长校正后统计:")
-            print(f"波长范围: {wavelength_calibrated[0]:.2f} - {wavelength_calibrated[-1]:.2f}")
+            print(f"波长校正后: 波长范围{wavelength_calibrated[0]}~{wavelength_calibrated[-1]}")
             
             # 2. 视向速度校正
             wavelength_corrected = self.correct_velocity(wavelength_calibrated, flux, v_helio)
-            print(f"\n视向速度校正后统计:")
-            print(f"波长范围: {wavelength_corrected[0]:.2f} - {wavelength_corrected[-1]:.2f}")
+            print(f"视向速度校正后: 波长范围{wavelength_corrected[0]}~{wavelength_corrected[-1]}")
             
             # 3. 去噪
             flux_denoised = self.denoise_spectrum(wavelength_corrected, flux)
             if flux_denoised is None:
                 print(f"去噪{spec_file}失败")
                 return None
-                
-            print(f"\n去噪后统计:")
-            print(f"流量统计: 最小值={np.min(flux_denoised):.2f}, 最大值={np.max(flux_denoised):.2f}, 均值={np.mean(flux_denoised):.2f}, 标准差={np.std(flux_denoised):.2f}")
             
             # 4. 红移校正
             wavelength_rest = self.correct_redshift(wavelength_corrected, flux_denoised, z)
-            print(f"\n红移校正后统计:")
-            print(f"波长范围: {wavelength_rest[0]:.2f} - {wavelength_rest[-1]:.2f}")
+            print(f"红移校正后: 波长范围{wavelength_rest[0]}~{wavelength_rest[-1]}")
             
             # 5. 重采样
-            print(f"\n重采样参数:")
-            print(f"目标波长范围: {self.wavelength_range}, 目标点数: {self.n_points}")
+            print(f"重采样到波长范围: {self.wavelength_range}, 点数={self.n_points}")
             wavelength_resampled, flux_resampled = self.resample_spectrum(wavelength_rest, flux_denoised)
-            
-            print(f"\n重采样后统计:")
-            print(f"波长范围: {wavelength_resampled[0]:.2f} - {wavelength_resampled[-1]:.2f}")
-            print(f"流量统计: 最小值={np.min(flux_resampled):.2f}, 最大值={np.max(flux_resampled):.2f}, 均值={np.mean(flux_resampled):.2f}, 标准差={np.std(flux_resampled):.2f}")
+            if wavelength_resampled is None or flux_resampled is None:
+                print(f"重采样{spec_file}失败")
+                return None
             
             # 6. 连续谱归一化
-            flux_continuum = self.normalize_continuum(wavelength_resampled, flux_resampled)
-            print(f"\n连续谱归一化后统计:")
-            print(f"流量统计: 最小值={np.min(flux_continuum):.2f}, 最大值={np.max(flux_continuum):.2f}, 均值={np.mean(flux_continuum):.2f}, 标准差={np.std(flux_continuum):.2f}")
-            
-            # 7. 第二次去噪
-            flux_denoised_second = self.denoise_spectrum(wavelength_resampled, flux_continuum)
-            if flux_denoised_second is None:
-                print(f"第二次去噪{spec_file}失败")
+            flux_continuum, continuum_params = self.normalize_continuum(wavelength_resampled, flux_resampled)
+            if flux_continuum is None:
+                print(f"连续谱归一化{spec_file}失败")
                 return None
-                
-            print(f"\n第二次去噪后统计:")
-            print(f"流量统计: 最小值={np.min(flux_denoised_second):.2f}, 最大值={np.max(flux_denoised_second):.2f}, 均值={np.mean(flux_denoised_second):.2f}, 标准差={np.std(flux_denoised_second):.2f}")
             
-            # 8. 最终归一化
-            flux_normalized = self.normalize_spectrum(flux_denoised_second)
-            print(f"\n最终归一化后统计:")
-            print(f"流量统计: 最小值={np.min(flux_normalized):.2f}, 最大值={np.max(flux_normalized):.2f}, 均值={np.mean(flux_normalized):.2f}, 标准差={np.std(flux_normalized):.2f}")
-            print("=== 数据验证检查结束 ===\n")
+            # 7. 二次去噪
+            flux_denoised_second = self.denoise_spectrum_second(wavelength_resampled, flux_continuum)
             
-            # 检查最终数据的有效性
-            if np.isnan(flux_normalized).any() or np.isinf(flux_normalized).any():
-                print(f"警告: 最终数据包含NaN或无穷值")
-                return None
-                
-            if np.all(flux_normalized == 0):
-                print(f"警告: 最终数据全为零")
-                return None
-                
-            if np.std(flux_normalized) < 1e-10:
-                print(f"警告: 最终数据标准差过小")
+            # 8. 最终归一化 (最大最小值归一化)
+            print(f"对流量进行最终归一化")
+            flux_normalized, norm_params = self.normalize_spectrum(flux_denoised_second)
+            if flux_normalized is None:
+                print(f"归一化{spec_file}失败")
                 return None
             
             print(f"成功处理光谱: {spec_file}")
+            
+            # 记录标准化参数
+            normalization_params = {
+                # 波长范围信息
+                'wavelength_range': self.wavelength_range,
+                'log_step': self.log_step,
+                'flux_min': norm_params['flux_min'] if norm_params else None,
+                'flux_max': norm_params['flux_max'] if norm_params else None,
+                'mean': np.mean(flux_normalized),
+                'std': np.std(flux_normalized)
+            }
             
             # 返回处理后的光谱和标签，包括中间处理结果
             result = {
@@ -1082,7 +1280,10 @@ class LAMOSTPreprocessor:
                     'flux_continuum': flux_continuum,
                     'flux_denoised_second': flux_denoised_second,
                     'z': z,  # 保存红移值
-                    'v_helio': v_helio  # 保存视向速度
+                    'v_helio': v_helio,
+                    'snr': snr,  # 信噪比
+                    'snr_bands': snr_bands,  # 各波段信噪比
+                    'normalization_params': normalization_params
                 },
                 'validation_metrics': {
                     'quality_metrics': {
@@ -1339,22 +1540,28 @@ class LAMOSTPreprocessor:
                         all_data = pickle.load(f)
                     print(f"已加载保存的处理结果，共{len(all_data)}条记录")
                     
-                    # 检查是否所有元素都已完成处理
+                    # 读取CSV文件来获取总记录数
                     dataframes = self.read_csv_data()
-                    if dataframes:
-                        all_complete = True
-                        for df, element in zip(dataframes, [os.path.splitext(os.path.basename(csv))[0] for csv in self.csv_files]):
-                            element_records = sum(1 for item in all_data if item.get('element') == element)
-                            if element_records < len(df):
-                                all_complete = False
-                                break
-                        
-                        if all_complete:
-                            print("所有元素的数据都已处理完成，将直接返回结果")
+                    if not dataframes:
+                        print("错误: 没有有效的数据集")
+                        return np.array([]), np.array([]), np.array([]), np.array([])
+                    
+                    # 计算总数据量
+                    total_records = sum(len(df) for df in dataframes)
+                    
+                    # 显示进度并询问是否继续
+                    progress_percent = len(all_data)/total_records * 100
+                    print(f"当前进度: {len(all_data)}/{total_records} 条记录 ({progress_percent:.2f}%)")
+                    
+                    if len(all_data) >= total_records:
+                        print(f"所有数据已处理完成，进入数据准备阶段")
+                        return self._prepare_arrays(all_data)
+                    else:
+                        if input(f"是否继续处理剩余{total_records - len(all_data)}条数据？(y/n): ").lower() != 'y':
+                            print("跳过处理阶段，直接使用已有数据")
                             return self._prepare_arrays(all_data)
                         else:
-                            print("发现未完成处理的元素，将继续处理")
-                            
+                            print(f"继续处理剩余数据...")
                 except Exception as e:
                     print(f"加载进度文件出错: {e}，将重新处理所有数据")
                     all_data = []
@@ -1365,22 +1572,28 @@ class LAMOSTPreprocessor:
                         all_data = pickle.load(f)
                     print(f"从Google Drive加载处理结果，共{len(all_data)}条记录")
                     
-                    # 检查是否所有元素都已完成处理
+                    # 读取CSV文件来获取总记录数
                     dataframes = self.read_csv_data()
-                    if dataframes:
-                        all_complete = True
-                        for df, element in zip(dataframes, [os.path.splitext(os.path.basename(csv))[0] for csv in self.csv_files]):
-                            element_records = sum(1 for item in all_data if item.get('element') == element)
-                            if element_records < len(df):
-                                all_complete = False
-                                break
-                        
-                        if all_complete:
-                            print("所有元素的数据都已处理完成，将直接返回结果")
+                    if not dataframes:
+                        print("错误: 没有有效的数据集")
+                        return np.array([]), np.array([]), np.array([]), np.array([])
+                    
+                    # 计算总数据量
+                    total_records = sum(len(df) for df in dataframes)
+                    
+                    # 显示进度并询问是否继续
+                    progress_percent = len(all_data)/total_records * 100
+                    print(f"当前进度: {len(all_data)}/{total_records} 条记录 ({progress_percent:.2f}%)")
+                    
+                    if len(all_data) >= total_records:
+                        print(f"所有数据已处理完成，进入数据准备阶段")
+                        return self._prepare_arrays(all_data)
+                    else:
+                        if input(f"是否继续处理剩余{total_records - len(all_data)}条数据？(y/n): ").lower() != 'y':
+                            print("跳过处理阶段，直接使用已有数据")
                             return self._prepare_arrays(all_data)
                         else:
-                            print("发现未完成处理的元素，将继续处理")
-                            
+                            print(f"继续处理剩余数据...")
                 except Exception as e:
                     print(f"加载Google Drive进度文件出错: {e}，将重新处理所有数据")
                     all_data = []
@@ -1391,9 +1604,13 @@ class LAMOSTPreprocessor:
             print("错误: 没有有效的数据集")
             return np.array([]), np.array([]), np.array([]), np.array([])
         
+        # 计算总数据量
+        total_records = sum(len(df) for df in dataframes)
+        print(f"总数据量: {total_records}条记录")
+        
         # 处理每个元素的数据
         processed_records = 0
-        for i, (df, element) in enumerate(zip(dataframes, [os.path.splitext(os.path.basename(csv))[0] for csv in self.csv_files])):
+        for i, (df, element) in enumerate(zip(dataframes, ['C_FE', 'MG_FE', 'CA_FE'])):
             # 统计已处理的元素记录数
             element_records = sum(1 for item in all_data if item.get('element') == element)
             # 元素的总记录数
@@ -1403,42 +1620,36 @@ class LAMOSTPreprocessor:
             if element_records >= element_total:
                 print(f"{element}数据已在之前的运行中处理完成 ({element_records}/{element_total}条记录)")
                 processed_records += element_records
-                continue  # 跳过已完成的元素
-            
-            print(f"\n处理元素 {i+1}/{len(dataframes)}: {element}")
-            print(f"已处理: {element_records}/{element_total}条记录")
-            print(f"当前进度: [{element_records/element_total:.2%}]")
-            
-            # 如果元素已部分处理，从未处理的部分继续
-            start_idx = element_records
-            print(f"从索引{start_idx}继续处理...")
-            
-            results = self.process_element_data(df, element, start_idx=start_idx)
-            if results:  # 只有在成功获取结果时才添加
+            else:
+                print(f"\n处理元素 {i+1}/{len(dataframes)}: {element}")
+                print(f"已处理: {element_records}/{element_total}条记录")
+                print(f"当前进度: [{processed_records/total_records:.2%}]")
+                
+                # 如果元素已部分处理，从未处理的部分继续
+                start_idx = element_records
+                print(f"从索引{start_idx}继续处理...")
+                
+                results = self.process_element_data(df, element, start_idx=start_idx)
                 all_data.extend(results)
-                processed_records = len(results)  # 只计算当前元素的处理记录
+                processed_records += len(results)
                 
-                # 更新进度
-                progress = processed_records / element_total
-                print(f"进度: [{progress:.2%}] 已完成{processed_records}/{element_total}条记录")
-                
-                # 保存总进度
-                try:
-                    with open(progress_file, 'wb') as f:
-                        pickle.dump(all_data, f)
-                    print("已保存处理进度")
-                except Exception as e:
-                    print(f"保存进度文件失败: {e}")
+                # 更新总体进度
+                overall_progress = processed_records / total_records
+                print(f"总进度: [{overall_progress:.2%}] 已完成{processed_records}/{total_records}条记录")
             
+            # 保存总进度
+            with open(progress_file, 'wb') as f:
+                pickle.dump(all_data, f)
+                
             # 输出阶段性统计
             elapsed_time = time.time() - start_time
             records_per_second = processed_records / elapsed_time if elapsed_time > 0 else 0
-            print(f"当前已处理数据量: {processed_records}条")
+            print(f"当前已处理总数据量: {len(all_data)}条")
             print(f"处理速度: {records_per_second:.2f}条/秒")
             
             # 估计剩余时间
-            if processed_records < element_total and records_per_second > 0:
-                remaining_records = element_total - processed_records
+            if processed_records < total_records and records_per_second > 0:
+                remaining_records = total_records - processed_records
                 estimated_time = remaining_records / records_per_second
                 hours, remainder = divmod(estimated_time, 3600)
                 minutes, seconds = divmod(remainder, 60)
@@ -1457,7 +1668,7 @@ class LAMOSTPreprocessor:
         hours, remainder = divmod(elapsed_time, 3600)
         minutes, seconds = divmod(remainder, 60)
         print(f"\n处理完成! 总耗时: {int(hours)}小时 {int(minutes)}分钟 {int(seconds)}秒")
-        print(f"处理记录: {len(all_data)}条")
+        print(f"处理记录: {len(all_data)}/{total_records} ({len(all_data)/total_records:.2%})")
         
         # 保存文件缓存
         self._save_files_cache()
@@ -1466,124 +1677,79 @@ class LAMOSTPreprocessor:
         return self._prepare_arrays(all_data)
     
     def _prepare_arrays(self, all_data):
-        """将处理结果转换为NumPy数组并保存"""
-        # 在转换之前检查并过滤无效数据
-        valid_data = []
-        invalid_count = 0
-        spectrum_lengths = []
-        
-        for item in all_data:
-            # 获取光谱数据，支持新旧缓存结构
-            spectrum = None
-            if 'data' in item:
-                spectrum = item['data']
-            elif 'spectrum' in item:
-                spectrum = item['spectrum']
+        """准备训练、验证和测试数据数组"""
+        if not all_data:
+            print("没有可用的数据")
+            return None, None, None, None
             
-            # 检查spectrum是否是有效的数组
-            if spectrum is not None and isinstance(spectrum, (list, np.ndarray)) and len(spectrum) > 0:
-                spectrum_lengths.append(len(spectrum))
-                valid_data.append(item)
-            else:
-                invalid_count += 1
+        # 提取光谱数据和标签
+        spectra = []
+        labels = []
+        filenames = []
+        elements = []
         
-        if invalid_count > 0:
-            print(f"警告: 过滤了{invalid_count}条无效数据")
-        
-        if len(valid_data) == 0:
-            print("错误: 没有有效的处理结果")
-            return np.array([]), np.array([]), np.array([]), np.array([])
-        
-        # 检查所有光谱的长度是否一致
-        if len(set(spectrum_lengths)) > 1:
-            most_common_length = max(set(spectrum_lengths), key=spectrum_lengths.count)
-            print(f"警告: 光谱长度不一致! 发现{len(set(spectrum_lengths))}种不同长度")
-            print(f"最常见的长度为{most_common_length}，将其他长度的光谱过滤掉")
+        for data in all_data:
+            # 忽略无效数据
+            if not data or 'data' not in data or data['data'] is None:
+                continue
+                
+            # 获取光谱数据
+            spectrum = data['data']
+            # 检查光谱数据有效性
+            if spectrum is None or len(spectrum) == 0:
+                continue
+                
+            # 替换NaN和无穷值
+            if np.isnan(spectrum).any() or np.isinf(spectrum).any():
+                print(f"发现无效值，替换为0: {data['filename']}")
+                spectrum = np.nan_to_num(spectrum, nan=0.0, posinf=0.0, neginf=0.0)
             
-            # 过滤掉长度不一致的数据
-            consistent_data = [item for item, length in zip(valid_data, spectrum_lengths) 
-                              if length == most_common_length]
-            
-            print(f"保留了{len(consistent_data)}/{len(valid_data)}条长度一致的数据")
-            valid_data = consistent_data
+            # 获取标签
+            label = data['metadata']['label']
+            # 检查标签有效性
+            if pd.isna(label):
+                print(f"跳过数据，标签为NaN: {data['filename']}")
+                continue
+                
+            spectra.append(spectrum)
+            labels.append(label)
+            filenames.append(data['filename'])
+            elements.append(data['metadata']['element'])
         
+        if not spectra:
+            print("处理后没有有效数据")
+            return None, None, None, None
+            
         # 转换为NumPy数组
-        try:
-            # 支持新旧缓存结构
-            X = np.array([item.get('data', item.get('spectrum')) for item in valid_data])
-            
-            # 获取标签，支持新旧缓存结构
-            y_values = []
-            for item in valid_data:
-                if 'metadata' in item and 'label' in item['metadata']:
-                    y_values.append(item['metadata']['label'])
-                else:
-                    y_values.append(item.get('label'))
-            y = np.array(y_values)
-            
-            # 获取元素信息，支持新旧缓存结构
-            element_values = []
-            for item in valid_data:
-                if 'metadata' in item and 'element' in item['metadata']:
-                    element_values.append(item['metadata']['element'])
-                else:
-                    element_values.append(item.get('element', ''))
-            elements = np.array(element_values)
-            
-            # 获取文件名，支持新旧缓存结构
-            filename_values = []
-            for item in valid_data:
-                if 'metadata' in item and 'filename' in item['metadata']:
-                    filename_values.append(item['metadata']['filename'])
-                else:
-                    filename_values.append(item.get('filename', ''))
-            filenames = np.array(filename_values)
-            
-            print(f"成功创建数据数组: X形状={X.shape}, y形状={y.shape}")
-        except ValueError as e:
-            print(f"创建数组时出错: {e}")
-            # 尝试更详细地诊断问题
-            lengths = [len(item['spectrum']) for item in valid_data]
-            unique_lengths = set(lengths)
-            if len(unique_lengths) > 1:
-                print(f"光谱长度不一致: {unique_lengths}")
-                length_counts = {length: lengths.count(length) for length in unique_lengths}
-                print(f"各长度数量: {length_counts}")
-                
-                # 选择最常见的长度
-                most_common = max(length_counts.items(), key=lambda x: x[1])
-                print(f"最常见的长度为: {most_common[0]}，出现{most_common[1]}次")
-                
-                # 只保留最常见长度的数据
-                filtered_data = [item for item, length in zip(valid_data, lengths) 
-                                if length == most_common[0]]
-                print(f"过滤后保留{len(filtered_data)}/{len(valid_data)}条数据")
-                
-                # 重新尝试创建数组
-                X = np.array([item['spectrum'] for item in filtered_data])
-                y = np.array([item['label'] for item in filtered_data])
-                elements = np.array([item.get('element', '') for item in filtered_data])
-                filenames = np.array([item['filename'] for item in filtered_data])
-                valid_data = filtered_data
-            else:
-                # 如果不是长度问题，可能是其他类型不一致
-                print("检查数据类型:")
-                sample_types = [type(item['spectrum']) for item in valid_data[:5]]
-                print(f"前5条记录的光谱类型: {sample_types}")
-                
-                # 尝试将所有数据转换为相同类型
-                X = np.array([np.array(item['spectrum'], dtype=float) for item in valid_data])
-                y = np.array([item['label'] for item in valid_data])
-                elements = np.array([item.get('element', '') for item in valid_data])
-                filenames = np.array([item['filename'] for item in valid_data])
+        X = np.array(spectra, dtype=np.float32)
+        y = np.array(labels, dtype=np.float32)
         
-        # 保存处理后的数据
-        np.savez(os.path.join(self.output_dir, 'processed_data.npz'),
-                X=X, y=y, elements=elements, filenames=filenames)
+        # 最终检查X中的无效值
+        n_samples, n_features = X.shape
+        for i in range(n_samples):
+            if np.isnan(X[i]).any() or np.isinf(X[i]).any():
+                nan_count = np.isnan(X[i]).sum()
+                inf_count = np.isinf(X[i]).sum()
+                print(f"警告: 样本 {i} ({filenames[i]}) 包含 {nan_count} 个NaN和 {inf_count} 个无限值，替换为0")
+                X[i] = np.nan_to_num(X[i], nan=0.0, posinf=0.0, neginf=0.0)
         
-        print(f"数据处理完成，总数据量: {len(X)}条")
+        # 检查y中的无效值
+        if np.isnan(y).any() or np.isinf(y).any():
+            nan_count = np.isnan(y).sum()
+            inf_count = np.isinf(y).sum()
+            print(f"警告: 标签中包含 {nan_count} 个NaN和 {inf_count} 个无限值")
+            # 找出包含NaN的样本
+            nan_indices = np.where(np.isnan(y))[0]
+            for idx in nan_indices:
+                print(f"  样本 {idx} ({filenames[idx]}) 的标签为NaN")
+            # 替换NaN为中位数
+            if nan_count > 0:
+                median_y = np.nanmedian(y)
+                print(f"  使用中位数 {median_y} 替换标签中的NaN")
+                y = np.nan_to_num(y, nan=median_y)
         
-        return X, y, elements, filenames
+        print(f"准备完成 {len(X)} 个样本, 特征数: {X.shape[1]}")
+        return X, y, filenames, elements
     
     def split_dataset(self, X, y, elements, ask_for_split=True):
         """按照7:1:2的比例分割数据集为训练集、验证集和测试集，可选择是否分割"""
@@ -1599,7 +1765,7 @@ class LAMOSTPreprocessor:
             if response != 'y':
                 print(f"跳过数据集划分，将完整数据集保存到 {os.path.join(self.output_dir, 'full_dataset.npz')}")
                 
-                # 保存完整数据集
+                # 保存完整数据集，使用已有的数据
                 np.savez(os.path.join(self.output_dir, 'full_dataset.npz'),
                         X=X, y=y, elements=elements)
                 
@@ -2009,14 +2175,17 @@ class LAMOSTPreprocessor:
                 return
             
             # 6. 连续谱归一化
-            flux_continuum = self.normalize_continuum(wavelength_resampled, flux_resampled)
+            flux_continuum, continuum_params = self.normalize_continuum(wavelength_resampled, flux_resampled)
+            if flux_continuum is None:
+                print(f"连续谱归一化{spec_file}失败")
+                return None
             
             # 7. 二次去噪
             flux_denoised_second = self.denoise_spectrum_second(wavelength_resampled, flux_continuum)
             
             # 8. 最终归一化 (最大最小值归一化)
             print(f"对流量进行最终归一化")
-            flux_normalized = self.normalize_spectrum(flux_denoised_second)
+            flux_normalized, norm_params = self.normalize_spectrum(flux_denoised_second)
             if flux_normalized is None:
                 print(f"归一化{spec_file}失败")
                 return
