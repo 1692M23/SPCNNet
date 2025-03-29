@@ -158,7 +158,7 @@ training_config = {
     'weight_decay': 1e-4,
     'force_new_model': True,
     'num_epochs': 100,
-    'early_stopping_patience': 15,
+    'early_stopping_patience': 25,
     'device': device_config['device'],  # 使用检测到的设备
     'device_type': device_config['device_type'],  # 设备类型（'cpu', 'cuda', 或 'tpu'）
     'multi_device': device_config['multi_device'],  # 是否有多个设备可用
