@@ -341,7 +341,7 @@ class LAMOSTPreprocessor:
         file_path = self._get_file_extension(fits_file)
         if file_path is None:
             print(f"无法找到文件: {fits_file}，查找路径: {self.fits_dir}")
-            return None, None, 0, 0, 0, 0
+            return None, None, 0, 0, 0, {}
         
         print(f"读取文件: {file_path}")
         try:
@@ -360,7 +360,12 @@ class LAMOSTPreprocessor:
                       f"BITPIX={header.get('BITPIX')}")
                 
                 # 尝试获取视向速度信息(如果有)
-                v_helio = header.get('V_HELIO', 0)  # 日心视向速度 (km/s)
+                v_helio = 0
+                for key in ['V_HELIO', 'RV', 'VELOCITY', 'v_helio', 'rv', 'velocity']:
+                    if key in header:
+                        v_helio = header.get(key, 0)
+                        print(f"从FITS头信息中找到视向速度: {key} = {v_helio}")
+                        break
                 
                 # 尝试获取红移值(可能有不同的关键字)
                 z = 0
@@ -522,11 +527,11 @@ class LAMOSTPreprocessor:
                 # 进行最后的数据检查
                 if flux is None:
                     print("无法从FITS文件提取流量数据")
-                    return None, None, 0, 0, 0, 0
+                    return None, None, 0, 0, 0, {}
                 
                 if wavelength is None:
                     print("无法生成波长数据")
-                    return None, None, 0, 0, 0, 0
+                    return None, None, 0, 0, 0, {}
                 
                 # 确保数据类型是浮点数
                 flux = flux.astype(np.float64)
@@ -546,7 +551,7 @@ class LAMOSTPreprocessor:
             print(f"读取{file_path}出错: {e}")
             import traceback
             traceback.print_exc()
-            return None, None, 0, 0, 0, 0
+            return None, None, 0, 0, 0, {}
     
     def denoise_spectrum(self, wavelength, flux):
         """对光谱进行去噪处理"""
@@ -1158,6 +1163,7 @@ class LAMOSTPreprocessor:
         try:
             # 读取FITS文件
             print(f"处理光谱: {spec_file}")
+            # 注意：这里只解包6个值，与read_fits_file返回值匹配
             wavelength, flux, v_helio, z_fits, snr, snr_bands = self.read_fits_file(spec_file)
             if wavelength is None or flux is None:
                 print(f"无法读取FITS文件: {spec_file}")
@@ -1193,25 +1199,44 @@ class LAMOSTPreprocessor:
                                     z = matches.iloc[0]['z']
                                     print(f"从CSV找到红移值: z = {z}")
                                 
-                                # 读取视向速度 - 从cv列
-                                if 'cv' in df.columns:
-                                    cv = matches.iloc[0]['cv']
-                                    print(f"从CSV找到视向速度: cv = {cv} km/s")
-                                    # 如果视向速度值有效，更新v_helio
-                                    if not pd.isna(cv) and cv != 0:
-                                        v_helio = cv
-                                        print(f"使用CSV中的视向速度值: {v_helio} km/s")
+                                # 读取视向速度 - 从cv或rv列
+                                for vel_col in ['cv', 'rv', 'velocity', 'RV']:
+                                    if vel_col in df.columns:
+                                        cv = matches.iloc[0][vel_col]
+                                        print(f"从CSV找到视向速度: {vel_col} = {cv} km/s")
+                                        # 如果视向速度值有效，更新v_helio
+                                        if not pd.isna(cv) and cv != 0:
+                                            v_helio = cv
+                                            print(f"使用CSV中的视向速度值: {v_helio} km/s")
+                                        break
                                 break
             except Exception as e:
                 print(f"查找红移或视向速度数据出错: {e}")
                 # 出错时使用默认值或已读取的值
                 
             # 如果fits中未找到信噪比数据，尝试从CSV获取
-            if all(v == 0 for v in snr_bands.values()) and 'spec' in df.columns:
-                for band in snr_bands:
-                    if band in df.columns and not matches.empty:
-                        snr_bands[band] = matches.iloc[0][band]
-                        print(f"从CSV找到{band}波段信噪比: {snr_bands[band]}")
+            if all(v == 0 for v in snr_bands.values()):
+                try:
+                    for csv_file in self.csv_files:
+                        if os.path.exists(csv_file):
+                            df = pd.read_csv(csv_file)
+                            
+                            # 检查CSV是否有spec列
+                            if 'spec' in df.columns:
+                                # 在CSV中查找匹配记录
+                                base_file = os.path.basename(spec_file)
+                                if '.' in base_file:
+                                    base_file = base_file.split('.')[0]
+                                
+                                matches = df[df['spec'].str.contains(base_file, case=False, na=False)]
+                                if not matches.empty:
+                                    for band in snr_bands:
+                                        if band in df.columns:
+                                            snr_bands[band] = matches.iloc[0][band]
+                                            print(f"从CSV找到{band}波段信噪比: {snr_bands[band]}")
+                                    break  # 找到匹配项后退出循环
+                except Exception as e:
+                    print(f"从CSV读取信噪比失败: {e}")
             
             # 检查红移和视向速度值是否为NaN
             if pd.isna(z):
