@@ -20,7 +20,7 @@ import traceback
 
 # 导入自定义模块
 import config
-from model import SpectralResCNN, SpectralResCNNEnsemble, train, evaluate_model, load_trained_model
+from model import SpectralResCNN, SpectralResCNN_GCN, SpectralResCNNEnsemble, train, evaluate_model, load_trained_model
 from evaluation import evaluate_all_elements, plot_predictions_vs_true, plot_metrics_comparison
 from utils import CacheManager, ProgressManager, ask_clear_cache, setup_analysis_directories
 from multi_element_processor import MultiElementProcessor
@@ -319,8 +319,12 @@ def train_and_evaluate_model(train_loader, val_loader, test_loader, element, con
     logger.info(f"验证集数据范围: [{val_data[0].min():.6f}, {val_data[0].max():.6f}]")
     logger.info(f"验证集标签范围: [{val_data[1].min():.6f}, {val_data[1].max():.6f}]")
     
-    # 创建模型
-    model = SpectralResCNN(config.model_config['input_size']).to(config.training_config['device'])
+    # 在创建模型前，读取数据确定input_size
+    X, y, _ = load_data(os.path.join('processed_data', 'train_dataset.npz'), element)
+    actual_input_size = X.shape[1] if len(X.shape) == 2 else X.shape[2]
+
+    # 创建模型时传入实际尺寸
+    model = SpectralResCNN_GCN(actual_input_size).to(config.training_config['device'])
     logger.info(f"模型结构:\n{model}")
     
     # 设置超参数
@@ -639,7 +643,7 @@ def process_element(element, config=None, tune_hyperparams=False):
         test_loader = create_data_loaders(test_data[0], test_data[1], batch_size=config.training_config['batch_size'])
         
         # 创建模型
-        model = SpectralResCNN(config.model_config['input_size']).to(device)
+        model = SpectralResCNN_GCN(config.model_config['input_size']).to(device)
         
         # 尝试恢复训练
         resume_from = None

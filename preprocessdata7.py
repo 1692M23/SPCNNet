@@ -2039,14 +2039,7 @@ class LAMOSTPreprocessor:
                 return None, None, None, None
     
     def split_dataset(self, X, y, elements, ask_for_split=True):
-        """按照7:1:2的比例分割数据集为训练集、验证集和测试集，可选择是否分割"""
-        if len(X) == 0:
-            print("错误: 没有数据可以分割")
-            return (np.array([]), np.array([]), np.array([])), \
-                   (np.array([]), np.array([]), np.array([])), \
-                   (np.array([]), np.array([]), np.array([]))
-        
-        # 询问用户是否进行数据集划分
+        """将数据集分割为训练、验证和测试集"""
         if ask_for_split:
             response = input("是否要进行数据集划分？(y/n): ").lower()
             if response != 'y':
@@ -2061,7 +2054,25 @@ class LAMOSTPreprocessor:
                 # 返回完整数据集作为训练集，空数组作为验证集和测试集
                 return (X, y, elements), (np.array([]), np.array([]), np.array([])), (np.array([]), np.array([]), np.array([]))
         
-        # 原有的数据集分割逻辑
+        # 检查数据集大小，如果样本数量太少，无法进行分割
+        n_samples = X.shape[0]
+        if n_samples <= 5:  # 如果样本数量太少，不进行分割
+            print(f"警告: 样本数量({n_samples})太少，无法进行有效的数据集划分")
+            print(f"将相同的数据集用作训练、验证和测试集")
+            
+            # 保存相同的数据集
+            np.savez(os.path.join(self.output_dir, 'train_dataset.npz'),
+                    spectra=X, abundance=y, elements=elements)
+            np.savez(os.path.join(self.output_dir, 'val_dataset.npz'),
+                    spectra=X, abundance=y, elements=elements)
+            np.savez(os.path.join(self.output_dir, 'test_dataset.npz'),
+                    spectra=X, abundance=y, elements=elements)
+            
+            print(f"数据集保存完成: 每个集合 {n_samples} 条记录")
+            
+            return (X, y, elements), (X, y, elements), (X, y, elements)
+        
+        # 原有的数据集分割逻辑，用于样本数量足够的情况
         # 首先分割出测试集 (80% vs 20%)
         X_temp, X_test, y_temp, y_test, elements_temp, elements_test = train_test_split(
             X, y, elements, test_size=0.2, random_state=42)
@@ -2072,11 +2083,11 @@ class LAMOSTPreprocessor:
         
         # 保存数据集
         np.savez(os.path.join(self.output_dir, 'train_dataset.npz'),
-                X=X_train, y=y_train, elements=elements_train)
+                spectra=X_train, abundance=y_train, elements=elements_train)
         np.savez(os.path.join(self.output_dir, 'val_dataset.npz'),
-                X=X_val, y=y_val, elements=elements_val)
+                spectra=X_val, abundance=y_val, elements=elements_val)
         np.savez(os.path.join(self.output_dir, 'test_dataset.npz'),
-                X=X_test, y=y_test, elements=elements_test)
+                spectra=X_test, abundance=y_test, elements=elements_test)
         
         print(f"数据集分割完成:")
         print(f"训练集: {X_train.shape[0]}条 (70%)")
@@ -2084,7 +2095,6 @@ class LAMOSTPreprocessor:
         print(f"测试集: {X_test.shape[0]}条 (20%)")
         
         return (X_train, y_train, elements_train), (X_val, y_val, elements_val), (X_test, y_test, elements_test)
-
     
     def predict_abundance(self, fits_file, model):
         """使用已训练的模型预测单个光谱的丰度"""
@@ -2894,7 +2904,8 @@ class LAMOSTPreprocessor:
         """修改缓存管理器的验证功能，允许保存非字典格式的数据"""
         original_validate = self.cache_manager._validate_cache_data
         
-        def new_validate(data):
+        # 定义验证函数，避免使用lambda
+        def validate_func(data):
             # 如果是波长范围元组，直接返回True
             if isinstance(data, tuple) and len(data) == 2:
                 return True
@@ -2902,7 +2913,7 @@ class LAMOSTPreprocessor:
             return original_validate(data)
         
         # 替换验证方法
-        self.cache_manager._validate_cache_data = new_validate
+        self.cache_manager._validate_cache_data = validate_func
 
 def main():
     """主函数"""

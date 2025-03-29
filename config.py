@@ -68,32 +68,29 @@ data_config = {
 
 # 模型配置
 model_config = {
-    'model_dir': 'models',  # 模型保存目录
-    'input_size': 3907,  # 输入特征维度
-    'output_size': 1,  # 输出维度
-    'hidden_size': 256,  # 隐藏层大小
-    'num_layers': 2,  # 层数
-    'dropout': 0.1,  # 降低dropout率
-    'num_ensemble_models': 3,  # 集成模型数量
-    'dropout_rate': 0.5  # 默认dropout率
+    'model_dir': 'models',
+    'input_size': None,  # 设为None，表示模型将自动适应输入大小
+    'model_type': 'SpectralResCNN_GCN',  # 使用新的GCN模型
+    'model_params': {
+        'cnn_channels': 64,
+        'res_blocks': 3,
+        'gru_hidden': 64,
+        'gru_bidirectional': True,
+        'gcn_layers': 2,      # GCN层数
+        'fusion_channels': 64
+    }
 }
 
 # 训练配置
 training_config = {
-    'device': 'cuda' if torch.cuda.is_available() else 'cpu',
     'batch_size': 32,
+    'lr': 0.0005,            # 可能需要调整学习率适应新模型
+    'weight_decay': 1e-5,
     'num_epochs': 100,
-    'lr': 0.001,
-    'weight_decay': 1e-4,
-    'early_stopping_patience': 10,
-    'elements': ['C_FE', 'MG_FE', 'CA_FE'],  # 要预测的元素列表
-    'tune_hyperparams': False,  # 是否进行超参数调优
-    'batch_processing': {
-        'enabled': True,  # 是否启用批处理
-        'save_results_per_epoch': True,  # 是否每个epoch保存结果
-        'save_plots': True,  # 是否保存图表
-        'metrics_to_track': ['train_loss', 'val_loss', 'mae', 'rmse', 'r2'],  # 要跟踪的指标
-    }
+    'early_stopping_patience': 15,
+    'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+    'elements': ['C_FE', 'MG_FE', 'CA_FE'],
+    'resume_training': True
 }
 
 # 超参数调优配置

@@ -1093,3 +1093,219 @@ class CNNModel(nn.Module):
         x = self.fc(x)
         
         return x 
+
+class GraphConvLayer(nn.Module):
+    """光谱图卷积层
+    
+    将光谱数据视为图结构，相邻波长点之间有连接关系，
+    同时添加一些"跳跃连接"捕获远距离波长之间的关系。
+    """
+    def __init__(self, in_features, out_features):
+        super(GraphConvLayer, self).__init__()
+        self.linear = nn.Linear(in_features, out_features)
+        self.adj_matrix = None
+        
+    def forward(self, x):
+        """
+        输入 x: [batch_size, seq_len, in_features]
+        输出: [batch_size, seq_len, out_features]
+        """
+        batch_size, seq_len, _ = x.size()
+        
+        # 如果尚未构建邻接矩阵，则构建它（只需在第一次前向传播时构建）
+        if self.adj_matrix is None or self.adj_matrix.size(0) != seq_len:
+            # 创建默认邻接矩阵（相邻点连接 + 固定距离跳跃连接）
+            adj = self._build_spectral_adjacency(seq_len).to(x.device)
+            # 归一化邻接矩阵
+            adj = self._normalize_adj(adj)
+            self.adj_matrix = adj
+        
+        # 图卷积: X' = AXW
+        # 首先应用线性变换
+        support = self.linear(x)  # [batch, seq_len, out_features]
+        
+        # 然后应用邻接矩阵
+        output = torch.matmul(self.adj_matrix, support)  # [batch, seq_len, out_features]
+        
+        return output
+    
+    def _build_spectral_adjacency(self, seq_len):
+        """构建光谱数据的邻接矩阵"""
+        # 初始化邻接矩阵为单位矩阵（每个节点与自身相连）
+        adj = torch.eye(seq_len)
+        
+        # 添加相邻点的连接（一阶邻居）
+        for i in range(seq_len-1):
+            adj[i, i+1] = 1.0
+            adj[i+1, i] = 1.0
+        
+        # 添加跳跃连接（特定间隔的节点相连，捕获远程关系）
+        # 这里添加间隔为5和10的跳跃连接
+        for skip in [5, 10, 20]:
+            for i in range(seq_len - skip):
+                adj[i, i+skip] = 0.5  # 可以给跳跃连接赋予较小的权重
+                adj[i+skip, i] = 0.5
+        
+        return adj
+    
+    def _normalize_adj(self, adj):
+        """对邻接矩阵进行归一化（按行归一化）"""
+        row_sum = adj.sum(1, keepdim=True)
+        # 避免除零错误
+        row_sum = torch.clamp(row_sum, min=1e-6)
+        d_inv_sqrt = torch.pow(row_sum, -0.5)
+        d_mat_inv_sqrt = torch.diag_embed(d_inv_sqrt.squeeze())
+        normalized_adj = torch.matmul(torch.matmul(d_mat_inv_sqrt, adj), d_mat_inv_sqrt)
+        return normalized_adj
+
+class SpectralAttention(nn.Module):
+    """光谱注意力机制
+    
+    实现简单但完整的自注意力，捕获波长之间的关系
+    """
+    def __init__(self, channels):
+        super(SpectralAttention, self).__init__()
+        # 生成查询、键和值的投影
+        self.query_conv = nn.Conv1d(channels, channels, kernel_size=1)
+        self.key_conv = nn.Conv1d(channels, channels, kernel_size=1)
+        self.value_conv = nn.Conv1d(channels, channels, kernel_size=1)
+        self.gamma = nn.Parameter(torch.zeros(1))  # 可学习的权重参数
+        
+    def forward(self, x):
+        """
+        输入 x: [batch, channels, length]
+        输出: [batch, channels, length]
+        """
+        batch_size, C, width = x.size()
+        
+        # 投影查询、键和值
+        query = self.query_conv(x).view(batch_size, -1, width).permute(0, 2, 1)  # [B, W, C]
+        key = self.key_conv(x).view(batch_size, -1, width)  # [B, C, W]
+        value = self.value_conv(x).view(batch_size, -1, width)  # [B, C, W]
+        
+        # 计算注意力得分
+        energy = torch.bmm(query, key)  # [B, W, W]
+        attention = F.softmax(energy, dim=2)
+        
+        # 使用注意力权重更新值
+        out = torch.bmm(value, attention.permute(0, 2, 1))
+        
+        # 残差连接
+        out = self.gamma * out + x
+        
+        return out
+
+class SpectralResCNN_GCN(nn.Module):
+    """光谱残差CNN-GCN模型
+    
+    结合残差CNN和图卷积网络处理光谱数据
+    """
+    def __init__(self, input_size=None):
+        super(SpectralResCNN_GCN, self).__init__()
+        
+        # 记录输入大小，可能为None表示自动适应
+        self.input_size = input_size
+        
+        # 特征提取层
+        self.feature_extractor = nn.Sequential(
+            nn.Conv1d(1, 64, kernel_size=7, padding=3),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.MaxPool1d(2)
+        )
+        
+        # 残差模块 - 参数驱动的纵向特征提取
+        self.res_blocks = nn.ModuleList([
+            ResidualBlock(64) for _ in range(3)
+        ])
+        
+        # 循环模块 - 跨波段信念增强
+        self.gru = nn.GRU(64, 64, bidirectional=True, batch_first=True)
+        
+        # 光谱注意力机制 - 捕获波长关系
+        self.spectral_attention = SpectralAttention(128)
+        
+        # GCN模块 - 建模波长点之间的关系
+        # 注意：这里无需指定具体的序列长度，将在forward中动态适应
+        self.gcn_layers = nn.ModuleList([
+            GraphConvLayer(128, 128),
+            GraphConvLayer(128, 128)
+        ])
+        
+        # GCN输出处理
+        self.gcn_process = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(0.3)
+        )
+        
+        # 信息融合层 (CNN特征 + GCN特征)
+        self.fusion = nn.Sequential(
+            nn.Conv1d(256, 64, kernel_size=1),  # 256 = 64(CNN) + 128(GRU) + 64(GCN)
+            nn.BatchNorm1d(64),
+            nn.ReLU()
+        )
+        
+        # 添加自适应池化层，确保输出大小固定
+        self.adaptive_pool = nn.AdaptiveAvgPool1d(1)
+        
+        # 全连接层
+        self.fc = nn.Sequential(
+            nn.Linear(64, 256),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(256, 64),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(64, 1)
+        )
+        
+    def forward(self, x):
+        # 获取实际输入维度
+        batch_size, channels, seq_len = x.size()
+        
+        # 如果input_size为None，自动设置为当前序列长度
+        if self.input_size is None:
+            self.input_size = seq_len
+            print(f"自动适应输入大小: {seq_len}")
+        
+        # 特征提取
+        x = self.feature_extractor(x)
+        
+        # 残差特征提取
+        res_features = x
+        for res_block in self.res_blocks:
+            res_features = res_block(res_features)
+            
+        # 循环特征提取
+        rec_features = x.permute(0, 2, 1)  # [batch, length, channels]
+        rec_features, _ = self.gru(rec_features)
+        rec_features = rec_features.permute(0, 2, 1)  # [batch, channels*2, length]
+        
+        # 应用光谱注意力
+        attention_features = self.spectral_attention(rec_features)
+        
+        # GCN处理 - 首先需要转置数据
+        gcn_features = attention_features.permute(0, 2, 1)  # [batch, length, channels]
+        for gcn_layer in self.gcn_layers:
+            gcn_features = gcn_layer(gcn_features)
+            gcn_features = F.relu(gcn_features)
+        
+        # 处理GCN输出
+        gcn_features = self.gcn_process(gcn_features)
+        
+        # 将GCN特征转回原始格式
+        gcn_features = gcn_features.permute(0, 2, 1)  # [batch, channels, length]
+        
+        # 特征融合 (CNN + GRU + GCN)
+        combined_features = torch.cat([res_features, attention_features, gcn_features], dim=1)
+        x = self.fusion(combined_features)
+        
+        # 使用自适应池化层将特征图压缩为固定大小
+        x = self.adaptive_pool(x)
+        x = x.view(x.size(0), -1)  # 展平
+        
+        # 全连接层
+        x = self.fc(x)
+        
+        return x 
