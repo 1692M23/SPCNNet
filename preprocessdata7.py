@@ -52,6 +52,7 @@ class LAMOSTPreprocessor:
                  max_workers=None,  # 最大工作进程数，None表示自动确定
                  batch_size=20,  # 批处理大小
                  memory_limit=0.7,  # 内存使用限制(占总内存比例)
+                 verbose=1,  # 输出详细程度，0=静默，1=基本信息，2=详细信息
                  low_memory_mode=False):  # 低内存模式
         
         # 设置文件路径
@@ -122,6 +123,9 @@ class LAMOSTPreprocessor:
         self.cache_manager = CacheManager(cache_dir=os.path.join(output_dir, 'cache'))
         
         self.update_cache_manager()
+        
+        # 输出详细程度
+        self.verbose = verbose
         
     def _load_files_cache(self):
         """加载文件查找缓存"""
@@ -669,8 +673,7 @@ class LAMOSTPreprocessor:
                 print(f"有效数据点数太少({len(wavelength_valid)})，无法进行插值")
                 return None, None
             
-            # 更新最大公有波长范围
-            self.update_common_wavelength_range(wavelength_valid)
+            # 不再调用update_common_wavelength_range，只使用预先计算好的波长范围
             
             # 获取波长范围
             w_min, w_max = self.wavelength_range
@@ -687,6 +690,7 @@ class LAMOSTPreprocessor:
                     return None, None
                 
                 print(f"调整波长范围为有效数据的交集: {w_min_valid:.2f}~{w_max_valid:.2f}")
+                # 只在局部变量中调整范围，不修改类的wavelength_range属性
                 w_min, w_max = w_min_valid, w_max_valid
             
             # 在对数空间中进行重采样
@@ -700,8 +704,8 @@ class LAMOSTPreprocessor:
             else:
                 n_points = self.n_points
                 # 如果指定了点数，计算实际使用的步长
-                self.log_step = (log_w_max - log_w_min) / (n_points - 1)
-                print(f"使用指定点数{n_points}，对数步长为: {self.log_step} dex")
+                actual_log_step = (log_w_max - log_w_min) / (n_points - 1)
+                print(f"使用指定点数{n_points}，对数步长为: {actual_log_step} dex")
             
             # 在对数空间中创建等间隔网格
             log_wavelength = np.linspace(log_w_min, log_w_max, n_points)
@@ -788,7 +792,8 @@ class LAMOSTPreprocessor:
             'wavelength_range': (float(np.min(wavelength)), float(np.max(wavelength))) if wavelength is not None else None
         }
         
-        if self.verbose >= 2:
+        # 根据详细程度控制输出
+        if self.verbose >= 1:
             print(f"归一化统计: 原始范围[{flux_min_orig:.4f}, {flux_max_orig:.4f}]")
         
         return flux_norm
@@ -3061,7 +3066,8 @@ def main():
         max_workers=1 if low_memory_mode else 2,  # 低内存模式使用单线程
         batch_size=5 if low_memory_mode else 20,   # 低内存模式减小批次大小
         memory_limit=0.7,  # 内存使用阈值
-        low_memory_mode=low_memory_mode  # 低内存模式标志
+        low_memory_mode=low_memory_mode,  # 低内存模式标志
+        verbose=1  # 输出详细程度，0=静默，1=基本信息，2=详细信息
     )
     
     # 检查数据源
