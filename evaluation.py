@@ -1548,18 +1548,22 @@ def visualize_hyperopt_results(element, plot_dir=None):
         return False
 
 def evaluate_model(model, test_loader, device=None):
-    """
-    在测试集上评估模型，并为每个批次生成单独的评估结果
-    Args:
-        model: 训练好的模型
-        test_loader: 测试数据加载器
-        device: 计算设备
-    Returns:
-        评估结果字典
-    """
+    """评估模型性能，支持CPU/GPU/TPU"""
+    # 添加设备兼容性检测
     if device is None:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
+        device = setup_device()
+    
+    # 添加TPU支持的数据加载器
+    if str(device).startswith('xla'):
+        try:
+            import torch_xla.distributed.parallel_loader as pl
+            test_loader = pl.MpDeviceLoader(test_loader, device)
+        except ImportError:
+            pass
+            
+    # 将模型移动到设备
+    model = model.to(device)
+    
     model.eval()
     test_loss = 0
     predictions = []
@@ -1778,54 +1782,52 @@ def evaluate_model(model, test_loader, device=None):
 
 def main():
     """主函数"""
-    parser = argparse.ArgumentParser(description='元素丰度预测模型评估工具')
-    parser.add_argument('--elements', nargs='+', default=None, help='要评估的元素列表')
-    parser.add_argument('--save_dir', type=str, default=None, help='结果保存目录')
-    parser.add_argument('--catalog_eval', action='store_true', help='执行星表评估')
-    parser.add_argument('--catalogs', nargs='+', default=['galah', 'lasp'], help='要评估的星表类型列表')
-    parser.add_argument('--no_plots', action='store_true', help='不生成图像')
-    parser.add_argument('--clear_cache', action='store_true', help='清除所有缓存')
+    parser = argparse.ArgumentParser(description='恒星光谱元素丰度评估')
+    parser.add_argument('--elements', nargs='+', default=None,
+                       help='要评估的元素列表，默认为配置中的所有元素')
+    parser.add_argument('--evaluate', action='store_true',
+                       help='执行模型评估')
+    parser.add_argument('--test_data', type=str, default=None,
+                       help='测试数据文件路径')
+    parser.add_argument('--catalog_compare', action='store_true',
+                       help='与星表进行比较评估')
+    parser.add_argument('--output_dir', type=str, default=None,
+                       help='输出目录')
+    parser.add_argument('--device', type=str, default=None, 
+                       help='计算设备：cpu/cuda/tpu，默认自动检测')
+    parser.add_argument('--model_dir', type=str, default=None,
+                       help='模型目录，默认使用配置中的路径')
+    parser.add_argument('--visualize', action='store_true',
+                       help='生成可视化图表')
+    parser.add_argument('--hyperopt_viz', action='store_true',
+                       help='可视化超参数调优结果')
+    
     args = parser.parse_args()
     
-    # 确保输出目录存在
-    os.makedirs(config.output_config['results_dir'], exist_ok=True)
-    os.makedirs(config.output_config['plots_dir'], exist_ok=True)
+    # 设置设备
+    device = setup_device(args.device)
     
-    # 处理缓存
-    if args.clear_cache:
-        cache_manager.clear_cache()
-        logger.info("已清除所有缓存")
-    else:
-        ask_clear_cache(cache_manager)
+    # 如果提供了模型目录，更新配置
+    if args.model_dir:
+        config.model_config['model_dir'] = args.model_dir
     
-    logger.info("开始元素丰度评估")
-    
-    # 检查是否执行星表评估
-    if args.catalog_eval:
-        logger.info("执行星表评估")
-        evaluate_catalogs_all_elements(
-            elements=args.elements,
-            catalog_types=args.catalogs,
-            save_plots=not args.no_plots
-        )
-        logger.info("星表评估完成")
-    else:
-        # 执行测试集评估
-        logger.info("执行测试集评估")
-        results = evaluate_all_elements(
-            elements=args.elements,
-            save_dir=args.save_dir
-        )
-        logger.info("测试集评估完成")
+    # 根据命令行参数执行不同功能
+    if args.evaluate:
+        if args.test_data:
+            evaluate_all_elements(args.elements, args.output_dir, device=device)
+        else:
+            logger.error("评估模型需要提供测试数据路径，使用--test_data参数")
+            
+    if args.catalog_compare:
+        evaluate_catalogs_all_elements(args.elements, save_plots=args.visualize)
         
-        # 绘制评估结果图像
-        if not args.no_plots:
-            logger.info("生成评估结果图像")
-            plot_predictions_vs_true(args.elements)
-            plot_metrics_comparison(args.elements)
-            logger.info("图像生成完成")
+    if args.hyperopt_viz:
+        for element in args.elements or config.training_config.get('elements', []):
+            visualize_hyperopt_results(element, args.output_dir)
     
-    logger.info("评估过程全部完成")
+    # 如果没有指定任何操作，默认执行评估
+    if not (args.evaluate or args.catalog_compare or args.hyperopt_viz):
+        evaluate_all_elements(args.elements, args.output_dir, device=device)
 
 if __name__ == "__main__":
     main()

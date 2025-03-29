@@ -37,6 +37,47 @@ logger = logging.getLogger('predict')
 # 创建缓存管理器
 cache_manager = CacheManager(cache_dir=os.path.join(config.output_config['cache_dir'], 'predict'))
 
+# 设置计算设备，支持CPU/GPU/TPU
+def setup_device(device_str=None):
+    """设置计算设备，支持CPU/GPU/TPU"""
+    # 检查指定设备
+    if device_str:
+        if device_str.lower() == 'tpu':
+            try:
+                import torch_xla
+                import torch_xla.core.xla_model as xm
+                device = xm.xla_device()
+                logger.info(f"使用指定的TPU设备: {device}")
+                return device
+            except ImportError:
+                logger.warning("无法导入torch_xla，TPU不可用")
+        elif device_str.lower() == 'cuda' or device_str.lower() == 'gpu':
+            if torch.cuda.is_available():
+                device = torch.device('cuda')
+                logger.info(f"使用指定的GPU设备: {torch.cuda.get_device_name(0)}")
+                return device
+            else:
+                logger.warning("指定GPU但CUDA不可用")
+        elif device_str.lower() == 'cpu':
+            logger.info("使用指定的CPU设备")
+            return torch.device('cpu')
+    
+    # 自动检测设备
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        logger.info(f"自动选择GPU设备: {torch.cuda.get_device_name(0)}")
+    else:
+        try:
+            import torch_xla
+            import torch_xla.core.xla_model as xm
+            device = xm.xla_device()
+            logger.info(f"自动选择TPU设备: {device}")
+        except ImportError:
+            device = torch.device('cpu')
+            logger.info("自动选择CPU设备")
+    
+    return device
+
 def load_data(data_path):
     """
     加载待预测的光谱数据，支持preprocessdata7.py处理的数据格式
@@ -273,8 +314,32 @@ def predict_element(spectra, element, batch_size=32, device=None):
         logger.info(f"从缓存加载预测结果: {element}")
         return cached_predictions['predictions']
     
+    # 添加设备兼容性检测
     if device is None:
-        device = config.training_config['device']
+        # 默认设备检测
+        if torch.cuda.is_available():
+            device = torch.device('cuda')
+        else:
+            # 尝试TPU
+            try:
+                import torch_xla
+                import torch_xla.core.xla_model as xm
+                device = xm.xla_device()
+                logger.info(f"使用TPU设备: {device}")
+            except ImportError:
+                device = torch.device('cpu')
+                logger.info("使用CPU设备 (TPU不可用)")
+    
+    # 添加数据到设备的移动函数
+    def move_to_device(data, dev):
+        if str(dev).startswith('xla'):
+            try:
+                import torch_xla.core.xla_model as xm
+                return data.to(dev)
+            except ImportError:
+                return data.to('cpu')
+        else:
+            return data.to(dev)
     
     # 加载模型
     model_path = os.path.join(config.model_config['model_dir'], f"{element}_model.pth")
@@ -292,7 +357,8 @@ def predict_element(spectra, element, batch_size=32, device=None):
     with torch.no_grad():
         for i in range(0, len(spectra), batch_size):
             batch_data = spectra[i:i+batch_size]
-            batch_tensor = torch.FloatTensor(batch_data).unsqueeze(1).to(device)  # [batch_size, 1, n_wavelengths]
+            batch_tensor = torch.FloatTensor(batch_data).unsqueeze(1)
+            batch_tensor = move_to_device(batch_tensor, device)
             batch_predictions = model(batch_tensor).cpu().numpy().flatten()
             predictions.extend(batch_predictions)
     
@@ -303,9 +369,17 @@ def predict_element(spectra, element, batch_size=32, device=None):
         'predictions': predictions
     })
     
+    # 如果使用TPU，添加mark_step确保计算完成
+    if str(device).startswith('xla'):
+        try:
+            import torch_xla.core.xla_model as xm
+            xm.mark_step()
+        except ImportError:
+            pass
+    
     return predictions
 
-def predict_all_elements(spectra, elements=None, batch_size=Config.PREDICTION_BATCH_SIZE):
+def predict_all_elements(spectra, elements=None, batch_size=Config.PREDICTION_BATCH_SIZE, device=None):
     """
     预测所有元素的丰度，并为每批次生成实时结果
     
@@ -349,7 +423,7 @@ def predict_all_elements(spectra, elements=None, batch_size=Config.PREDICTION_BA
                     batch_data = spectra[i:i+batch_size]
                     
                     # 预测当前批次
-                    batch_predictions = predict_element(batch_data, element, batch_size)
+                    batch_predictions = predict_element(batch_data, element, batch_size, device)
                     if batch_predictions is None:
                         logger.warning(f"批次 {batch_id+1} 预测失败，跳过")
                         continue
@@ -590,17 +664,28 @@ def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='恒星光谱元素丰度预测')
     parser.add_argument('--data_path', type=str, required=True,
-                        help='输入数据文件路径')
+                      help='输入数据文件路径')
     parser.add_argument('--elements', nargs='+', default=None,
-                        help='要预测的元素列表，默认为所有配置的元素')
+                      help='要预测的元素列表，默认为配置中的所有元素')
     parser.add_argument('--batch_size', type=int, default=32,
-                        help='批次大小')
+                      help='批次大小')
     parser.add_argument('--output_dir', type=str, default=None,
-                        help='输出目录')
+                      help='输出目录')
     parser.add_argument('--clear_cache', action='store_true',
-                        help='清除所有缓存')
+                      help='清除所有缓存')
+    parser.add_argument('--device', type=str, default=None, 
+                      help='计算设备：cpu/cuda/tpu，默认自动检测')
+    parser.add_argument('--model_dir', type=str, default=None,
+                      help='模型目录，默认使用配置中的路径')
     
     args = parser.parse_args()
+    
+    # 设置设备
+    device = setup_device(args.device)
+    
+    # 如果提供了模型目录，更新配置
+    if args.model_dir:
+        config.model_config['model_dir'] = args.model_dir
     
     # 处理缓存
     if args.clear_cache:
@@ -616,8 +701,8 @@ def main():
         logger.error("加载数据失败，退出程序")
         return
     
-    # 预测元素丰度
-    predictions = predict_all_elements(spectra, args.elements, args.batch_size)
+    # 预测元素丰度，传入设备参数
+    predictions = predict_all_elements(spectra, args.elements, args.batch_size, device)
     
     # 保存结果
     if predictions:
