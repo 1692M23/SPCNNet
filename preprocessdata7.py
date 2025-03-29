@@ -41,7 +41,7 @@ def is_in_colab():
 IN_COLAB = is_in_colab()
 
 class LAMOSTPreprocessor:
-    def __init__(self, csv_files=['C_FE.csv', 'MG_FE.csv', 'CA_FE.csv'], 
+    def __init__(self, csv_files=None, 
                  fits_dir='fits', 
                  output_dir='processed_data',
                  wavelength_range=None,  # 修改为None，表示将使用最大公有波长范围
@@ -55,6 +55,14 @@ class LAMOSTPreprocessor:
                  low_memory_mode=False):  # 低内存模式
         
         # 设置文件路径
+        # 默认使用当前目录下所有的CSV文件
+        if csv_files is None:
+            csv_files = [f for f in os.listdir() if f.endswith('.csv')]
+            if not csv_files:
+                print("警告: 当前目录未找到CSV文件")
+            else:
+                print(f"自动检测到以下CSV文件: {csv_files}")
+                
         self.csv_files = [csv_file if os.path.exists(csv_file) else os.path.join('/content', csv_file) for csv_file in csv_files]
         self.fits_dir = fits_dir if os.path.exists(fits_dir) else os.path.join('/content', fits_dir)
         self.output_dir = output_dir
@@ -156,8 +164,9 @@ class LAMOSTPreprocessor:
             print(f"保存文件缓存出错: {e}")
     
     def read_csv_data(self):
-        """读取CSV文件并返回DataFrame列表"""
+        """读取CSV文件并返回DataFrame列表和对应的元素名称"""
         dataframes = []
+        elements = []
         for csv_file in self.csv_files:
             if not os.path.exists(csv_file):
                 print(f"错误: 找不到CSV文件 {csv_file}")
@@ -187,6 +196,10 @@ class LAMOSTPreprocessor:
                 print(f"成功加载{csv_file}，共{len(df)}条记录")
                 print(f"列名: {', '.join(df.columns)}")
                 
+                # 从CSV文件名提取元素信息
+                element_name = os.path.basename(csv_file).split('.')[0]
+                print(f"识别到元素：{element_name}")
+                
                 # 检查spec列中的文件是否存在
                 if 'spec' in df.columns:
                     # 确保spec列的类型为字符串
@@ -211,12 +224,13 @@ class LAMOSTPreprocessor:
                     print(f"可用的列: {df.columns.tolist()}")
                 
                 dataframes.append(df)
+                elements.append(element_name)
             except Exception as e:
                 print(f"读取CSV文件 {csv_file} 出错: {e}")
                 import traceback
                 traceback.print_exc()
         
-        return dataframes
+        return dataframes, elements
     
     def _find_fits_file(self, spec_name):
         """查找匹配的fits文件，处理嵌套目录和命名差异"""
@@ -1524,14 +1538,17 @@ class LAMOSTPreprocessor:
         return results
     
     def process_all_data(self, resume=True):
-        """处理所有数据并准备训练集，支持断点续传"""
+        """处理所有数据并返回拆分后的训练集、验证集和测试集"""
         start_time = time.time()
+        
+        # 进度文件路径
+        progress_file = os.path.join(self.progress_dir, 'all_data_progress.pkl')
+        drive_progress_file = '/content/drive/My Drive/SPCNNet_Results/processed_data/progress/all_data_progress.pkl'
+        
+        # 初始化全部数据列表
         all_data = []
         
-        # 检查是否有整体进度文件
-        progress_file = os.path.join(self.progress_dir, "all_progress.pkl")
-        drive_progress_file = "/content/drive/My Drive/SPCNNet_Results/processed_data/progress/all_progress.pkl"
-        
+        # 如果有进度文件，考虑恢复
         if resume:
             # 先尝试从标准路径加载
             if os.path.exists(progress_file):
@@ -1541,7 +1558,7 @@ class LAMOSTPreprocessor:
                     print(f"已加载保存的处理结果，共{len(all_data)}条记录")
                     
                     # 读取CSV文件来获取总记录数
-                    dataframes = self.read_csv_data()
+                    dataframes, elements = self.read_csv_data()
                     if not dataframes:
                         print("错误: 没有有效的数据集")
                         return np.array([]), np.array([]), np.array([]), np.array([])
@@ -1573,7 +1590,7 @@ class LAMOSTPreprocessor:
                     print(f"从Google Drive加载处理结果，共{len(all_data)}条记录")
                     
                     # 读取CSV文件来获取总记录数
-                    dataframes = self.read_csv_data()
+                    dataframes, elements = self.read_csv_data()
                     if not dataframes:
                         print("错误: 没有有效的数据集")
                         return np.array([]), np.array([]), np.array([]), np.array([])
@@ -1599,7 +1616,7 @@ class LAMOSTPreprocessor:
                     all_data = []
         
         # 读取CSV文件
-        dataframes = self.read_csv_data()
+        dataframes, elements = self.read_csv_data()
         if not dataframes:
             print("错误: 没有有效的数据集")
             return np.array([]), np.array([]), np.array([]), np.array([])
@@ -1610,7 +1627,7 @@ class LAMOSTPreprocessor:
         
         # 处理每个元素的数据
         processed_records = 0
-        for i, (df, element) in enumerate(zip(dataframes, ['C_FE', 'MG_FE', 'CA_FE'])):
+        for i, (df, element) in enumerate(zip(dataframes, elements)):
             # 统计已处理的元素记录数
             element_records = sum(1 for item in all_data if item.get('element') == element)
             # 元素的总记录数
@@ -2605,11 +2622,32 @@ def main():
     
     # 处理命令行参数
     import argparse
-    parser = argparse.ArgumentParser(description="LAMOST光谱数据预处理工具")
-    parser.add_argument('--csv_files', type=str, nargs='+', help='CSV文件路径列表')
-    parser.add_argument('--fits_dir', type=str, default='fits', help='FITS文件目录')
-    parser.add_argument('--output_dir', type=str, default='processed_data', help='输出目录路径')
-    parser.add_argument('--low_memory_mode', action='store_true', help='启用低内存模式')
+    
+    parser = argparse.ArgumentParser(description="LAMOST光谱数据预处理器")
+    parser.add_argument('--csv_files', nargs='+', default=None,
+                      help='要处理的CSV文件列表，每个文件包含一个元素的数据。不指定时自动检测当前目录所有CSV文件')
+    parser.add_argument('--fits_dir', default='fits', help='FITS文件目录')
+    parser.add_argument('--output_dir', default='processed_data', help='输出目录')
+    parser.add_argument('--wavelength_range', nargs=2, type=float, default=None,
+                      help='波长范围，例如: 4000 8000')
+    parser.add_argument('--n_points', type=int, default=None,
+                      help='重采样后的点数')
+    parser.add_argument('--log_step', type=float, default=0.0001,
+                      help='对数空间中的重采样步长（dex）')
+    parser.add_argument('--batch_size', type=int, default=20,
+                      help='批处理大小')
+    parser.add_argument('--max_workers', type=int, default=None,
+                      help='最大工作进程数，默认为CPU核心数的一半')
+    parser.add_argument('--memory_limit', type=float, default=0.7,
+                      help='内存使用限制(占总内存比例)')
+    parser.add_argument('--no_resume', action='store_true',
+                      help='不恢复之前的进度，从头开始处理')
+    parser.add_argument('--evaluate', action='store_true',
+                      help='评估预处理效果')
+    parser.add_argument('--single_element', type=str, default=None,
+                      help='仅处理指定元素的CSV文件，例如: C_FE')
+    parser.add_argument('--low_memory_mode', action='store_true', 
+                      help='启用低内存模式，减少内存使用但速度变慢')
     
     args = parser.parse_args()
     
@@ -2631,15 +2669,30 @@ def main():
         user_choice = input("是否启用低内存模式? 这将减少内存使用但处理速度会变慢 (y/n): ").lower()
         low_memory_mode = user_choice == 'y'
     
-    # 构建路径
-    if args.csv_files:
-        # 使用命令行参数提供的CSV文件路径
-        csv_files = args.csv_files
-        print(f"使用命令行参数提供的CSV文件: {csv_files}")
-    else:
-        # 使用默认CSV文件路径
-        csv_files = [os.path.join(base_path, f) for f in ['C_FE.csv', 'MG_FE.csv', 'CA_FE.csv']]
-        print(f"使用默认CSV文件路径: {csv_files}")
+    # 设置CSV文件路径
+    if args.csv_files is None:
+        # 自动检测当前目录下所有CSV文件
+        args.csv_files = [f for f in os.listdir() if f.endswith('.csv')]
+        if not args.csv_files:
+            print("错误: 当前目录未找到CSV文件，请指定--csv_files参数")
+            return
+        print(f"自动检测到以下CSV文件: {args.csv_files}")
+    
+    # 如果指定了单个元素，就只处理对应的CSV文件
+    if args.single_element:
+        # 查找匹配该元素的CSV文件
+        matching_files = []
+        for csv_file in args.csv_files:
+            element_name = os.path.basename(csv_file).split('.')[0]
+            if element_name == args.single_element:
+                matching_files.append(csv_file)
+        
+        if not matching_files:
+            print(f"错误: 找不到元素 {args.single_element} 对应的CSV文件")
+            return
+        
+        args.csv_files = matching_files
+        print(f"仅处理元素 {args.single_element} 的数据: {args.csv_files}")
     
     fits_dir = args.fits_dir
     if not os.path.isabs(fits_dir):
@@ -2650,7 +2703,7 @@ def main():
         output_dir = os.path.join(base_path, output_dir)
     
     # 展示路径信息
-    print(f"CSV文件路径: {csv_files}")
+    print(f"CSV文件路径: {args.csv_files}")
     print(f"FITS目录路径: {fits_dir}")
     print(f"输出目录路径: {output_dir}")
     
@@ -2723,15 +2776,17 @@ def main():
     print("\n=== 检查完成 ===\n")
     
     # 初始化预处理器
+    wavelength_range = tuple(args.wavelength_range) if args.wavelength_range else None
+    
     preprocessor = LAMOSTPreprocessor(
-        csv_files=csv_files,
+        csv_files=args.csv_files,
         fits_dir=fits_dir,
         output_dir=output_dir,
         wavelength_range=None,  # 修改为None，表示将使用最大公有波长范围
         n_points=None,  # 修改为None，点数将根据波长范围和步长自动计算
         log_step=0.0001,  # 新增：对数空间中的重采样步长（dex）
         compute_common_range=True,  # 新增：是否计算最大公有波长范围
-        n_splits=5,
+ 
         max_workers=1 if low_memory_mode else 2,  # 低内存模式使用单线程
         batch_size=5 if low_memory_mode else 20,   # 低内存模式减小批次大小
         memory_limit=0.7,  # 内存使用阈值
