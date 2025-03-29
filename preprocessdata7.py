@@ -92,7 +92,7 @@ class LAMOSTPreprocessor:
         print("正在加载文件查找缓存...")
         self._load_files_cache()
         
-        self.wavelength_range = wavelength_range if wavelength_range else (4000, 8098)  # 默认范围
+        self.wavelength_range = wavelength_range if wavelength_range else (2690, 9100)  # 默认范围
         self.n_points = n_points
         self.log_step = log_step
         self.compute_common_range = compute_common_range
