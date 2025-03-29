@@ -1649,6 +1649,36 @@ class LAMOSTPreprocessor:
         total_records = sum(len(df) for df in dataframes)
         print(f"总数据量: {total_records}条记录")
         
+        # 输出缓存目录信息
+        print(f"\n===== 缓存目录信息 =====")
+        print(f"缓存目录: {self.cache_dir}")
+        cache_files = glob.glob(os.path.join(self.cache_dir, "*"))
+        print(f"缓存文件总数: {len(cache_files)}")
+        wavelength_cache_files = glob.glob(os.path.join(self.cache_dir, "wavelength_range_*"))
+        print(f"波长范围缓存文件数: {len(wavelength_cache_files)}")
+        spectrum_cache_files = glob.glob(os.path.join(self.cache_dir, "processed_spectrum_*"))
+        print(f"光谱处理缓存文件数: {len(spectrum_cache_files)}")
+        
+        # 打印CSV中spec列的样本值
+        for i, (df, element) in enumerate(zip(dataframes, elements)):
+            if 'spec' in df.columns:
+                print(f"\n元素 {element} 的spec列前10个样本:")
+                for j, spec in enumerate(df['spec'].values[:10]):
+                    print(f"  {j+1}. '{spec}'")
+            
+            # 打印缓存文件名示例
+            if wavelength_cache_files:
+                print(f"\n波长范围缓存文件示例:")
+                for j, cache_file in enumerate(wavelength_cache_files[:5]):
+                    print(f"  {j+1}. '{os.path.basename(cache_file)}'")
+            
+            if spectrum_cache_files:
+                print(f"\n光谱处理缓存文件示例:")
+                for j, cache_file in enumerate(spectrum_cache_files[:5]):
+                    print(f"  {j+1}. '{os.path.basename(cache_file)}'")
+            
+            break  # 只显示第一个元素的信息
+        
         # 第一阶段：计算所有光谱的最大公共波长范围
         # 检查是否已经完成了第一阶段
         first_stage_done = False
@@ -1707,9 +1737,20 @@ class LAMOSTPreprocessor:
                     if cached_range:
                         # 如果有缓存，需要检查数据类型并提取波长范围
                         try:
+                            # 打印缓存数据类型以便调试
+                            print(f"缓存数据类型: {type(cached_range)}, 值: {cached_range}")
+                            
+                            # 处理不同类型的缓存数据
                             if isinstance(cached_range, tuple) and len(cached_range) == 2:
-                                # 元组格式
+                                # 标准的二元组格式
                                 w_min, w_max = cached_range
+                            elif isinstance(cached_range, tuple) and len(cached_range) > 2:
+                                # 如果元组有超过2个元素，只取前两个
+                                print(f"警告: 缓存元组长度 > 2: {len(cached_range)}")
+                                w_min, w_max = cached_range[0], cached_range[1]
+                            elif isinstance(cached_range, list) and len(cached_range) >= 2:
+                                # 列表格式
+                                w_min, w_max = cached_range[0], cached_range[1]
                             elif isinstance(cached_range, dict) and 'data' in cached_range:
                                 # 字典格式
                                 data_array = cached_range['data']
@@ -1723,6 +1764,9 @@ class LAMOSTPreprocessor:
                                     # 无法提取，跳过缓存数据
                                     print(f"缓存数据格式不正确: {spec_file}，重新处理")
                                     cached_range = None
+                            elif isinstance(cached_range, np.ndarray) and len(cached_range) >= 2:
+                                # numpy数组格式
+                                w_min, w_max = cached_range[0], cached_range[1]
                             else:
                                 # 不支持的格式
                                 print(f"缓存数据类型不支持: {type(cached_range)}，重新处理")
