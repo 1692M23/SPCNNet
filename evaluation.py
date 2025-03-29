@@ -1780,6 +1780,46 @@ def evaluate_model(model, test_loader, device=None):
         logger.error("评估过程中没有收集到有效的预测结果")
         return None
 
+def setup_device(device_str=None):
+    """设置计算设备，支持CPU/GPU/TPU"""
+    # 检查指定设备
+    if device_str:
+        if device_str.lower() == 'tpu':
+            try:
+                import torch_xla
+                import torch_xla.core.xla_model as xm
+                device = xm.xla_device()
+                logger.info(f"使用指定的TPU设备: {device}")
+                return device
+            except ImportError:
+                logger.warning("无法导入torch_xla，TPU不可用")
+        elif device_str.lower() == 'cuda' or device_str.lower() == 'gpu':
+            if torch.cuda.is_available():
+                device = torch.device('cuda')
+                logger.info(f"使用指定的GPU设备: {torch.cuda.get_device_name(0)}")
+                return device
+            else:
+                logger.warning("指定GPU但CUDA不可用")
+        elif device_str.lower() == 'cpu':
+            logger.info("使用指定的CPU设备")
+            return torch.device('cpu')
+    
+    # 自动检测设备
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        logger.info(f"自动选择GPU设备: {torch.cuda.get_device_name(0)}")
+    else:
+        try:
+            import torch_xla
+            import torch_xla.core.xla_model as xm
+            device = xm.xla_device()
+            logger.info(f"自动选择TPU设备: {device}")
+        except ImportError:
+            device = torch.device('cpu')
+            logger.info("自动选择CPU设备")
+    
+    return device
+
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='恒星光谱元素丰度评估')

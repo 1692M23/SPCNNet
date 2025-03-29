@@ -11,6 +11,7 @@ import time
 import pandas as pd
 from scipy import stats
 from sklearn.metrics import r2_score
+import sys
 
 # 处理torch_xla导入问题
 try:
@@ -542,8 +543,16 @@ def train(model, train_loader, val_loader, config, device, element):
                 total_loss += loss.item()
                 batch_count += 1
                 
+                # 定期显示进度
                 if batch_idx % 10 == 0:
-                    logger.info(f"第{stage}阶段 - 轮次: {epoch} [{batch_idx}/{len(train_loader)}], 损失: {loss.item():.6f}")
+                    # 确保TPU操作完成后再记录日志
+                    if device_type == 'tpu' and HAS_XLA:
+                        xm.mark_step()  # 添加同步点确保操作完成
+                    
+                    # 使用直接打印而不仅仅是logger
+                    current_lr = optimizer.param_groups[0]['lr']
+                    print(f"阶段{stage} - Epoch {epoch+1}/{config['training']['num_epochs']} [{batch_idx}/{len(train_loader)}] Loss: {loss.item():.6f} LR: {current_lr:.6f}")
+                    logger.info(f"阶段{stage} - Epoch {epoch+1}/{config['training']['num_epochs']} [{batch_idx}/{len(train_loader)}] Loss: {loss.item():.6f} LR: {current_lr:.6f}")
             
             # 更新学习率
             scheduler.step()
@@ -572,7 +581,14 @@ def train(model, train_loader, val_loader, config, device, element):
             train_losses.append(train_loss)
             val_losses.append(val_loss)
             
-            logger.info(f"第{stage}阶段 - 轮次: {epoch}, 训练损失: {train_loss:.6f}, 验证损失: {val_loss:.6f}")
+            # 强制同步点和输出
+            if device_type == 'tpu' and HAS_XLA:
+                xm.mark_step()
+
+            # 使用print直接输出而不仅仅依赖logger
+            print(f"第{stage}阶段 - 轮次: {epoch+1}/{config['training']['num_epochs']}, 训练损失: {train_loss:.6f}, 验证损失: {val_loss:.6f}")
+            sys.stdout.flush()  # 强制刷新输出缓冲区
+            logger.info(f"第{stage}阶段 - 轮次: {epoch+1}/{config['training']['num_epochs']}, 训练损失: {train_loss:.6f}, 验证损失: {val_loss:.6f}")
             
             # 更新训练状态并保存
             save_training_state(element, stage, epoch, best_val_loss, patience_counter, False, stage==1 and stage_completed)
