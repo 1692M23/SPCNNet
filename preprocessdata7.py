@@ -1143,24 +1143,12 @@ class LAMOSTPreprocessor:
             raise ValueError("spec_file不能为None")
         
         # 使用CacheManager替代直接缓存操作
-        cache_key = f"processed_{spec_file.replace('/', '_')}"
-        
-        # 首先尝试标准缓存路径
-        cached_data = self.cache_manager.get_cache(cache_key)
-        
-        # 如果没找到，尝试从Google Drive缓存目录查找
-        if cached_data is None and os.path.exists(self.drive_cache_dir):
-            drive_cache_path = os.path.join(self.drive_cache_dir, cache_key)
-            if os.path.exists(drive_cache_path):
-                try:
-                    with open(drive_cache_path, 'rb') as f:
-                        cached_data = pickle.load(f)
-                    print(f"从Google Drive缓存加载: {drive_cache_path}")
-                except Exception as e:
-                    print(f"加载Google Drive缓存出错: {e}")
-        
-        if cached_data:
-            return cached_data
+        cache_key = f"processed_spectrum_{spec_file.replace('/', '_')}"
+        # 检查缓存
+        processed_result = self.cache_manager.get_cache(cache_key)
+        if processed_result:
+            print(f"使用缓存的预处理光谱: {spec_file}")
+            return processed_result
         
         try:
             # 读取FITS文件
