@@ -20,7 +20,7 @@ from collections import defaultdict
 
 # 导入自定义模块
 import config
-from model import SpectralResCNN, SpectralResCNN_GCN, train_and_evaluate_model
+from model import SpectralResCNN, SpectralResCNN_GCN, train, train_and_evaluate_model
 
 # 尝试导入hyperopt_tuning中的方法
 try:
@@ -35,8 +35,8 @@ except ImportError:
         logger.info(f"评估超参数: {params}")
         
         # 设置训练配置
-        train_config = config.CONFIG.copy()
-        train_config['training_config'] = {
+        train_config = {}
+        train_config['training'] = {
             'device': device,
             'batch_size': int(params.get('batch_size', 32)),
             'num_epochs': int(params.get('num_epochs', 50)),
@@ -45,32 +45,41 @@ except ImportError:
             'early_stopping_patience': int(params.get('patience', 10))
         }
         train_config['model_config'] = {
+            'model_dir': config.model_config['model_dir'],
             'use_gcn': params.get('use_gcn', True)
         }
         
         # 选择模型类型
         use_gcn = params.get('use_gcn', True)
+        dropout_rate = params.get('dropout_rate', 0.5)
+        
         if use_gcn:
             model = SpectralResCNN_GCN(
                 input_size=config.model_config['input_size'],
+                dropout_rate=dropout_rate,
                 device=device
             )
         else:
             model = SpectralResCNN(
-                input_size=config.model_config['input_size']
+                input_size=config.model_config['input_size'],
+                dropout_rate=dropout_rate
             ).to(device)
         
         # 训练和评估模型
-        _, val_loss, _ = train_and_evaluate_model(
+        train_losses, val_losses = train(
+            model=model,
             train_loader=train_loader,
             val_loader=val_loader,
-            test_loader=val_loader,
-            element=f"{element}_tune",
-            config=train_config
+            config=train_config,
+            device=device,
+            element=f"{element}_tune"
         )
         
+        # 计算最佳验证损失
+        best_val_loss = min(val_losses) if val_losses else float('inf')
+        
         return {
-            'loss': val_loss,
+            'loss': best_val_loss,
             'status': STATUS_OK,
             'params': params
         }
@@ -327,8 +336,8 @@ def _fallback_grid_search(element, train_loader, val_loader, device, param_set="
             ).to(device)
         
         # 设置训练配置
-        train_config = config.CONFIG.copy()
-        train_config['training_config'] = {
+        train_config = {}
+        train_config['training'] = {
             'device': device,
             'batch_size': int(params.get('batch_size', 32)),
             'num_epochs': int(params.get('num_epochs', 30)),
@@ -337,18 +346,23 @@ def _fallback_grid_search(element, train_loader, val_loader, device, param_set="
             'early_stopping_patience': int(params.get('patience', 10))
         }
         train_config['model_config'] = {
+            'model_dir': config.model_config['model_dir'],
             'use_gcn': params.get('use_gcn', True)
         }
         
         try:
             # 训练和评估模型
-            _, val_loss, _ = train_and_evaluate_model(
+            train_losses, val_losses = train(
+                model=model,
                 train_loader=train_loader,
                 val_loader=val_loader,
-                test_loader=val_loader,
-                element=f"{element}_{param_set}",
-                config=train_config
+                config=train_config,
+                device=device,
+                element=f"{element}_{param_set}"
             )
+            
+            # 获取最佳验证损失
+            val_loss = min(val_losses) if val_losses else float('inf')
             
             # 更新最佳参数
             if val_loss < best_val_loss:
