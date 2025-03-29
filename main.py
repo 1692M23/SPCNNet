@@ -555,7 +555,7 @@ def process_element(element, config=None, tune_hyperparams=False):
         
         # 是否进行超参数调优
         if tune_hyperparams:
-            from hyperopt_tuning import hyperparameter_tuning
+            from hyperopt_tuning import run_hyperopt_tuning as hyperparameter_tuning
             logger.info(f"开始 {element} 的超参数调优")
             best_params, best_model = hyperparameter_tuning(
                 element,
