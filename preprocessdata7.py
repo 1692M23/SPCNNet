@@ -1669,12 +1669,12 @@ class LAMOSTPreprocessor:
                         # 询问是否需要分割数据集
                         if input("是否需要划分数据集? (y/n): ").lower() == 'y':
                             print("准备数据用于模型训练")
-                            X, y, elements = self._prepare_arrays(all_data)
+                            X, y, elements, filenames = self._prepare_arrays(all_data)
                             if X is not None and y is not None:
                                 print(f"准备完成，特征数据形状: {X.shape}, 标签数据形状: {y.shape}")
                                 self.split_dataset(X, y, elements)
                         
-                        return all_data
+                        return X, y, elements, filenames
                     else:
                         print("不使用缓存，重新处理数据")
             except Exception as e:
@@ -1740,7 +1740,7 @@ class LAMOSTPreprocessor:
         # 询问是否需要分割数据集
         if all_data and input("是否需要划分数据集? (y/n): ").lower() == 'y':
             print("准备数据用于模型训练")
-            X, y, elements = self._prepare_arrays(all_data)
+            X, y, elements, filenames = self._prepare_arrays(all_data)
             if X is not None and y is not None:
                 self.split_dataset(X, y, elements)
         
@@ -1756,7 +1756,8 @@ class LAMOSTPreprocessor:
                 else:
                     print("样本中没有文件名信息")
         
-        return all_data
+        X, y, elements, filenames = self._prepare_arrays(all_data)
+        return X, y, elements, filenames
     
     def _prepare_arrays(self, all_data):
         """准备训练、验证和测试数据数组"""
@@ -1855,7 +1856,7 @@ class LAMOSTPreprocessor:
                     y = np.nan_to_num(y, nan=median_y)
             
             print(f"准备完成 {len(X)} 个样本, 特征数: {X.shape[1]}")
-            return X, y, filenames, elements
+            return X, y, elements, filenames
             
         except ValueError as e:
             print(f"创建数组时出错: {e}")
@@ -1902,7 +1903,7 @@ class LAMOSTPreprocessor:
                     if np.isnan(y).any() or np.isinf(y).any():
                         y = np.nan_to_num(y, nan=np.nanmedian(y))
                     
-                    return X, y, filenames, elements
+                    return X, y, elements, filenames
                 except Exception as e2:
                     print(f"第二次尝试创建数组时出错: {e2}")
                     return None, None, None, None
