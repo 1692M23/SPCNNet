@@ -674,6 +674,27 @@ def train(model, train_loader, val_loader, config, device, element):
     # 训练全部完成，更新状态
     save_training_state(element, 2, config['training']['num_epochs']-1, best_val_loss, 0, True, True)
     
+    # 训练结束，保存最终模型
+    # 使用标准命名约定保存最终模型，避免找不到模型文件的问题
+    final_model_path = os.path.join(config.model_config['model_dir'], f'SpectralResCNN_GCN_{element}.pth')
+    
+    # 保存整个模型的state_dict
+    try:
+        torch.save(model.state_dict(), final_model_path)
+        logger.info(f"成功保存最终模型: {final_model_path}")
+    except Exception as e:
+        logger.error(f"保存最终模型失败: {str(e)}")
+        # 尝试备用保存方式
+        try:
+            backup_path = os.path.join(config.model_config['model_dir'], f'{element}_model.pth')
+            torch.save(model.state_dict(), backup_path)
+            logger.info(f"成功保存备用最终模型: {backup_path}")
+        except Exception as e2:
+            logger.error(f"保存备用最终模型也失败: {str(e2)}")
+    
+    # 同时保存检查点格式的模型以备后续使用
+    save_checkpoint(model, optimizer, scheduler, epoch, best_val_loss, element, 'best_model')
+    
     return train_losses, val_losses
 
 # =============== 3. 评估相关 ===============

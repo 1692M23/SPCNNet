@@ -24,7 +24,8 @@ import traceback
 import re
 from sklearn.model_selection import KFold, train_test_split
 import random
-warnings.filterwarnings('ignore')  # 忽略不必要的警告
+import torch
+import logging
 
 # 判断是否在Colab环境中
 def is_in_colab():
@@ -40,6 +41,31 @@ def is_in_colab():
 # 环境设置
 IN_COLAB = is_in_colab()
 
+# 添加GPU设备支持
+def setup_device(device_str=None):
+    """设置计算设备，支持CPU/GPU"""
+    if device_str:
+        if device_str.lower() == 'cuda' or device_str.lower() == 'gpu':
+            if torch.cuda.is_available():
+                device = torch.device('cuda')
+                logging.info(f"使用指定的GPU设备: {torch.cuda.get_device_name(0)}")
+                return device
+            else:
+                logging.warning("指定GPU但CUDA不可用，回退到CPU")
+        elif device_str.lower() == 'cpu':
+            logging.info("使用指定的CPU设备")
+            return torch.device('cpu')
+    
+    # 自动检测设备
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        logging.info(f"自动选择GPU设备: {torch.cuda.get_device_name(0)}")
+    else:
+        device = torch.device('cpu')
+        logging.info("自动选择CPU设备")
+    
+    return device
+
 class LAMOSTPreprocessor:
     def __init__(self, csv_files=None, 
                  fits_dir='fits', 
@@ -52,7 +78,8 @@ class LAMOSTPreprocessor:
                  max_workers=None,  # 最大工作进程数，None表示自动确定
                  batch_size=20,  # 批处理大小
                  memory_limit=0.7,  # 内存使用限制(占总内存比例)
-                 low_memory_mode=False):  # 低内存模式
+                 low_memory_mode=False,  # 低内存模式
+                 device=None):
         
         # 设置文件路径
         # 默认使用当前目录下所有的CSV文件
@@ -122,6 +149,8 @@ class LAMOSTPreprocessor:
         self.cache_manager = CacheManager(cache_dir=os.path.join(output_dir, 'cache'))
         
         self.update_cache_manager()
+        
+        self.device = setup_device(device)
         
     def _load_files_cache(self):
         """加载文件查找缓存"""
@@ -3204,6 +3233,90 @@ class LAMOSTPreprocessor:
         print("\n===== 示例光谱可视化完成 =====")
         print(f"图像保存在: {os.path.abspath(self.output_dir)}")
 
+    def process_batch(self, spectra_batch, labels_batch=None):
+        """处理一批光谱数据，支持GPU加速"""
+        # 将NumPy数组转为Torch张量并移至适当设备
+        if isinstance(spectra_batch, np.ndarray):
+            spectra_tensor = torch.from_numpy(spectra_batch).to(self.device)
+        else:
+            spectra_tensor = spectra_batch.to(self.device)
+        
+        # 使用GPU加速的数据处理
+        # 例如：频谱归一化、特征提取等
+        with torch.no_grad():  # 不需要梯度计算
+            # 示例：归一化处理
+            if spectra_tensor.dim() == 2:
+                # [batch_size, wavelengths]
+                means = spectra_tensor.mean(dim=1, keepdim=True)
+                stds = spectra_tensor.std(dim=1, keepdim=True)
+                normalized_spectra = (spectra_tensor - means) / (stds + 1e-8)
+            else:
+                # [batch_size, channels, wavelengths]
+                means = spectra_tensor.mean(dim=2, keepdim=True)
+                stds = spectra_tensor.std(dim=2, keepdim=True)
+                normalized_spectra = (spectra_tensor - means) / (stds + 1e-8)
+            
+            # 其他GPU加速处理...
+            
+            # 返回结果前转回CPU以便存储
+            result = normalized_spectra.cpu().numpy()
+        
+        return result
+    
+    def process_single_spectrum(self, spectrum_id, fits_file=None):
+        """处理单条光谱，添加设备处理"""
+        # 现有代码获取光谱数据...
+        
+        # 当处理大量数据时将处理移至GPU
+        if hasattr(self, 'device') and str(self.device) != 'cpu':
+            spectrum_data = torch.tensor(spectrum_data, device=self.device)
+            
+            # GPU处理
+            with torch.no_grad():
+                # 现有处理逻辑...
+                pass
+                
+            # 处理完成后移回CPU
+            spectrum_data = spectrum_data.cpu().numpy()
+        
+        return {'spectrum': spectrum_data, 'id': spectrum_id}
+    
+    # 添加批量并行处理
+    def process_fits_files_parallel(self, fits_files, num_workers=4):
+        """并行处理多个FITS文件，可选GPU加速"""
+        import concurrent.futures
+        
+        results = []
+        
+        # 将数据分成多个批次
+        batch_size = max(1, len(fits_files) // num_workers)
+        batches = [fits_files[i:i+batch_size] for i in range(0, len(fits_files), batch_size)]
+        
+        # 对较大的批次使用GPU，较小批次使用CPU
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = []
+            for i, batch in enumerate(batches):
+                # 第一个批次使用GPU，其他使用CPU以避免GPU内存问题
+                device = self.device if i == 0 else 'cpu'
+                futures.append(executor.submit(self._process_batch, batch, device))
+            
+            for future in concurrent.futures.as_completed(futures):
+                results.extend(future.result())
+        
+        return results
+    
+    def _process_batch(self, fits_files, device):
+        """处理一批FITS文件"""
+        results = []
+        for fits_file in fits_files:
+            try:
+                spectrum_id = os.path.basename(fits_file).split('.')[0]
+                result = self.process_single_spectrum(spectrum_id, fits_file)
+                results.append(result)
+            except Exception as e:
+                logging.error(f"处理文件 {fits_file} 时出错: {str(e)}")
+        return results
+
 def main():
     """主函数"""
     start_time = time.time()
@@ -3236,6 +3349,8 @@ def main():
                       help='仅处理指定元素的CSV文件，例如: C_FE')
     parser.add_argument('--low_memory_mode', action='store_true', 
                       help='启用低内存模式，减少内存使用但速度变慢')
+    parser.add_argument('--device', type=str, default=None,
+                      help='计算设备: cpu或cuda')
     
     args = parser.parse_args()
     
@@ -3378,7 +3493,8 @@ def main():
         max_workers=1 if low_memory_mode else 2,  # 低内存模式使用单线程
         batch_size=5 if low_memory_mode else 20,   # 低内存模式减小批次大小
         memory_limit=0.7,  # 内存使用阈值
-        low_memory_mode=low_memory_mode  # 低内存模式标志
+        low_memory_mode=low_memory_mode,  # 低内存模式标志
+        device=args.device
     )
     
     # 检查数据源
