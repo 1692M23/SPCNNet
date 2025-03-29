@@ -534,6 +534,111 @@ def visualize_training(element, train_metrics, val_metrics, output_dir=None):
     
     logger.info(f"已保存训练过程可视化图表")
 
+class TrainingStateManager:
+    """
+    训练状态管理器，用于管理训练过程的中断和恢复
+    """
+    def __init__(self, element, model_dir='models'):
+        self.element = element
+        self.states_dir = os.path.join(model_dir, 'training_states')
+        os.makedirs(self.states_dir, exist_ok=True)
+        self.state_file = os.path.join(self.states_dir, f'training_state_{element}.json')
+        self.checkpoint_file = os.path.join(model_dir, f'checkpoint_{element}.pth')
+        
+    def save_state(self, stage, epoch, best_val_loss, patience_counter, 
+                  stage1_completed=False, training_completed=False):
+        """保存训练状态"""
+        import json
+        import time
+        
+        state = {
+            'element': self.element,
+            'current_stage': stage,
+            'current_epoch': epoch,
+            'best_val_loss': best_val_loss,
+            'patience_counter': patience_counter,
+            'stage1_completed': stage1_completed,
+            'training_completed': training_completed,
+            'timestamp': time.time()
+        }
+        
+        with open(self.state_file, 'w') as f:
+            json.dump(state, f, indent=4)
+            
+        return True
+    
+    def load_state(self):
+        """加载训练状态"""
+        if not os.path.exists(self.state_file):
+            logger.info(f"找不到训练状态文件: {self.state_file}")
+            return None
+        
+        try:
+            import json
+            with open(self.state_file, 'r') as f:
+                state = json.load(f)
+            
+            logger.info(f"加载训练状态: 阶段={state.get('current_stage')}, 轮次={state.get('current_epoch')}")
+            return state
+        except Exception as e:
+            logger.error(f"加载训练状态失败: {str(e)}")
+            return None
+    
+    def save_checkpoint(self, model, optimizer, scheduler, epoch, loss):
+        """保存检查点"""
+        import torch
+        
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+            'loss': loss
+        }
+        
+        torch.save(checkpoint, self.checkpoint_file)
+        return True
+    
+    def load_checkpoint(self, model, optimizer=None, scheduler=None, device=None):
+        """加载检查点"""
+        if not os.path.exists(self.checkpoint_file):
+            logger.info(f"找不到检查点文件: {self.checkpoint_file}")
+            return None
+        
+        try:
+            import torch
+            
+            # 根据设备加载检查点
+            if device:
+                checkpoint = torch.load(self.checkpoint_file, map_location=device)
+            else:
+                checkpoint = torch.load(self.checkpoint_file)
+            
+            # 加载模型状态
+            model.load_state_dict(checkpoint['model_state_dict'])
+            
+            # 如果提供了优化器，加载优化器状态
+            if optimizer and 'optimizer_state_dict' in checkpoint:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            
+            # 如果提供了调度器，加载调度器状态
+            if scheduler and 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict']:
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            
+            logger.info(f"加载检查点: 轮次={checkpoint.get('epoch')}, 损失={checkpoint.get('loss'):.6f}")
+            return checkpoint
+        except Exception as e:
+            logger.error(f"加载检查点失败: {str(e)}")
+            return None
+            
+    def clear_state(self):
+        """清除训练状态"""
+        if os.path.exists(self.state_file):
+            os.remove(self.state_file)
+        if os.path.exists(self.checkpoint_file):
+            os.remove(self.checkpoint_file)
+        return True
+
 def process_element(element, model_type=None, input_size=None, use_gpu=True):
     """
     处理单个元素的训练和评估
@@ -546,6 +651,12 @@ def process_element(element, model_type=None, input_size=None, use_gpu=True):
     """
     logger = logging.getLogger('main')
     logger.info(f"开始处理元素: {element}")
+    
+    # 创建训练状态管理器
+    state_manager = TrainingStateManager(
+        element=element, 
+        model_dir=config.model_config.get('model_dir', 'models')
+    )
     
     # 配置设备
     if use_gpu:
@@ -612,6 +723,24 @@ def process_element(element, model_type=None, input_size=None, use_gpu=True):
     val_loader = create_data_loaders(X_val, y_val, batch_size=batch_size, shuffle=False)
     test_loader = create_data_loaders(X_test, y_test, batch_size=batch_size, shuffle=False)
     
+    # 检查是否存在训练状态
+    state = state_manager.load_state()
+    if state and not state.get('training_completed', False):
+        logger.info(f"发现未完成的训练状态，准备从中断点恢复")
+        
+        # 创建优化器和调度器以便加载检查点
+        optimizer = torch.optim.Adam(model.parameters(), 
+                                    lr=config.training_config.get('lr', 0.001),
+                                    weight_decay=config.training_config.get('weight_decay', 1e-4))
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
+        
+        # 加载检查点
+        checkpoint = state_manager.load_checkpoint(model, optimizer, scheduler, device)
+        if checkpoint:
+            logger.info("成功恢复模型状态，将从中断点继续训练")
+        else:
+            logger.warning("无法恢复模型状态，将从头开始训练")
+    
     # 训练和评估模型
     logger.info(f"开始训练 {element} 模型")
     
@@ -633,6 +762,10 @@ def process_element(element, model_type=None, input_size=None, use_gpu=True):
     best_model, val_loss, test_metrics = train_and_evaluate_model(
         train_loader, val_loader, test_loader, element, config
     )
+    
+    # 训练完成，清除中断恢复状态
+    state_manager.save_state(2, config.training_config.get('num_epochs', 100), val_loss, 0, 
+                            stage1_completed=True, training_completed=True)
     
     logger.info(f"元素 {element} 的处理完成")
     logger.info(f"验证损失: {val_loss:.6f}")

@@ -405,206 +405,247 @@ def train(model, train_loader, val_loader, config, device, element):
     
     logger.info(f"在 {device_type} 设备上训练模型: {device}")
     
+    # 创建训练状态恢复文件路径
+    training_state_dir = os.path.join(config['model_config']['model_dir'], 'training_states')
+    os.makedirs(training_state_dir, exist_ok=True)
+    training_state_file = os.path.join(training_state_dir, f'training_state_{element}.json')
+    
+    # 检查是否存在训练状态文件
+    resume_training = False
+    current_stage = 1  # 默认从第一阶段开始
+    start_epoch = 0    # 默认从第0轮开始
+    best_val_loss = float('inf')
+    patience_counter = 0
+    
+    if os.path.exists(training_state_file):
+        try:
+            import json
+            with open(training_state_file, 'r') as f:
+                training_state = json.load(f)
+                
+            current_stage = training_state.get('current_stage', 1)
+            start_epoch = training_state.get('current_epoch', 0) + 1  # 从下一轮开始
+            best_val_loss = training_state.get('best_val_loss', float('inf'))
+            patience_counter = training_state.get('patience_counter', 0)
+            
+            # 如果上次训练已经完成，重新开始
+            if training_state.get('training_completed', False):
+                logger.info(f"找到已完成的训练状态文件，将重新开始训练")
+                current_stage = 1
+                start_epoch = 0
+                best_val_loss = float('inf')
+                patience_counter = 0
+            else:
+                logger.info(f"从中断点恢复训练: 阶段{current_stage}, 轮次{start_epoch}")
+                resume_training = True
+                
+                # 如果发现阶段1已经完成，准备开始阶段2
+                if current_stage == 1 and training_state.get('stage1_completed', False):
+                    logger.info("第一阶段已完成，将从第二阶段开始")
+                    current_stage = 2
+                    start_epoch = 0
+        except Exception as e:
+            logger.warning(f"读取训练状态文件失败: {str(e)}，将重新开始训练")
+    
     # 设置优化器和学习率调度器
     optimizer = optim.Adam(model.parameters(), 
                           lr=config['training']['lr'],
                           weight_decay=config['training']['weight_decay'])
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
     
+    # 如果恢复训练，尝试加载模型和优化器状态
+    if resume_training:
+        checkpoint_path = os.path.join(config['model_config']['model_dir'], f'checkpoint_{element}.pth')
+        if os.path.exists(checkpoint_path):
+            try:
+                checkpoint = torch.load(checkpoint_path, map_location=device)
+                model.load_state_dict(checkpoint['model_state_dict'])
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                logger.info(f"成功加载模型和优化器状态")
+            except Exception as e:
+                logger.warning(f"加载模型和优化器状态失败: {str(e)}")
+    
     # 设置损失函数
     criterion = nn.MSELoss()
-    
-    # 设置早停
-    best_val_loss = float('inf')
-    patience = config['training']['early_stopping_patience']
-    patience_counter = 0
     
     # 训练记录
     train_losses = []
     val_losses = []
     
-    # 第一阶段：只训练特征提取器的前几层
-    logger.info("开始第一阶段训练 - 特征提取器")
-    
-    # 获取模型的所有参数
-    all_params = list(model.parameters())
-    # 冻结最后一层的参数
-    for param in all_params[-2:]:  # 最后一个线性层的权重和偏置
-        param.requires_grad = False
-    
-    for epoch in range(config['training']['num_epochs']):
-        model.train()
-        total_loss = 0
-        batch_count = 0
+    # 第一阶段或第二阶段的训练过程
+    def train_stage(stage, start_from_epoch=0, initial_best_val_loss=float('inf'), initial_patience=0):
+        """训练指定阶段"""
+        nonlocal train_losses, val_losses
+        best_val_loss = initial_best_val_loss
+        patience_counter = initial_patience
+        stage_completed = False
         
-        for batch_idx, (data, target) in enumerate(train_loader):
-            # 将数据移动到正确的设备 - 支持TPU/GPU/CPU
-            data = move_to_device(data, device)
-            target = move_to_device(target, device)
-            
-            # 检查数据是否包含NaN
-            if torch.isnan(data).any() or torch.isnan(target).any():
-                logger.warning("检测到输入数据包含NaN值，跳过该批次")
-                continue
-            
-            # TPU特定处理：清除之前的梯度
-            optimizer.zero_grad()
-            
-            # 前向传播
-            output = model(data)
-            loss = criterion(output, target)
-            
-            # 反向传播
-            loss.backward()
-            
-            # 梯度裁剪
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
-            # 优化器步进
-            optimizer.step()
-            
-            # TPU特定处理：确保梯度更新已应用
-            if device_type == 'tpu':
-                if HAS_XLA:
-                    xm.mark_step()
-            
-            total_loss += loss.item()
-            batch_count += 1
-            
-            if batch_idx % 10 == 0:
-                logger.info(f"第一阶段 - 轮次: {epoch} [{batch_idx}/{len(train_loader)}], 损失: {loss.item():.6f}")
+        # 冻结或解冻参数，根据阶段设置
+        if stage == 1:
+            logger.info("开始第一阶段训练 - 特征提取器")
+            # 获取模型的所有参数
+            all_params = list(model.parameters())
+            # 冻结最后一层的参数
+            for param in all_params[-2:]:  # 最后一个线性层的权重和偏置
+                param.requires_grad = False
+        else:
+            logger.info("开始第二阶段训练 - 全模型微调")
+            # 解冻所有层
+            for param in model.parameters():
+                param.requires_grad = True
+                
+            # 重置优化器和学习率 - 第二阶段使用较小的学习率
+            nonlocal optimizer, scheduler
+            optimizer = optim.Adam(model.parameters(), 
+                                  lr=config['training']['lr'] * 0.1,
+                                  weight_decay=config['training']['weight_decay'])
+            scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2)
         
-        # 更新学习率
-        scheduler.step()
-        
-        # 验证
-        model.eval()
-        val_loss = 0
-        with torch.no_grad():
-            for data, target in val_loader:
+        # 从指定轮次开始训练
+        for epoch in range(start_from_epoch, config['training']['num_epochs']):
+            model.train()
+            total_loss = 0
+            batch_count = 0
+            
+            for batch_idx, (data, target) in enumerate(train_loader):
                 # 将数据移动到正确的设备 - 支持TPU/GPU/CPU
                 data = move_to_device(data, device)
                 target = move_to_device(target, device)
+                
+                # 检查数据是否包含NaN
+                if torch.isnan(data).any() or torch.isnan(target).any():
+                    logger.warning("检测到输入数据包含NaN值，跳过该批次")
+                    continue
+                
+                # TPU特定处理：清除之前的梯度
+                optimizer.zero_grad()
                 
                 # 前向传播
                 output = model(data)
-                val_loss += criterion(output, target).item()
+                loss = criterion(output, target)
                 
-                # TPU特定处理：确保计算已完成
+                # 反向传播
+                loss.backward()
+                
+                # 梯度裁剪
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
+                # 优化器步进
+                optimizer.step()
+                
+                # TPU特定处理：确保梯度更新已应用
                 if device_type == 'tpu':
                     if HAS_XLA:
                         xm.mark_step()
-        
-        val_loss /= len(val_loader)
-        train_loss = total_loss / batch_count if batch_count > 0 else float('inf')
-        
-        train_losses.append(train_loss)
-        val_losses.append(val_loss)
-        
-        logger.info(f"第一阶段 - 轮次: {epoch}, 训练损失: {train_loss:.6f}, 验证损失: {val_loss:.6f}")
-        
-        # 早停检查
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            patience_counter = 0
-            # 保存最佳模型
-            save_model(model, optimizer, scheduler, epoch, val_loss, config['model_config']['model_dir'], element)
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                logger.info(f"第一阶段 - 早停触发，最佳验证损失: {best_val_loss:.6f}")
-                break
-    
-    # 第二阶段：微调全模型
-    logger.info("开始第二阶段训练 - 全模型微调")
-    # 解冻所有层
-    for param in model.parameters():
-        param.requires_grad = True
-    
-    # 重置优化器和学习率
-    optimizer = optim.Adam(model.parameters(), 
-                          lr=config['training']['lr'] * 0.1,
-                          weight_decay=config['training']['weight_decay'])
-    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2)
-    
-    # 重置早停
-    best_val_loss = float('inf')
-    patience_counter = 0
-    
-    for epoch in range(config['training']['num_epochs']):
-        model.train()
-        total_loss = 0
-        batch_count = 0
-        
-        for batch_idx, (data, target) in enumerate(train_loader):
-            # 将数据移动到正确的设备 - 支持TPU/GPU/CPU
-            data = move_to_device(data, device)
-            target = move_to_device(target, device)
-            
-            if torch.isnan(data).any() or torch.isnan(target).any():
-                logger.warning("检测到输入数据包含NaN值，跳过该批次")
-                continue
-            
-            optimizer.zero_grad()
-            output = model(data)
-            loss = criterion(output, target)
-            loss.backward()
-            
-            # 梯度裁剪
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
-            optimizer.step()
-            
-            # TPU特定处理：确保梯度更新已应用
-            if device_type == 'tpu':
-                if HAS_XLA:
-                    xm.mark_step()
-            
-            total_loss += loss.item()
-            batch_count += 1
-            
-            if batch_idx % 10 == 0:
-                logger.info(f"第二阶段 - 轮次: {epoch} [{batch_idx}/{len(train_loader)}], 损失: {loss.item():.6f}")
-        
-        # 更新学习率
-        scheduler.step()
-        
-        # 验证
-        model.eval()
-        val_loss = 0
-        with torch.no_grad():
-            for data, target in val_loader:
-                # 将数据移动到正确的设备 - 支持TPU/GPU/CPU
-                data = move_to_device(data, device)
-                target = move_to_device(target, device)
                 
-                output = model(data)
-                val_loss += criterion(output, target).item()
+                total_loss += loss.item()
+                batch_count += 1
                 
-                # TPU特定处理：确保计算已完成
-                if device_type == 'tpu':
-                    if HAS_XLA:
-                        xm.mark_step()
+                if batch_idx % 10 == 0:
+                    logger.info(f"第{stage}阶段 - 轮次: {epoch} [{batch_idx}/{len(train_loader)}], 损失: {loss.item():.6f}")
+            
+            # 更新学习率
+            scheduler.step()
+            
+            # 验证
+            model.eval()
+            val_loss = 0
+            with torch.no_grad():
+                for data, target in val_loader:
+                    # 将数据移动到正确的设备 - 支持TPU/GPU/CPU
+                    data = move_to_device(data, device)
+                    target = move_to_device(target, device)
+                    
+                    # 前向传播
+                    output = model(data)
+                    val_loss += criterion(output, target).item()
+                    
+                    # TPU特定处理：确保计算已完成
+                    if device_type == 'tpu':
+                        if HAS_XLA:
+                            xm.mark_step()
+            
+            val_loss /= len(val_loader)
+            train_loss = total_loss / batch_count if batch_count > 0 else float('inf')
+            
+            train_losses.append(train_loss)
+            val_losses.append(val_loss)
+            
+            logger.info(f"第{stage}阶段 - 轮次: {epoch}, 训练损失: {train_loss:.6f}, 验证损失: {val_loss:.6f}")
+            
+            # 更新训练状态并保存
+            save_training_state(element, stage, epoch, best_val_loss, patience_counter, False, stage==1 and stage_completed)
+            
+            # 保存当前检查点，用于恢复训练
+            save_checkpoint(model, optimizer, scheduler, epoch, val_loss, element, 'checkpoint')
+            
+            # 早停检查
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                patience_counter = 0
+                # 保存最佳模型
+                save_model(model, optimizer, scheduler, epoch, val_loss, config['model_config']['model_dir'], element)
+            else:
+                patience_counter += 1
+                if patience_counter >= config['training']['early_stopping_patience']:
+                    logger.info(f"第{stage}阶段 - 早停触发，最佳验证损失: {best_val_loss:.6f}")
+                    stage_completed = True
+                    break
         
-        val_loss /= len(val_loader)
-        train_loss = total_loss / batch_count if batch_count > 0 else float('inf')
+        # 如果没有提前停止，标记阶段完成
+        if not stage_completed and epoch == config['training']['num_epochs'] - 1:
+            stage_completed = True
+            
+        return best_val_loss, stage_completed
+    
+    # 保存训练状态的辅助函数
+    def save_training_state(element, current_stage, current_epoch, best_val_loss, patience_counter, 
+                           training_completed=False, stage1_completed=False):
+        """保存当前训练状态"""
+        import json
         
-        train_losses.append(train_loss)
-        val_losses.append(val_loss)
+        training_state = {
+            'element': element,
+            'current_stage': current_stage,
+            'current_epoch': current_epoch,
+            'best_val_loss': best_val_loss,
+            'patience_counter': patience_counter,
+            'training_completed': training_completed,
+            'stage1_completed': stage1_completed,
+            'timestamp': time.time()
+        }
         
-        logger.info(f"第二阶段 - 轮次: {epoch}, 训练损失: {train_loss:.6f}, 验证损失: {val_loss:.6f}")
+        with open(training_state_file, 'w') as f:
+            json.dump(training_state, f, indent=4)
+    
+    # 保存当前检查点的辅助函数，用于恢复训练
+    def save_checkpoint(model, optimizer, scheduler, epoch, loss, element, checkpoint_type='checkpoint'):
+        """保存训练检查点"""
+        checkpoint_path = os.path.join(config['model_config']['model_dir'], f'{checkpoint_type}_{element}.pth')
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'loss': loss,
+        }, checkpoint_path)
+    
+    # 根据当前阶段进行训练
+    if current_stage == 1:
+        # 执行第一阶段训练
+        best_val_loss, stage1_completed = train_stage(1, start_epoch, best_val_loss, patience_counter)
         
-        # 早停检查
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            patience_counter = 0
-            # 保存最佳模型
-            save_model(model, optimizer, scheduler, epoch, val_loss, config['model_config']['model_dir'], element)
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                logger.info(f"第二阶段 - 早停触发，最佳验证损失: {best_val_loss:.6f}")
-                break
+        # 如果第一阶段完成，继续第二阶段
+        if stage1_completed:
+            save_training_state(element, 1, config['training']['num_epochs']-1, best_val_loss, 0, False, True)
+            best_val_loss, _ = train_stage(2, 0, float('inf'), 0)
+    else:
+        # 从第二阶段继续
+        best_val_loss, _ = train_stage(2, start_epoch, best_val_loss, patience_counter)
+    
+    # 训练全部完成，更新状态
+    save_training_state(element, 2, config['training']['num_epochs']-1, best_val_loss, 0, True, True)
     
     return train_losses, val_losses
 
