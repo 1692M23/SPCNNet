@@ -93,7 +93,7 @@ class LAMOSTPreprocessor:
         print("正在加载文件查找缓存...")
         self._load_files_cache()
         
-        self.wavelength_range = wavelength_range if wavelength_range else (2690, 9100)  # 默认范围
+        self.wavelength_range = wavelength_range if wavelength_range else (3690, 9100)  # 默认范围
         self.n_points = n_points
         self.log_step = log_step
         self.compute_common_range = compute_common_range
@@ -1390,25 +1390,85 @@ class LAMOSTPreprocessor:
                 try:
                     with open(progress_file, 'rb') as f:
                         saved_data = pickle.load(f)
-                        results = saved_data.get('results', [])
-                        start_idx = saved_data.get('last_idx', 0)
+                        
+                        # 检查保存的数据结构
+                        if isinstance(saved_data, dict) and 'results' in saved_data:
+                            # 新格式：字典中包含results和last_idx
+                            results = saved_data.get('results', [])
+                            start_idx = saved_data.get('last_idx', 0)
+                        elif isinstance(saved_data, list):
+                            # 旧格式：直接是结果列表
+                            results = saved_data
+                            # 如果是列表，start_idx应该等于已处理的数量
+                            start_idx = len(results)
+                        else:
+                            print(f"未识别的缓存数据格式: {type(saved_data)}，将从头开始处理")
+                            results = []
+                            start_idx = 0
+                        
                         total_processed = len(results)
                         print(f"从上次中断处继续（已处理{total_processed}条记录，进度：{total_processed/len(spec_files):.2%}）")
+                        
+                        # 确保所有结果都有元素信息
+                        for result in results:
+                            if isinstance(result, dict):
+                                if 'metadata' in result and 'element' not in result['metadata']:
+                                    result['metadata']['element'] = element
+                                elif 'element' not in result:
+                                    result['element'] = element
+                        
+                        # 如果已经处理完所有数据，直接返回
+                        if total_processed >= len(spec_files):
+                            print(f"{element}数据已全部处理完成，共{total_processed}条记录")
+                            return results
+                        
                 except Exception as e:
                     print(f"加载进度文件出错: {e}，将从头开始处理")
+                    import traceback
+                    traceback.print_exc()
                     start_idx = 0
+                    results = []
+                    
             # 如果标准目录没有，尝试Google Drive
             elif os.path.exists(drive_progress_file):
                 try:
                     with open(drive_progress_file, 'rb') as f:
                         saved_data = pickle.load(f)
-                        results = saved_data.get('results', [])
-                        start_idx = saved_data.get('last_idx', 0)
+                        
+                        # 同样检查数据结构
+                        if isinstance(saved_data, dict) and 'results' in saved_data:
+                            results = saved_data.get('results', [])
+                            start_idx = saved_data.get('last_idx', 0)
+                        elif isinstance(saved_data, list):
+                            results = saved_data
+                            start_idx = len(results)
+                        else:
+                            print(f"未识别的缓存数据格式: {type(saved_data)}，将从头开始处理")
+                            results = []
+                            start_idx = 0
+                        
                         total_processed = len(results)
                         print(f"从Google Drive加载进度（已处理{total_processed}条记录，进度：{total_processed/len(spec_files):.2%}）")
+                        
+                        # 确保所有结果都有元素信息
+                        for result in results:
+                            if isinstance(result, dict):
+                                if 'metadata' in result and 'element' not in result['metadata']:
+                                    result['metadata']['element'] = element
+                                elif 'element' not in result:
+                                    result['element'] = element
+                        
+                        # 如果已经处理完所有数据，直接返回
+                        if total_processed >= len(spec_files):
+                            print(f"{element}数据已全部处理完成，共{total_processed}条记录")
+                            return results
+                        
                 except Exception as e:
                     print(f"加载Google Drive进度文件出错: {e}，将从头开始处理")
+                    import traceback
+                    traceback.print_exc()
                     start_idx = 0
+                    results = []
         
         # 计算剩余的批次
         remaining = len(spec_files) - start_idx
@@ -1643,6 +1703,42 @@ class LAMOSTPreprocessor:
                     all_data = pickle.load(f)
                 print(f"从缓存加载全部数据，共 {len(all_data)} 条记录")
                 
+                # 检查数据结构，可能是直接结果列表或者包含元数据的字典
+                if not isinstance(all_data, list):
+                    print(f"警告: 缓存数据格式不正确，类型: {type(all_data)}")
+                    print("不使用缓存，重新处理数据")
+                    all_data = []
+                elif len(all_data) == 0:
+                    print("缓存数据为空，将重新处理")
+                else:
+                    # 检查列表中第一个元素，确认其结构
+                    print(f"缓存数据第一条记录类型: {type(all_data[0])}")
+                    if all_data[0] is not None and not isinstance(all_data[0], dict):
+                        print(f"警告: 缓存数据记录格式不正确，第一条记录类型: {type(all_data[0])}")
+                        print("不使用缓存，重新处理数据")
+                        all_data = []
+                    else:
+                        # 验证每条记录是否有必要的字段
+                        valid_records = []
+                        for i, record in enumerate(all_data):
+                            if record is None:
+                                print(f"跳过第{i+1}条记录: 记录为None")
+                                continue
+                            if not isinstance(record, dict):
+                                print(f"跳过第{i+1}条记录: 不是字典类型，而是 {type(record)}")
+                                continue
+                            if 'data' not in record and 'spectrum' not in record:
+                                print(f"跳过第{i+1}条记录: 缺少光谱数据")
+                                continue
+                            if 'metadata' not in record and 'filename' not in record:
+                                print(f"跳过第{i+1}条记录: 缺少元数据")
+                                continue
+                            
+                            valid_records.append(record)
+                        
+                        all_data = valid_records
+                        print(f"验证后有效记录数: {len(all_data)}")
+                
                 # 询问是否继续
                 if isinstance(all_data, list) and len(all_data) > 0:
                     choice = input(f"找到{len(all_data)}条处理好的记录，是否使用这些缓存数据? (y/n): ")
@@ -1667,14 +1763,29 @@ class LAMOSTPreprocessor:
                         # 如果用户要求，随机可视化几条光谱
                         if input("是否随机可视化几条光谱? (y/n): ").lower() == 'y':
                             n_samples = min(len(all_data), 3)
-                            samples = random.sample(all_data, n_samples)
-                            for sample in samples:
-                                filename = sample.get('filename')
-                                if filename:
-                                    print(f"可视化: {filename}")
-                                    self.visualize_spectrum(filename, processed=True, save=True)
-                                else:
-                                    print("样本中没有文件名信息")
+                            try:
+                                samples = random.sample(all_data, n_samples)
+                                for sample in samples:
+                                    # 安全地获取文件名
+                                    filename = None
+                                    if isinstance(sample, dict):
+                                        if 'filename' in sample:
+                                            filename = sample['filename']
+                                        elif 'metadata' in sample and isinstance(sample['metadata'], dict) and 'filename' in sample['metadata']:
+                                            filename = sample['metadata']['filename']
+                                    elif isinstance(sample, str):
+                                        # 直接使用字符串作为文件名
+                                        filename = sample
+                                        
+                                    if filename:
+                                        print(f"可视化: {filename}")
+                                        self.visualize_spectrum(filename, processed=True, save=True)
+                                    else:
+                                        print(f"样本中没有文件名信息: {type(sample)}")
+                            except Exception as e:
+                                print(f"可视化过程中出错: {e}")
+                                import traceback
+                                traceback.print_exc()
                         
                         # 询问是否需要分割数据集
                         if input("是否需要划分数据集? (y/n): ").lower() == 'y':
@@ -1787,14 +1898,29 @@ class LAMOSTPreprocessor:
         # 第四步：询问是否随机可视化
         if all_data and input("是否随机可视化几条光谱? (y/n): ").lower() == 'y':
             n_samples = min(len(all_data), 3)
-            samples = random.sample(all_data, n_samples)
-            for sample in samples:
-                filename = sample.get('filename')
-                if filename:
-                    print(f"可视化: {filename}")
-                    self.visualize_spectrum(filename, processed=True, save=True)
-                else:
-                    print("样本中没有文件名信息")
+            try:
+                samples = random.sample(all_data, n_samples)
+                for sample in samples:
+                    # 安全地获取文件名
+                    filename = None
+                    if isinstance(sample, dict):
+                        if 'filename' in sample:
+                            filename = sample['filename']
+                        elif 'metadata' in sample and isinstance(sample['metadata'], dict) and 'filename' in sample['metadata']:
+                            filename = sample['metadata']['filename']
+                    elif isinstance(sample, str):
+                        # 直接使用字符串作为文件名
+                        filename = sample
+                        
+                    if filename:
+                        print(f"可视化: {filename}")
+                        self.visualize_spectrum(filename, processed=True, save=True)
+                    else:
+                        print(f"样本中没有文件名信息: {type(sample)}")
+            except Exception as e:
+                print(f"可视化过程中出错: {e}")
+                import traceback
+                traceback.print_exc()
         
         # 最终处理数据
         if all_data:
