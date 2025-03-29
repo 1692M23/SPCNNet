@@ -302,6 +302,28 @@ def train(model, train_loader, val_loader, config, device, element):
     """训练模型"""
     logger = logging.getLogger('model')
     
+    # 配置兼容性处理：确保config有正确的结构
+    if 'training' not in config:
+        if 'training_config' in config:
+            logger.warning("配置结构使用了'training_config'键而非'training'键，正在转换...")
+            config['training'] = config['training_config']
+        else:
+            logger.error("配置缺少训练参数！尝试创建默认配置。")
+            config['training'] = {
+                'lr': 0.001,
+                'weight_decay': 1e-4,
+                'num_epochs': 50,
+                'early_stopping_patience': 10
+            }
+    
+    # 确保model_config路径存在
+    if 'model_config' not in config or 'model_dir' not in config['model_config']:
+        if 'model_dir' not in config.get('model_config', {}):
+            logger.warning("配置缺少model_dir路径，使用默认路径。")
+            if 'model_config' not in config:
+                config['model_config'] = {}
+            config['model_config']['model_dir'] = 'models'
+    
     # 设置优化器和学习率调度器
     optimizer = optim.Adam(model.parameters(), 
                           lr=config['training']['lr'],
