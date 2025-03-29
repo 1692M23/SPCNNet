@@ -1181,6 +1181,10 @@ class LAMOSTPreprocessor:
                         
                         # 检查CSV是否有spec列
                         if 'spec' in df.columns:
+                            # 确保spec列是字符串类型
+                            if not pd.api.types.is_string_dtype(df['spec']):
+                                df['spec'] = df['spec'].astype(str)
+                                
                             # 在CSV中查找匹配记录
                             matches = df[df['spec'].str.contains(base_file, case=False, na=False)]
                             if not matches.empty:
@@ -1213,6 +1217,10 @@ class LAMOSTPreprocessor:
                             
                             # 检查CSV是否有spec列
                             if 'spec' in df.columns:
+                                # 确保spec列是字符串类型
+                                if not pd.api.types.is_string_dtype(df['spec']):
+                                    df['spec'] = df['spec'].astype(str)
+                                    
                                 # 在CSV中查找匹配记录
                                 base_file = os.path.basename(spec_file)
                                 if '.' in base_file:
