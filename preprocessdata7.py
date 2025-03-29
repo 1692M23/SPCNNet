@@ -3265,21 +3265,61 @@ class LAMOSTPreprocessor:
     
     def process_single_spectrum(self, spectrum_id, fits_file=None):
         """处理单条光谱，添加设备处理"""
-        # 现有代码获取光谱数据...
-        
-        # 当处理大量数据时将处理移至GPU
-        if hasattr(self, 'device') and str(self.device) != 'cpu':
-            spectrum_data = torch.tensor(spectrum_data, device=self.device)
+        try:
+            # 首先调用原始处理方法获取光谱数据
+            result = None
+            # 检查是否有另一个同名方法（可能在类的其他位置）
+            if hasattr(self, 'process_single_spectrum') and callable(getattr(self, 'process_single_spectrum')):
+                # 调用原始方法
+                result = super().process_single_spectrum(spectrum_id, fits_file)
             
-            # GPU处理
-            with torch.no_grad():
-                # 现有处理逻辑...
-                pass
+            # 如果没有获取到结果，执行标准处理
+            if result is None:
+                # 这里放原始的光谱处理代码
+                if fits_file is None:
+                    fits_file = self._find_fits_file(spectrum_id)
                 
-            # 处理完成后移回CPU
-            spectrum_data = spectrum_data.cpu().numpy()
-        
-        return {'spectrum': spectrum_data, 'id': spectrum_id}
+                if fits_file is None or not os.path.exists(fits_file):
+                    logging.error(f"找不到光谱文件: {spectrum_id}")
+                    return None
+                
+                # 读取FITS文件
+                wavelength, flux, header = self.read_fits_file(fits_file)
+                if wavelength is None or flux is None:
+                    logging.error(f"无法读取光谱数据: {fits_file}")
+                    return None
+                
+                # 对光谱进行标准处理...
+                # [这里放原代码中的光谱处理步骤]
+                
+                # 获取最终处理后的光谱数据
+                spectrum_data = flux  # 或其他处理结果
+                
+                result = {'spectrum': spectrum_data, 'id': spectrum_id}
+            
+            # 现在我们有了处理结果，添加GPU支持
+            if result and 'spectrum' in result and hasattr(self, 'device') and str(self.device) != 'cpu':
+                # 确保spectrum_data已定义且有效
+                spectrum_data = result['spectrum']
+                if spectrum_data is not None:
+                    # 将数据移到GPU
+                    spectrum_data = torch.tensor(spectrum_data, device=self.device)
+                    # 执行GPU加速处理
+                    with torch.no_grad():
+                        # 这里可以添加GPU加速的处理逻辑
+                        pass
+                    # 将数据移回CPU
+                    spectrum_data = spectrum_data.cpu().numpy()
+                    # 更新结果
+                    result['spectrum'] = spectrum_data
+            
+            return result
+            
+        except Exception as e:
+            logging.error(f"处理光谱 {spectrum_id} 时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None
     
     # 添加批量并行处理
     def process_fits_files_parallel(self, fits_files, num_workers=4):
