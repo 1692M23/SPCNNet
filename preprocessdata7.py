@@ -2900,20 +2900,32 @@ class LAMOSTPreprocessor:
         
         print("\n=== 诊断完成 ===\n")
 
+    def _validate_wavelength_range(self, data):
+        """验证波长范围数据的函数
+        
+        参数:
+            data: 要验证的数据对象
+            
+        返回:
+            bool: 如果数据是有效的波长范围元组则返回True，否则返回False
+        """
+        # 如果是波长范围元组，直接返回True
+        if isinstance(data, tuple) and len(data) == 2:
+            return True
+        # 否则使用缓存管理器的原始验证方法
+        if hasattr(self.cache_manager, '_original_validate'):
+            return self.cache_manager._original_validate(data)
+        # 如果没有原始验证方法，直接返回True
+        return True
+        
     def update_cache_manager(self):
         """修改缓存管理器的验证功能，允许保存非字典格式的数据"""
-        original_validate = self.cache_manager._validate_cache_data
+        # 保存原始的验证方法
+        if hasattr(self.cache_manager, '_validate_cache_data'):
+            self.cache_manager._original_validate = self.cache_manager._validate_cache_data
         
-        # 定义验证函数，避免使用lambda
-        def validate_func(data):
-            # 如果是波长范围元组，直接返回True
-            if isinstance(data, tuple) and len(data) == 2:
-                return True
-            # 否则使用原始验证
-            return original_validate(data)
-        
-        # 替换验证方法
-        self.cache_manager._validate_cache_data = validate_func
+        # 替换验证方法为类方法
+        self.cache_manager._validate_cache_data = self._validate_wavelength_range
 
 def main():
     """主函数"""
