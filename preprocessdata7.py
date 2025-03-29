@@ -1715,7 +1715,7 @@ class LAMOSTPreprocessor:
                                 continue
                                 
                             # 读取FITS文件，获取波长和流量
-                            wavelength, flux, v_helio, z, snr_b, snr_r, snr_i = self.read_fits_file(file_path)
+                            wavelength, flux, v_helio, z, snr, snr_bands = self.read_fits_file(file_path)
                             if wavelength is None or flux is None:
                                 print(f"无法读取波长和流量数据: {file_path}")
                                 continue
@@ -2402,7 +2402,11 @@ class LAMOSTPreprocessor:
             print(f"波长校正后: 波长范围{wavelength_calibrated[0]}~{wavelength_calibrated[-1]}")
             
             # 从FITS文件读取视向速度
-            v_helio = self.read_fits_file(spec_file).get('v_helio', 0)
+            v_helio = 0  # 默认值
+            try:
+                _, _, v_helio, _, _, _ = self.read_fits_file(spec_file)
+            except Exception as e:
+                print(f"读取FITS文件获取视向速度时出错: {e}")
             
             # 2. 视向速度校正
             wavelength_corrected = self.correct_velocity(wavelength_calibrated, original_flux, v_helio)
