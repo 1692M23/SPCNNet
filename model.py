@@ -544,20 +544,16 @@ def train(model, train_loader, val_loader, config, device, element):
                 batch_count += 1
                 
                 # 每个批次后添加进度显示 (无论TPU/GPU/CPU)
-                if batch_idx % 5 == 0 or batch_idx == len(train_loader) - 1:
+                if batch_idx % 2 == 0 or batch_idx == len(train_loader) - 1:  # 修改为每2个批次显示一次
                     # 确保TPU上的操作完成后再输出
                     if device_type == 'tpu' and HAS_XLA:
                         import torch_xla.core.xla_model as xm
                         xm.mark_step()
                     
-                    # 使用print直接输出，确保显示在控制台
-                    progress_msg = f"阶段{stage} - Epoch {epoch+1}/{config['training']['num_epochs']} - 批次 {batch_idx+1}/{len(train_loader)} ({batch_idx+1*100/len(train_loader):.1f}%) - 损失: {loss.item():.6f}"
-                    print(progress_msg)
+                    # 直接使用print输出，确保控制台可见
+                    progress_msg = f"阶段{stage} - Epoch {epoch+1}/{config['training']['num_epochs']} - 批次 {batch_idx+1}/{len(train_loader)} ({(batch_idx+1)*100/len(train_loader):.1f}%) - 损失: {loss.item():.6f}"
+                    print(progress_msg, flush=True)  # 添加flush=True强制立即显示
                     logger.info(progress_msg)
-                    
-                    # 强制刷新标准输出
-                    import sys
-                    sys.stdout.flush()
             
             # 更新学习率
             scheduler.step()
@@ -644,13 +640,21 @@ def train(model, train_loader, val_loader, config, device, element):
     def save_checkpoint(model, optimizer, scheduler, epoch, loss, element, checkpoint_type='checkpoint'):
         """保存训练检查点"""
         checkpoint_path = os.path.join(config['model_config']['model_dir'], f'{checkpoint_type}_{element}.pth')
-        torch.save({
+        
+        # 修改: 只保存状态字典而不是整个模型实例
+        checkpoint = {
             'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
-            'loss': loss,
-        }, checkpoint_path)
+            'model_state_dict': model.state_dict(),  # 只保存权重
+            'optimizer_state_dict': optimizer.state_dict() if optimizer else None,
+            'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+            'loss': loss
+        }
+        
+        try:
+            torch.save(checkpoint, checkpoint_path)
+            logger.info(f"成功保存检查点: {checkpoint_path}")
+        except Exception as e:
+            logger.error(f"保存检查点失败: {str(e)}")
     
     # 根据当前阶段进行训练
     if current_stage == 1:

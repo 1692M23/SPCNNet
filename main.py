@@ -639,18 +639,10 @@ class TrainingStateManager:
             os.remove(self.checkpoint_file)
         return True
 
-def process_element(element, model_type=None, input_size=None, use_gpu=True):
-    """
-    处理单个元素的训练和评估
-    
-    参数:
-        element (str): 元素名称，如"C_FE"
-        model_type (str, optional): 模型类型，默认从配置中获取
-        input_size (int, optional): 输入大小，默认从配置中获取
-        use_gpu (bool): 是否使用GPU，默认True
-    """
-    logger = logging.getLogger('main')
-    logger.info(f"开始处理元素: {element}")
+def process_element(element, model_type, input_size, use_gpu=True):
+    # 在函数开始处添加
+    print(f"正在处理元素: {element}", flush=True)
+    logger.info(f"正在处理元素: {element}")
     
     # 创建训练状态管理器
     state_manager = TrainingStateManager(

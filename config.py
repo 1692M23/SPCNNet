@@ -127,6 +127,12 @@ data_config = {
         'r': np.linspace(5000, 6000, 1000),  # r波段波长范围
         'i': np.linspace(6000, 7000, 1000),  # i波段波长范围
         'z': np.linspace(7000, 8000, 1000),  # z波段波长范围
+    },
+    'augmentation_enabled': True,
+    'augmentation_params': {
+        'noise_level': 0.01,  # 随机噪声水平
+        'shift_range': 0.05,  # 偏移范围
+        'dropout_prob': 0.05  # 随机丢弃概率
     }
 }
 
