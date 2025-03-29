@@ -59,22 +59,51 @@ def load_data(data_path, element=None):
         
         # 如果指定了元素，检查元素信息
         if element is not None:
+            # 尝试从命令行参数获取元素名
+            def get_element_from_cmd():
+                import sys
+                for i, arg in enumerate(sys.argv):
+                    if arg == '--element' and i < len(sys.argv) - 1:
+                        return sys.argv[i+1]
+                    elif arg == '--elements' and i < len(sys.argv) - 1:
+                        elements_str = sys.argv[i+1]
+                        elements_list = elements_str.split()
+                        if elements_list:
+                            return elements_list[0]
+                return None
+            
             if elements is not None:
                 if isinstance(elements, dict) and element in elements:
                     logger.info(f"找到元素 {element} 的索引")
                 elif isinstance(elements, dict):
                     logger.warning(f"元素 {element} 不在索引字典中")
+                    # 尝试从命令行获取元素
+                    cmd_element = get_element_from_cmd()
+                    if cmd_element:
+                        logger.info(f"使用命令行指定的元素: {cmd_element}")
+                        element = cmd_element
+                    else:
+                        logger.warning(f"无法从命令行参数中找到元素，使用提供的元素: {element}")
+                    elements = {element: 0}  # 创建模拟字典
                 else:
                     logger.warning(f"elements不是字典类型，无法查找特定元素索引")
-                    # 如果elements是数组，表示我们可能有每个样本的ID，而不是元素索引
-                    # 在这种情况下，返回mock字典，将特定元素映射到0，表示我们的abundance是单元素的
-                    elements = {element: 0}  # 创建模拟字典，用于单元素数据
+                    # 尝试从命令行获取元素
+                    cmd_element = get_element_from_cmd()
+                    if cmd_element:
+                        logger.info(f"使用命令行指定的元素: {cmd_element}")
+                        element = cmd_element
+                    else:
+                        logger.warning(f"无法从命令行参数中找到元素，使用提供的元素: {element}")
+                    elements = {element: 0}  # 创建模拟字典
             else:
                 # 如果没有elements信息，创建一个简单的映射
                 logger.warning(f"数据中没有元素索引信息，假设abundance对应 {element}")
                 elements = {element: 0}  # 创建模拟字典，用于单元素数据
                 
         logger.info(f"成功加载数据: {X.shape}, {y.shape}")
+        # 添加详细日志，说明元素处理情况
+        if element is not None:
+            logger.info(f"元素处理情况: 当前使用元素 = {element}, elements字典包含键 = {list(elements.keys()) if isinstance(elements, dict) else '不是字典'}")
         return X, y, elements
     except Exception as e:
         logger.error(f"加载数据时出错: {e}")
@@ -557,15 +586,14 @@ def process_element(element, config=None, tune_hyperparams=False):
         if tune_hyperparams:
             from hyperopt_tuning import run_hyperopt_tuning as hyperparameter_tuning
             logger.info(f"开始 {element} 的超参数调优")
-            best_params, best_model = hyperparameter_tuning(
+            best_params = hyperparameter_tuning(
                 element,
                 train_loader,
                 val_loader,
-                device=device,
-                config=config
+                device=device
             )
             logger.info(f"{element} 超参数调优完成，最佳参数: {best_params}")
-            return best_model, best_params
+            return best_params, None  # 由于没有返回模型，返回None作为模型
         
         # 正常训练流程
         else:
