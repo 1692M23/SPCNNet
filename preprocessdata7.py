@@ -1707,7 +1707,39 @@ class LAMOSTPreprocessor:
                         w_min, w_max = cached_range
                         self.processed_ranges.append((w_min, w_max))
                         print(f"使用缓存的波长范围 {spec_file}: {w_min:.2f}~{w_max:.2f}")
-                    else:
+                        
+                    if cached_range:
+                        # 如果有缓存，需要检查数据类型并提取波长范围
+                        try:
+                            if isinstance(cached_range, tuple) and len(cached_range) == 2:
+                                # 元组格式
+                                w_min, w_max = cached_range
+                            elif isinstance(cached_range, dict) and 'data' in cached_range:
+                                # 字典格式
+                                data_array = cached_range['data']
+                                if isinstance(data_array, np.ndarray) and len(data_array) == 2:
+                                    w_min, w_max = data_array[0], data_array[1]
+                                elif 'metadata' in cached_range and 'wavelength_range' in cached_range['metadata']:
+                                    # 从元数据中获取
+                                    w_range = cached_range['metadata']['wavelength_range']
+                                    w_min, w_max = w_range[0], w_range[1]
+                                else:
+                                    # 无法提取，跳过缓存数据
+                                    print(f"缓存数据格式不正确: {spec_file}，重新处理")
+                                    cached_range = None
+                            else:
+                                # 不支持的格式
+                                print(f"缓存数据类型不支持: {type(cached_range)}，重新处理")
+                                cached_range = None
+                                
+                            if cached_range:  # 如果成功提取了波长范围
+                                self.processed_ranges.append((w_min, w_max))
+                                print(f"使用缓存的波长范围 {spec_file}: {w_min:.2f}~{w_max:.2f}")
+                        except Exception as e:
+                            print(f"处理缓存数据时出错 {spec_file}: {e}，重新处理")
+                            cached_range = None
+                    
+                    if not cached_range:  # 如果没有缓存或者缓存处理失败
                         # 没有缓存，需要读取文件提取波长范围
                         try:
                             # 查找FITS文件
@@ -1737,8 +1769,22 @@ class LAMOSTPreprocessor:
                             w_min, w_max = wavelength_valid.min(), wavelength_valid.max()
                             self.processed_ranges.append((w_min, w_max))
                             
-                            # 保存波长范围到缓存
-                            self.cache_manager.set_cache(cache_key, (w_min, w_max))
+                            # 保存波长范围到缓存 - 使用字典格式
+                            wavelength_range_data = {
+                                'data': np.array([w_min, w_max]),  # 数据必须是numpy数组
+                                'metadata': {
+                                    'filename': spec_file,
+                                    'wavelength_range': [w_min, w_max]
+                                },
+                                'validation_metrics': {
+                                    'quality_metrics': {
+                                        'snr': 10.0,  # 占位值
+                                        'wavelength_coverage': 1.0,
+                                        'normalization_quality': 1.0
+                                    }
+                                }
+                            }
+                            self.cache_manager.set_cache(cache_key, wavelength_range_data)
                             
                             # 更新最大公有范围
                             if len(self.processed_ranges) > 1:
