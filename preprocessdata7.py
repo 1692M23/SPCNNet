@@ -1840,13 +1840,60 @@ class LAMOSTPreprocessor:
             
             # 对每个spec文件检查缓存
             for spec_file in tqdm(spec_files, desc=f"扫描{element}缓存"):
-                cache_key = f"processed_spectrum_{spec_file.replace('/', '_')}"
-                cached_result = self.cache_manager.get_cache(cache_key)
+                # 提取spec文件的基础名称（不含路径和扩展名）
+                spec_base = os.path.basename(str(spec_file))
+                if '.' in spec_base:
+                    spec_base = spec_base.split('.')[0]
+                
+                # 尝试多种可能的缓存键格式
+                cache_found = False
+                
+                # 直接使用完整spec文件名作为键
+                cache_key1 = f"processed_spectrum_{spec_file.replace('/', '_')}"
+                cached_result = self.cache_manager.get_cache(cache_key1)
+                
+                if cached_result is None:
+                    # 尝试使用基础名称作为键
+                    cache_key2 = f"processed_spectrum_{spec_base}"
+                    cached_result = self.cache_manager.get_cache(cache_key2)
+                
+                # 如果仍然找不到，遍历缓存目录中的所有文件进行部分匹配
+                if cached_result is None:
+                    # 列出缓存目录中的所有文件
+                    cache_files = glob.glob(os.path.join(self.cache_dir, "processed_spectrum_*"))
+                    for cache_file in cache_files:
+                        cache_basename = os.path.basename(cache_file)
+                        # 检查缓存文件名是否包含spec基础名称
+                        if spec_base in cache_basename:
+                            # 从文件名提取缓存键
+                            cache_key3 = cache_basename
+                            cached_result = self.cache_manager.get_cache(cache_key3)
+                            if cached_result is not None:
+                                print(f"通过部分匹配找到缓存: {spec_base} -> {cache_basename}")
+                                cache_found = True
+                                break
+                else:
+                    cache_found = True
+                
                 if cached_result is not None:
                     cached_element_count += 1
                     # 将已缓存的结果直接添加到all_data中
+                    if 'metadata' not in cached_result:
+                        cached_result['metadata'] = {}
                     cached_result['metadata']['element'] = element
                     all_data.append(cached_result)
+                    
+                # 每扫描100个文件输出一次进度
+                if spec_files.shape[0] > 100 and cached_element_count % 100 == 0:
+                    print(f"已扫描: {cached_element_count}/{spec_files.shape[0]}, 找到缓存: {cached_element_count}")
+            
+            # 打印匹配情况的详细信息
+            print(f"\n===== 缓存匹配情况 =====")
+            print(f"元素: {element}")
+            print(f"总记录数: {len(df)}")
+            print(f"匹配到缓存的记录数: {cached_element_count}")
+            print(f"匹配率: {cached_element_count/len(df)*100:.2f}%")
+            print(f"=======================\n")
             
             # 统计已处理的元素记录数
             element_records = cached_element_count
