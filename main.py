@@ -42,7 +42,7 @@ logger = logging.getLogger('main')
 # 创建缓存管理器
 cache_manager = CacheManager(cache_dir=os.path.join(config.output_config['cache_dir'], 'main'))
 
-def load_data(data_path):
+def load_data(data_path, element=None):
     """加载数据集并返回numpy数组"""
     try:
         data = np.load(data_path)
@@ -57,6 +57,13 @@ def load_data(data_path):
         # 检查元素标签是否存在
         elements = data['elements'] if 'elements' in data else None
         
+        # 如果指定了元素且elements是字典，尝试获取特定元素的索引
+        if element is not None and elements is not None and isinstance(elements, dict):
+            if element in elements:
+                print(f"找到元素 {element} 的索引")
+            else:
+                print(f"在elements字典中找不到元素 {element} 的索引")
+                
         print(f"成功加载数据: {X.shape}, {y.shape}")
         return X, y, elements
     except Exception as e:
