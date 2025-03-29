@@ -558,13 +558,14 @@ def plot_metrics_comparison(elements=None, plot_dir=None, figsize=(10, 8)):
 
     logger.info("已保存评估指标对比图")
 
-def evaluate_all_elements(elements=None, save_dir=None):
+def evaluate_all_elements(elements=None, save_dir=None, device=None):
     """
     评估所有元素模型的性能并生成可视化图表
     
     参数:
         elements (list): 要评估的元素列表
         save_dir (str): 结果保存目录
+        device (torch.device): 计算设备
     """
     if elements is None:
         elements = config.training_config['elements']
@@ -604,7 +605,9 @@ def evaluate_all_elements(elements=None, save_dir=None):
                     progress.update()
                     continue
             
-            device = config.training_config['device']
+            if device is None:
+                device = setup_device()
+            
             model = load_trained_model(element, model_path=model_path, device=device)
             
             if model is None:

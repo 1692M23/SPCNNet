@@ -21,6 +21,7 @@ import joblib
 import time
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import json
 
 # 导入自定义模块
 import config
@@ -992,73 +993,95 @@ def evaluate_baseline_model(y_true, y_pred, model_name, element):
     
     return results
 
-def load_processed_data(element, data_type='train'):
-    """
-    加载预处理后的数据
-    
-    参数:
-        element: 元素名称
-        data_type: 数据类型，'train'/'val'/'test'
-        
-    返回:
-        特征和标签
-    """
-    try:
-        # 尝试加载特定元素的数据
-        data_file = os.path.join('processed_data', f'{data_type}_dataset_{element}.npz')
-        
-        # 如果特定元素数据不存在，尝试加载通用数据
-        if not os.path.exists(data_file):
-            data_file = os.path.join('processed_data', f'{data_type}_dataset.npz')
-        
-        if not os.path.exists(data_file):
-            logger.error(f"找不到数据文件: {data_file}")
-            return None, None
+def load_processed_data(element, data_type='train', use_main_dataset=False, dataset_path=None):
+    if use_main_dataset and dataset_path:
+        try:
+            # 使用主模型数据集
+            data_file = dataset_path.replace('{type}', data_type)
+            if not os.path.exists(data_file):
+                logger.error(f"找不到主模型数据文件: {data_file}")
+                return None, None
+                
+            data = np.load(data_file)
             
-        data = np.load(data_file)
-        
-        # 提取特征和标签
-        if 'spectra' in data and element in data:
-            X = data['spectra']
-            y = data[element]
-        elif 'X' in data and 'y' in data:
-            X = data['X']
-            y = data['y']
-        else:
-            logger.error(f"找不到 {element} 的相关数据")
-            return None, None
+            # 提取特征和标签，需要适配主模型数据格式
+            if 'spectra' in data and element in data:
+                X = data['spectra'] 
+                y = data[element]
+            elif 'X' in data and 'y' in data:
+                X = data['X']
+                y = data['y']
+            else:
+                # 尝试使用主模型的数据格式
+                from main import load_data
+                X, y, _ = load_data(data_file, element)
+                
+            # 检查数据形状
+            if len(X.shape) == 3:  # [samples, channels, features]
+                # 将3D数据转换为2D
+                n_samples, n_channels, n_features = X.shape
+                X = X.reshape(n_samples, n_channels * n_features)
             
-        # 检查数据形状
-        if len(X.shape) == 3:  # [samples, channels, features]
-            # 将3D数据转换为2D
-            n_samples, n_channels, n_features = X.shape
-            X = X.reshape(n_samples, n_channels * n_features)
+            logger.info(f"加载 {element} 的 {data_type} 数据，形状: {X.shape}, {y.shape}")
+            return X, y
         
-        logger.info(f"加载 {element} 的 {data_type} 数据，形状: {X.shape}, {y.shape}")
-        return X, y
+        except Exception as e:
+            logger.error(f"加载 {element} 的 {data_type} 数据出错: {e}")
+            return None, None
+    else:
+        try:
+            # 尝试加载特定元素的数据
+            data_file = os.path.join('processed_data', f'{data_type}_dataset_{element}.npz')
+            
+            # 如果特定元素数据不存在，尝试加载通用数据
+            if not os.path.exists(data_file):
+                data_file = os.path.join('processed_data', f'{data_type}_dataset.npz')
+            
+            if not os.path.exists(data_file):
+                logger.error(f"找不到数据文件: {data_file}")
+                return None, None
+            
+            data = np.load(data_file)
+            
+            # 提取特征和标签
+            if 'spectra' in data and element in data:
+                X = data['spectra']
+                y = data[element]
+            elif 'X' in data and 'y' in data:
+                X = data['X']
+                y = data['y']
+            else:
+                logger.error(f"找不到 {element} 的相关数据")
+                return None, None
+            
+            # 检查数据形状
+            if len(X.shape) == 3:  # [samples, channels, features]
+                # 将3D数据转换为2D
+                n_samples, n_channels, n_features = X.shape
+                X = X.reshape(n_samples, n_channels * n_features)
+            
+            logger.info(f"加载 {element} 的 {data_type} 数据，形状: {X.shape}, {y.shape}")
+            return X, y
         
-    except Exception as e:
-        logger.error(f"加载 {element} 的 {data_type} 数据出错: {e}")
-        return None, None
+        except Exception as e:
+            logger.error(f"加载 {element} 的 {data_type} 数据出错: {e}")
+            return None, None
 
 def train_and_evaluate_baseline(element, model_type='xgboost', 
                                batch_size=Config.BASELINE_BATCH_SIZE, batches_per_round=Config.BASELINE_BATCHES_PER_ROUND, val_size=0.2,
-                               force_retrain=False, evaluate_only=False):
-    """
-    训练和评估基线模型，每批处理后生成完整结果
+                               force_retrain=False, evaluate_only=False, device=None):
+    """添加device参数支持不同计算设备"""
+    # XGBoost和LightGBM配置中添加设备支持
+    if device and 'cuda' in str(device):
+        # GPU支持
+        if model_type.lower() == 'xgboost':
+            model.params.update({'tree_method': 'gpu_hist', 'gpu_id': 0})
+        elif model_type.lower() == 'lightgbm':
+            model.params.update({'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0})
+    elif device and 'xla' in str(device):
+        # TPU目前不直接支持这些库，可以考虑用TensorFlow版本替代
+        logger.warning("TPU不直接支持XGBoost/LightGBM，将使用CPU")
     
-    参数:
-        element: 元素名称
-        model_type: 模型类型，'xgboost'/'lightgbm'
-        batch_size: 每批大小
-        batches_per_round: 每轮处理的批次数
-        val_size: 验证集比例
-        force_retrain: 是否强制重新训练
-        evaluate_only: 是否仅评估
-        
-    返回:
-        评估结果
-    """
     # 创建模型
     if model_type.lower() == 'xgboost':
         model = XGBoostModel()
@@ -1152,6 +1175,18 @@ def main():
                        help='清除所有缓存，默认为False')
     parser.add_argument('--show_batch_results', action='store_true',
                        help='显示批次处理结果，默认为False')
+    parser.add_argument('--use_optimal_params', action='store_true',
+                      help='使用主模型的最优超参数')
+    parser.add_argument('--optimal_params_file', type=str,
+                      default='results/hyperopt/{element}/best_params.json',
+                      help='最优超参数文件路径，{element}会被替换为元素名称')
+    parser.add_argument('--use_main_dataset', action='store_true',
+                      help='使用主模型的数据集')
+    parser.add_argument('--dataset_path', type=str,
+                      default='processed_data/{type}_dataset.npz',
+                      help='数据集路径，{type}会被替换为train/val/test')
+    parser.add_argument('--device', type=str, default=None,
+                       help='计算设备，可选值: cpu, cuda, tpu')
     
     args = parser.parse_args()
     
@@ -1172,6 +1207,41 @@ def main():
         show_batch_results(args.element, args.model)
         return
     
+    # 处理设备选择
+    device = None
+    if args.device:
+        if args.device.lower() == 'tpu':
+            try:
+                import torch_xla
+                import torch_xla.core.xla_model as xm
+                device = xm.xla_device()
+            except ImportError:
+                logger.warning("无法导入torch_xla，回退到CPU")
+                device = 'cpu'
+        else:
+            device = args.device
+            
+    # 加载最优超参数
+    if args.use_optimal_params:
+        params_file = args.optimal_params_file.replace('{element}', args.element)
+        if os.path.exists(params_file):
+            with open(params_file, 'r') as f:
+                optimal_params = json.load(f)
+                logger.info(f"加载最优超参数: {optimal_params}")
+                
+                # 更新模型参数
+                if args.model.lower() in ['xgboost', 'both']:
+                    xgb_params = translate_params_to_xgboost(optimal_params)
+                    logger.info(f"转换后的XGBoost参数: {xgb_params}")
+                    XGBoostModel.params.update(xgb_params)
+                
+                if args.model.lower() in ['lightgbm', 'both']:
+                    lgb_params = translate_params_to_lightgbm(optimal_params)
+                    logger.info(f"转换后的LightGBM参数: {lgb_params}")
+                    LightGBMModel.params.update(lgb_params)
+        else:
+            logger.warning(f"找不到最优超参数文件: {params_file}")
+    
     # 训练和评估模型
     if args.model.lower() == 'both':
         # 训练和评估两种模型
@@ -1184,7 +1254,8 @@ def main():
             batches_per_round=args.batches_per_round,
             val_size=args.val_size,
             force_retrain=args.force_retrain,
-            evaluate_only=args.evaluate_only
+            evaluate_only=args.evaluate_only,
+            device=device
         )
         
         # LightGBM
@@ -1194,7 +1265,8 @@ def main():
             batches_per_round=args.batches_per_round,
             val_size=args.val_size,
             force_retrain=args.force_retrain,
-            evaluate_only=args.evaluate_only
+            evaluate_only=args.evaluate_only,
+            device=device
         )
         
         # 比较两种模型
@@ -1228,7 +1300,8 @@ def main():
             batches_per_round=args.batches_per_round,
             val_size=args.val_size,
             force_retrain=args.force_retrain,
-            evaluate_only=args.evaluate_only
+            evaluate_only=args.evaluate_only,
+            device=device
         )
 
 def show_batch_results(element, model_type='both'):
@@ -1406,6 +1479,27 @@ def compare_models(element, xgb_results, lgb_results):
         
     except Exception as e:
         logger.error(f"生成模型比较结果时出错: {e}")
+
+def translate_params_to_xgboost(optimal_params):
+    """将主模型参数转换为XGBoost参数"""
+    return {
+        'learning_rate': optimal_params.get('lr', 0.01),
+        'max_depth': 6,  # 可以映射其他参数
+        'subsample': 0.8,
+        'colsample_bytree': 0.8,
+        'reg_lambda': optimal_params.get('weight_decay', 1e-4) * 1000,
+    }
+
+def translate_params_to_lightgbm(optimal_params):
+    """将主模型参数转换为LightGBM参数"""
+    return {
+        'learning_rate': optimal_params.get('lr', 0.01),
+        'num_leaves': 31,
+        'max_depth': -1,
+        'subsample': 0.8,
+        'colsample_bytree': 0.8,
+        'reg_lambda': optimal_params.get('weight_decay', 1e-4) * 1000,
+    }
 
 if __name__ == '__main__':
     main() 
