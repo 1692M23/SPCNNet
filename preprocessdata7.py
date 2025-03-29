@@ -1829,15 +1829,37 @@ class LAMOSTPreprocessor:
         # 处理每个元素的数据
         processed_records = 0
         for i, (df, element) in enumerate(zip(dataframes, elements)):
+            # 更高效的方式统计已处理元素记录
+            # 首先检查缓存中已有的处理结果数量
+            cached_element_count = 0
+            
+            print(f"检查{element}元素的缓存预处理结果...")
+            
+            # 获取元素中所有样本的spec文件名
+            spec_files = df['spec'].values
+            
+            # 对每个spec文件检查缓存
+            for spec_file in tqdm(spec_files, desc=f"扫描{element}缓存"):
+                cache_key = f"processed_spectrum_{spec_file.replace('/', '_')}"
+                cached_result = self.cache_manager.get_cache(cache_key)
+                if cached_result is not None:
+                    cached_element_count += 1
+                    # 将已缓存的结果直接添加到all_data中
+                    cached_result['metadata']['element'] = element
+                    all_data.append(cached_result)
+            
             # 统计已处理的元素记录数
-            element_records = sum(1 for item in all_data if item.get('element') == element)
+            element_records = cached_element_count
             # 元素的总记录数
             element_total = len(df)
+            
+            print(f"从缓存中发现{element}元素已处理记录: {element_records}/{element_total}")
             
             # 只有当元素的所有记录都已处理时，才认为该元素处理完成
             if element_records >= element_total:
                 print(f"{element}数据已在之前的运行中处理完成 ({element_records}/{element_total}条记录)")
                 processed_records += element_records
+                # 注意：我们已经在扫描缓存时将数据添加到all_data中了
             else:
                 print(f"\n处理元素 {i+1}/{len(dataframes)}: {element} (第二阶段)")
                 print(f"已处理: {element_records}/{element_total}条记录")
