@@ -1243,6 +1243,10 @@ def main():
                       help='preprocessdata7使用的交叉验证折数')
     parser.add_argument('--compute_common_range', action='store_true',
                       help='preprocessdata7是否计算共同波长范围')
+    parser.add_argument('--weight_decay', type=float, default=1e-4,
+                     help='权重衰减系数')
+    parser.add_argument('--force_new_model', action='store_true',
+                     help='强制使用新模型')
     
     args = parser.parse_args()
     

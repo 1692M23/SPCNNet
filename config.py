@@ -149,7 +149,8 @@ model_config = {
 training_config = {
     'batch_size': 32,
     'lr': 0.0005,            # 可能需要调整学习率适应新模型
-    'weight_decay': 1e-5,
+    'weight_decay': 1e-4,
+    'force_new_model': True,
     'num_epochs': 100,
     'early_stopping_patience': 15,
     'device': device_config['device'],  # 使用检测到的设备
