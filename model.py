@@ -921,11 +921,21 @@ def train_and_evaluate_model(train_loader, val_loader, test_loader, element, con
     device = config.training_config.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
     logger.info(f"使用设备: {device}")
     
-    # 创建模型
-    model = SpectralResCNN_GCN(
-        input_size=config.model_config.get('input_size'), 
-        device=device
-    )
+    # 创建模型 - 根据配置选择模型类型
+    use_gcn = config.model_config.get('use_gcn', True)
+    input_size = config.model_config.get('input_size')
+    
+    if use_gcn:
+        logger.info(f"使用SpectralResCNN_GCN模型，输入大小: {input_size}")
+        model = SpectralResCNN_GCN(
+            input_size=input_size, 
+            device=device
+        )
+    else:
+        logger.info(f"使用SpectralResCNN模型，输入大小: {input_size}")
+        model = SpectralResCNN(
+            input_size=input_size
+        ).to(device)
     
     # 设置超参数
     hyperparams = {
@@ -951,7 +961,8 @@ def train_and_evaluate_model(train_loader, val_loader, test_loader, element, con
                 'device': device
             },
             'model_config': {
-                'model_dir': config.model_config.get('model_dir', 'models')
+                'model_dir': config.model_config.get('model_dir', 'models'),
+                'use_gcn': use_gcn  # 传递模型类型
             }
         },
         device=device,

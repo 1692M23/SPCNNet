@@ -13,10 +13,11 @@ from hyperopt import fmin, tpe, hp, Trials, STATUS_OK
 import pickle
 from tqdm import tqdm
 import time
+import torch.nn as nn
 
 # 导入自定义模块
 import config
-from model import SpectralResCNN, train, evaluate_model
+from model import SpectralResCNN, SpectralResCNN_GCN, train, evaluate_model
 
 # 配置日志
 logging.basicConfig(
@@ -50,12 +51,29 @@ def objective(params, element, train_loader, val_loader, device=None):
         logger.info(f"评估超参数: {params}")
         start_time = time.time()
         
-        # 创建模型
+        # 创建模型 - 使用新的GCN模型
         dropout_rate = params.get('dropout_rate', 0.5)
-        model = SpectralResCNN(
-            input_size=config.model_config['input_size'],
-            dropout_rate=dropout_rate
-        ).to(device)
+        use_gcn = params.get('use_gcn', True)  # 默认使用GCN模型
+        
+        if use_gcn:
+            model = SpectralResCNN_GCN(
+                input_size=config.model_config['input_size'],
+                device=device
+            )
+        else:
+            model = SpectralResCNN(
+                input_size=config.model_config['input_size']
+            ).to(device)
+        
+        # 手动修改模型中的dropout层
+        try:
+            if hasattr(model, 'fc') and isinstance(model.fc, nn.Sequential):
+                for i, layer in enumerate(model.fc):
+                    if isinstance(layer, nn.Dropout):
+                        model.fc[i] = nn.Dropout(dropout_rate)
+                logger.info(f"已将模型中的dropout层设置为 {dropout_rate}")
+        except Exception as e:
+            logger.warning(f"设置dropout率失败: {str(e)}")
         
         # 设置训练配置
         train_config = config.CONFIG.copy()
@@ -73,8 +91,9 @@ def objective(params, element, train_loader, val_loader, device=None):
             model=model,
             train_loader=train_loader,
             val_loader=val_loader,
-            element=f"{element}_tune",
-            config=train_config
+            config=train_config,
+            device=device,
+            element=f"{element}_tune"
         )
         
         # 获取验证集最佳损失
@@ -133,6 +152,7 @@ def run_hyperopt_tuning(element, train_loader, val_loader, max_evals_stage1=30, 
         'batch_size': hp.choice('batch_size', [16, 32, 64, 128]),
         'dropout_rate': hp.uniform('dropout_rate', 0.2, 0.7),
         'patience': hp.choice('patience', [5, 10, 15, 20]),
+        'use_gcn': hp.choice('use_gcn', [True, False]),  # 是否使用GCN模型
         'num_epochs': 50,  # 固定epoch数量用于调参
     }
     
@@ -153,6 +173,7 @@ def run_hyperopt_tuning(element, train_loader, val_loader, max_evals_stage1=30, 
         'batch_size': [16, 32, 64, 128][best_stage1['batch_size']],
         'dropout_rate': float(best_stage1['dropout_rate']),
         'patience': [5, 10, 15, 20][best_stage1['patience']],
+        'use_gcn': [True, False][best_stage1['use_gcn']]  # 解析是否使用GCN模型
     }
     
     logger.info(f"第一阶段最佳参数 ({element}): {best_params_stage1}")
@@ -179,6 +200,7 @@ def run_hyperopt_tuning(element, train_loader, val_loader, max_evals_stage1=30, 
                                   max(0.1, best_params_stage1['dropout_rate'] - 0.1), 
                                   min(0.9, best_params_stage1['dropout_rate'] + 0.1)),
         'patience': hp.choice('patience', [best_params_stage1['patience']]),  # 固定patience
+        'use_gcn': hp.choice('use_gcn', [best_params_stage1['use_gcn']]),  # 固定是否使用GCN模型
         'num_epochs': 100,  # 第二阶段使用更多epoch进行精细调优
     }
     
@@ -199,6 +221,7 @@ def run_hyperopt_tuning(element, train_loader, val_loader, max_evals_stage1=30, 
         'batch_size': best_params_stage1['batch_size'],  # 第二阶段固定
         'dropout_rate': float(best_stage2['dropout_rate']),
         'patience': best_params_stage1['patience'],  # 第二阶段固定
+        'use_gcn': best_params_stage1['use_gcn']  # 固定是否使用GCN模型
     }
     
     logger.info(f"第二阶段最佳参数 ({element}): {best_params_final}")

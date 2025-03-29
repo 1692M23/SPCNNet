@@ -5,7 +5,7 @@ import torch
 from sklearn.model_selection import ParameterGrid
 from utils import ProgressManager
 import config
-from model import train_and_evaluate_model
+from model import train_and_evaluate_model, SpectralResCNN_GCN
 
 # 设置logger
 logger = logging.getLogger(__name__)
@@ -61,8 +61,11 @@ def hyperparameter_tuning(element, train_loader, val_loader, grid=None, device=N
         # 运行批量超参数优化
         results = run_element_hyperopt(
             element=element,
+            train_loader=train_loader,
+            val_loader=val_loader,
             batch_size=batch_size,
-            batches_per_round=batches_per_round
+            batches_per_round=batches_per_round,
+            device=device
         )
         
         if results:
@@ -108,6 +111,7 @@ def hyperparameter_tuning(element, train_loader, val_loader, grid=None, device=N
         grid = {
             'lr': [0.001, 0.0005, 0.0001],
             'weight_decay': [1e-4, 1e-5, 1e-6],
+            'use_gcn': [True, False],  # 添加是否使用GCN模型的选项
             'num_blocks': [2, 3, 4],
             'num_filters': [32, 64]
         }
@@ -144,12 +148,14 @@ def hyperparameter_tuning(element, train_loader, val_loader, grid=None, device=N
                 original_weight_decay = config.training_config['weight_decay']
                 original_epochs = config.training_config['num_epochs']
                 original_patience = config.training_config['early_stopping_patience']
+                original_model_type = config.model_config.get('use_gcn', True)
                 
                 # 应用当前超参数
                 config.training_config['lr'] = current_params.get('lr', original_lr)
                 config.training_config['weight_decay'] = current_params.get('weight_decay', original_weight_decay)
                 config.training_config['num_epochs'] = current_params.get('num_epochs', original_epochs)
                 config.training_config['early_stopping_patience'] = current_params.get('patience', original_patience)
+                config.model_config['use_gcn'] = current_params.get('use_gcn', original_model_type)
                 
                 # 训练并评估模型
                 _, val_loss, _ = train_and_evaluate_model(
@@ -165,6 +171,7 @@ def hyperparameter_tuning(element, train_loader, val_loader, grid=None, device=N
                 config.training_config['weight_decay'] = original_weight_decay
                 config.training_config['num_epochs'] = original_epochs
                 config.training_config['early_stopping_patience'] = original_patience
+                config.model_config['use_gcn'] = original_model_type
                 
                 # 更新最佳参数
                 if val_loss < best_val_loss:
