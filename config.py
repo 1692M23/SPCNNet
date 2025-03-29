@@ -13,6 +13,20 @@ import json
 import time
 import pickle
 
+# 处理torch_xla导入问题
+try:
+    import torch_xla
+    import torch_xla.core.xla_model as xm
+    HAS_XLA = True
+    try:
+        import torch_xla.distributed.xla_multiprocessing as xmp
+        HAS_XMP = True
+    except ImportError:
+        HAS_XMP = False
+except ImportError:
+    HAS_XLA = False
+    HAS_XMP = False
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
@@ -23,6 +37,56 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger('config')
+
+# 添加TPU支持和设备检测工具函数
+def get_device_config():
+    """
+    检测可用的计算设备并返回配置
+    支持 CPU, CUDA GPU, 和 TPU (通过 PyTorch XLA)
+    """
+    device_config = {
+        'device_type': 'cpu',
+        'device': None,
+        'multi_device': False,
+        'num_devices': 1
+    }
+    
+    # 检查TPU是否可用
+    if HAS_XLA:
+        logger.info("检测到PyTorch XLA，尝试使用TPU...")
+        
+        try:
+            device = xm.xla_device()
+            device_config['device_type'] = 'tpu'
+            device_config['device'] = device
+            
+            # 检测TPU数量
+            if HAS_XMP and hasattr(xmp, 'xla_world_size'):
+                device_config['num_devices'] = xmp.xla_world_size()
+                device_config['multi_device'] = device_config['num_devices'] > 1
+            
+            logger.info(f"成功初始化TPU设备: {device}")
+            return device_config
+        except Exception as e:
+            logger.warning(f"尝试初始化TPU失败: {str(e)}")
+    else:
+        logger.debug("未找到PyTorch XLA模块，TPU不可用")
+    
+    # 检查CUDA是否可用
+    if torch.cuda.is_available():
+        device_config['device_type'] = 'cuda'
+        device_config['device'] = torch.device('cuda')
+        device_config['num_devices'] = torch.cuda.device_count()
+        device_config['multi_device'] = device_config['num_devices'] > 1
+        logger.info(f"使用CUDA，可用GPU数量: {device_config['num_devices']}")
+    else:
+        logger.info("CUDA不可用，将使用CPU")
+        device_config['device'] = torch.device('cpu')
+    
+    return device_config
+
+# 获取设备配置
+device_config = get_device_config()
 
 # 数据路径配置
 DATA_CONFIG = {
@@ -81,17 +145,24 @@ model_config = {
     }
 }
 
-# 训练配置
+# 训练配置，更新以适应所有设备类型
 training_config = {
     'batch_size': 32,
     'lr': 0.0005,            # 可能需要调整学习率适应新模型
     'weight_decay': 1e-5,
     'num_epochs': 100,
     'early_stopping_patience': 15,
-    'device': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
-    'multi_gpu': torch.cuda.device_count() > 1,  # 自动检测是否有多个GPU
+    'device': device_config['device'],  # 使用检测到的设备
+    'device_type': device_config['device_type'],  # 设备类型（'cpu', 'cuda', 或 'tpu'）
+    'multi_device': device_config['multi_device'],  # 是否有多个设备可用
+    'num_devices': device_config['num_devices'],  # 设备数量
     'elements': ['C_FE', 'MG_FE', 'CA_FE'],
-    'resume_training': True
+    'resume_training': True,
+    # TPU特定配置
+    'tpu_config': {
+        'use_xla_compilation': True,  # 是否使用XLA编译加速
+        'use_dynamic_shapes': False,  # 是否使用动态形状（某些操作在TPU上需要固定形状）
+    }
 }
 
 # 超参数调优配置

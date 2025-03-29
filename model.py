@@ -12,6 +12,22 @@ import pandas as pd
 from scipy import stats
 from sklearn.metrics import r2_score
 
+# 处理torch_xla导入问题
+try:
+    import torch_xla
+    import torch_xla.core.xla_model as xm
+    HAS_XLA = True
+    try:
+        import torch_xla.distributed.parallel_loader as pl
+        HAS_PARALLEL_LOADER = True
+    except ImportError:
+        HAS_PARALLEL_LOADER = False
+        print("torch_xla.distributed.parallel_loader导入失败，将禁用并行加载功能")
+except ImportError:
+    HAS_XLA = False
+    HAS_PARALLEL_LOADER = False
+    print("torch_xla导入失败，将禁用TPU支持")
+
 # 配置logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -26,6 +42,62 @@ console_handler.setFormatter(formatter)
 
 # 添加处理器到logger
 logger.addHandler(console_handler)
+
+# 检测TPU是否可用并返回相应工具函数
+def is_tpu_available():
+    """检查是否可以使用TPU"""
+    return HAS_XLA
+
+def move_to_device(tensor, device):
+    """
+    将张量移动到指定设备，支持TPU、GPU和CPU
+    
+    参数:
+        tensor: 要移动的张量
+        device: 目标设备
+        
+    返回:
+        移动后的张量
+    """
+    if tensor is None:
+        return None
+        
+    # 检查是否已经在目标设备上
+    if hasattr(tensor, 'device') and tensor.device == device:
+        return tensor
+        
+    # 针对TPU进行特殊处理
+    if str(device).startswith('xla'):
+        try:
+            if HAS_XLA:
+                return xm.send_cpu_data_to_device(tensor, device)
+            else:
+                logger.warning("尝试使用TPU但torch_xla未安装")
+        except Exception as e:
+            logger.warning(f"移动数据到TPU设备时出错: {str(e)}")
+            pass
+            
+    # 常规设备移动
+    return tensor.to(device)
+
+def sync_device(device=None):
+    """
+    同步设备操作，确保计算完成
+    对于TPU等异步执行的设备尤其重要
+    
+    参数:
+        device: 需要同步的设备
+    """
+    if device is None:
+        return
+        
+    # 针对TPU的特殊处理
+    if str(device).startswith('xla'):
+        if HAS_XLA:
+            xm.mark_step()
+    # 针对GPU的处理
+    elif str(device).startswith('cuda'):
+        torch.cuda.synchronize(device)
 
 """
 模型文件结构：
@@ -324,6 +396,15 @@ def train(model, train_loader, val_loader, config, device, element):
                 config['model_config'] = {}
             config['model_config']['model_dir'] = 'models'
     
+    # 确定设备类型
+    device_type = 'cpu'
+    if str(device).startswith('cuda'):
+        device_type = 'cuda'
+    elif str(device).startswith('xla'):
+        device_type = 'tpu'
+    
+    logger.info(f"在 {device_type} 设备上训练模型: {device}")
+    
     # 设置优化器和学习率调度器
     optimizer = optim.Adam(model.parameters(), 
                           lr=config['training']['lr'],
@@ -357,18 +438,35 @@ def train(model, train_loader, val_loader, config, device, element):
         batch_count = 0
         
         for batch_idx, (data, target) in enumerate(train_loader):
-            data, target = data.to(device), target.to(device)
+            # 将数据移动到正确的设备 - 支持TPU/GPU/CPU
+            data = move_to_device(data, device)
+            target = move_to_device(target, device)
             
             # 检查数据是否包含NaN
             if torch.isnan(data).any() or torch.isnan(target).any():
                 logger.warning("检测到输入数据包含NaN值，跳过该批次")
                 continue
             
+            # TPU特定处理：清除之前的梯度
             optimizer.zero_grad()
+            
+            # 前向传播
             output = model(data)
             loss = criterion(output, target)
+            
+            # 反向传播
             loss.backward()
+            
+            # 梯度裁剪
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
+            # 优化器步进
             optimizer.step()
+            
+            # TPU特定处理：确保梯度更新已应用
+            if device_type == 'tpu':
+                if HAS_XLA:
+                    xm.mark_step()
             
             total_loss += loss.item()
             batch_count += 1
@@ -384,9 +482,18 @@ def train(model, train_loader, val_loader, config, device, element):
         val_loss = 0
         with torch.no_grad():
             for data, target in val_loader:
-                data, target = data.to(device), target.to(device)
+                # 将数据移动到正确的设备 - 支持TPU/GPU/CPU
+                data = move_to_device(data, device)
+                target = move_to_device(target, device)
+                
+                # 前向传播
                 output = model(data)
                 val_loss += criterion(output, target).item()
+                
+                # TPU特定处理：确保计算已完成
+                if device_type == 'tpu':
+                    if HAS_XLA:
+                        xm.mark_step()
         
         val_loss /= len(val_loader)
         train_loss = total_loss / batch_count if batch_count > 0 else float('inf')
@@ -430,7 +537,9 @@ def train(model, train_loader, val_loader, config, device, element):
         batch_count = 0
         
         for batch_idx, (data, target) in enumerate(train_loader):
-            data, target = data.to(device), target.to(device)
+            # 将数据移动到正确的设备 - 支持TPU/GPU/CPU
+            data = move_to_device(data, device)
+            target = move_to_device(target, device)
             
             if torch.isnan(data).any() or torch.isnan(target).any():
                 logger.warning("检测到输入数据包含NaN值，跳过该批次")
@@ -440,7 +549,16 @@ def train(model, train_loader, val_loader, config, device, element):
             output = model(data)
             loss = criterion(output, target)
             loss.backward()
+            
+            # 梯度裁剪
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             optimizer.step()
+            
+            # TPU特定处理：确保梯度更新已应用
+            if device_type == 'tpu':
+                if HAS_XLA:
+                    xm.mark_step()
             
             total_loss += loss.item()
             batch_count += 1
@@ -456,9 +574,17 @@ def train(model, train_loader, val_loader, config, device, element):
         val_loss = 0
         with torch.no_grad():
             for data, target in val_loader:
-                data, target = data.to(device), target.to(device)
+                # 将数据移动到正确的设备 - 支持TPU/GPU/CPU
+                data = move_to_device(data, device)
+                target = move_to_device(target, device)
+                
                 output = model(data)
                 val_loss += criterion(output, target).item()
+                
+                # TPU特定处理：确保计算已完成
+                if device_type == 'tpu':
+                    if HAS_XLA:
+                        xm.mark_step()
         
         val_loss /= len(val_loader)
         train_loss = total_loss / batch_count if batch_count > 0 else float('inf')
@@ -496,12 +622,19 @@ def evaluate_model(model, test_loader, device=None):
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    logger.info(f"在设备 {device} 上评估模型")
+    # 确定设备类型
+    device_type = 'cpu'
+    if str(device).startswith('cuda'):
+        device_type = 'cuda'
+    elif str(device).startswith('xla'):
+        device_type = 'tpu'
+    
+    logger.info(f"在 {device_type} 设备上评估模型: {device}")
     
     # 确保模型在正确的设备上
     if next(model.parameters()).device != device:
         logger.info(f"将模型从 {next(model.parameters()).device} 移动到 {device}")
-        model.to(device)
+        model = move_to_device(model, device)  # 使用通用设备移动函数
     
     model.eval()
     
@@ -516,7 +649,8 @@ def evaluate_model(model, test_loader, device=None):
             nan_stats['total_samples'] += data.size(0)
             
             # 将数据移到相应设备
-            data, target = data.to(device), target.to(device)
+            data = move_to_device(data, device)
+            target = move_to_device(target, device)
             
             # 处理输入数据中的NaN值
             data, has_nan, nan_count = handle_nan_values(
@@ -531,6 +665,11 @@ def evaluate_model(model, test_loader, device=None):
                 # 前向传播
                 output = model(data)
                 
+                # TPU特定处理：确保计算已完成
+                if device_type == 'tpu':
+                    if HAS_XLA:
+                        xm.mark_step()
+                
                 # 处理输出中的NaN值
                 output, has_nan, nan_count = handle_nan_values(
                     output, 
@@ -543,8 +682,21 @@ def evaluate_model(model, test_loader, device=None):
                 # 收集非NaN预测结果和真实值
                 valid_indices = ~torch.isnan(output).any(dim=1) & ~torch.isnan(target).any(dim=1)
                 if valid_indices.any():
-                    all_outputs.append(output[valid_indices].cpu().numpy())
-                    all_targets.append(target[valid_indices].cpu().numpy())
+                    # 如果在TPU上，先移动到CPU再转换为numpy
+                    if device_type == 'tpu':
+                        try:
+                            import torch_xla.core.xla_model as xm
+                            cpu_output = xm.send_to_host_async(output[valid_indices])
+                            cpu_target = xm.send_to_host_async(target[valid_indices])
+                            all_outputs.append(cpu_output.numpy())
+                            all_targets.append(cpu_target.numpy())
+                        except (ImportError, AttributeError):
+                            # 降级到标准处理
+                            all_outputs.append(output[valid_indices].cpu().numpy())
+                            all_targets.append(target[valid_indices].cpu().numpy())
+                    else:
+                        all_outputs.append(output[valid_indices].cpu().numpy())
+                        all_targets.append(target[valid_indices].cpu().numpy())
                 
             except Exception as e:
                 logger.error(f"评估过程中出错: {str(e)}")
@@ -776,11 +928,47 @@ def load_trained_model(model_path, device=None):
     """
     # 设置默认设备
     if device is None:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # 尝试使用配置中的设备，如果可用
+        if hasattr(config, 'training_config') and 'device' in config.training_config:
+            device = config.training_config['device']
+        else:
+            # 尝试检测TPU
+            if is_tpu_available():
+                try:
+                    import torch_xla.core.xla_model as xm
+                    device = xm.xla_device()
+                    logger.info(f"使用TPU设备: {device}")
+                except Exception as e:
+                    logger.warning(f"TPU初始化失败: {str(e)}")
+                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            else:
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     elif isinstance(device, str):
-        device = torch.device(device)
+        # 处理字符串类型的设备说明
+        if device == 'tpu':
+            # 尝试初始化TPU设备
+            if is_tpu_available():
+                try:
+                    import torch_xla.core.xla_model as xm
+                    device = xm.xla_device()
+                except Exception as e:
+                    logger.warning(f"TPU初始化失败，回退到CPU: {str(e)}")
+                    device = torch.device('cpu')
+            else:
+                logger.warning("TPU不可用，回退到CPU")
+                device = torch.device('cpu')
+        else:
+            # 常规设备字符串
+            device = torch.device(device)
     
-    logger.info(f"从 {model_path} 加载模型到设备 {device}")
+    # 确定设备类型
+    device_type = 'cpu'
+    if str(device).startswith('cuda'):
+        device_type = 'cuda'
+    elif str(device).startswith('xla'):
+        device_type = 'tpu'
+    
+    logger.info(f"从 {model_path} 加载模型到 {device_type} 设备: {device}")
     
     try:
         # 防止递归错误：设置递归深度限制
@@ -795,7 +983,22 @@ def load_trained_model(model_path, device=None):
         
         # 尝试加载模型
         try:
-            checkpoint = torch.load(model_path, map_location=device)
+            # 针对不同设备类型使用不同的加载策略
+            if device_type == 'tpu':
+                try:
+                    # TPU需要特殊处理
+                    import torch_xla.core.xla_model as xm
+                    # 先加载到CPU，然后再传输到TPU
+                    checkpoint = torch.load(model_path, map_location='cpu')
+                    logger.info(f"成功加载checkpoint到CPU: {type(checkpoint)}")
+                except ImportError:
+                    # 如果无法导入XLA模块，回退到普通加载
+                    logger.warning("无法导入torch_xla模块，使用标准加载")
+                    checkpoint = torch.load(model_path, map_location=device)
+            else:
+                # GPU或CPU常规加载
+                checkpoint = torch.load(model_path, map_location=device)
+                
             logger.info(f"成功加载checkpoint: {type(checkpoint)}")
         except Exception as e:
             logger.error(f"加载模型文件失败: {str(e)}")
@@ -860,6 +1063,18 @@ def load_trained_model(model_path, device=None):
         
         # 将模型设置为评估模式
         model.eval()
+        
+        # TPU特定处理：复制模型到TPU并标记步骤
+        if device_type == 'tpu':
+            try:
+                import torch_xla.core.xla_model as xm
+                # 确保模型在TPU上
+                model = xm.send_cpu_data_to_device(model, device)
+                # 标记步骤，确保模型加载完成
+                xm.mark_step()
+            except ImportError:
+                logger.debug("TPU XLA模块不可用，跳过TPU特定处理")
+        
         logger.info(f"成功从 {model_path} 加载模型")
         return model
         
@@ -1243,7 +1458,8 @@ class GraphConvLayer(nn.Module):
         adj_key = f"{seq_len}"
         if adj_key not in self.adj_cache:
             # 创建默认邻接矩阵（相邻点连接 + 固定距离跳跃连接）
-            adj = self._build_spectral_adjacency(seq_len).to(device)
+            adj = self._build_spectral_adjacency(seq_len)
+            adj = move_to_device(adj, device)  # 使用通用设备移动函数
             # 归一化邻接矩阵
             adj = self._normalize_adj(adj)
             self.adj_cache[adj_key] = adj
@@ -1252,7 +1468,7 @@ class GraphConvLayer(nn.Module):
         adj_matrix = self.adj_cache[adj_key]
         # 确保邻接矩阵在正确的设备上
         if adj_matrix.device != device:
-            adj_matrix = adj_matrix.to(device)
+            adj_matrix = move_to_device(adj_matrix, device)  # 使用通用设备移动函数
             self.adj_cache[adj_key] = adj_matrix
         
         # 图卷积: X' = AXW
@@ -1297,6 +1513,7 @@ class SpectralAttention(nn.Module):
     """光谱注意力机制
     
     实现简单但完整的自注意力，捕获波长之间的关系
+    支持TPU、GPU和CPU设备
     """
     def __init__(self, channels):
         super(SpectralAttention, self).__init__()
@@ -1319,22 +1536,58 @@ class SpectralAttention(nn.Module):
         key = self.key_conv(x).view(batch_size, -1, width)  # [B, C, W]
         value = self.value_conv(x).view(batch_size, -1, width)  # [B, C, W]
         
-        # 计算注意力得分
-        energy = torch.bmm(query, key)  # [B, W, W]
-        
-        # 为了数值稳定性，在softmax前进行缩放
-        energy_scaled = energy / (C ** 0.5)  # 缩放因子为通道数的平方根
-        
-        # 检查并处理潜在的数值问题
-        if torch.isnan(energy_scaled).any() or torch.isinf(energy_scaled).any():
-            # 使用更安全的方法：移除极端值并应用对数空间softmax
+        # 计算注意力得分 - TPU优化版本
+        try:
+            # 计算注意力得分
+            energy = torch.bmm(query, key)  # [B, W, W]
+            
+            # 为了数值稳定性，在softmax前进行缩放
+            energy_scaled = energy / (C ** 0.5)  # 缩放因子为通道数的平方根
+            
+            # 检查数值问题 - 在TPU上尤其重要
+            has_nan = torch.isnan(energy_scaled).any()
+            has_inf = torch.isinf(energy_scaled).any()
+            
+            # 对于TPU，我们避免使用条件判断，改用统一的计算路径
+            # 首先应用掩码将NaN和Inf替换为安全值
+            if has_nan or has_inf:
+                logger.warning("检测到注意力计算中的NaN或Inf值，应用数值稳定化")
+                # 创建掩码并替换NaN/Inf值
+                nan_mask = torch.isnan(energy_scaled)
+                inf_mask = torch.isinf(energy_scaled)
+                problem_mask = nan_mask | inf_mask
+                
+                # 将问题值替换为0
+                energy_scaled = torch.where(problem_mask, torch.zeros_like(energy_scaled), energy_scaled)
+                
+            # 使用数值稳定的softmax计算
+            # 1. 计算每行的最大值
             max_val, _ = torch.max(energy_scaled, dim=2, keepdim=True)
-            energy_safe = energy_scaled - max_val  # 减去最大值增加数值稳定性
+            
+            # 2. 减去最大值以提高数值稳定性
+            energy_safe = energy_scaled - max_val
+            
+            # 3. 对exp应用掩码以避免NaN
             exp_x = torch.exp(energy_safe)
-            sum_exp_x = torch.sum(exp_x, dim=2, keepdim=True)
-            attention = exp_x / (sum_exp_x + 1e-10)  # 加入小的epsilon值防止除零
-        else:
-            attention = F.softmax(energy_scaled, dim=2)
+            
+            # 4. 计算和并添加小的epsilon以避免除零
+            sum_exp_x = torch.sum(exp_x, dim=2, keepdim=True) + 1e-10  # 添加小的epsilon
+            
+            # 5. 计算softmax
+            attention = exp_x / sum_exp_x
+            
+            # 在TPU上，我们在计算后进行同步以确保计算完成
+            if str(device).startswith('xla'):
+                try:
+                    import torch_xla.core.xla_model as xm
+                    xm.mark_step()
+                except ImportError:
+                    pass
+                
+        except Exception as e:
+            logger.error(f"注意力计算出错: {str(e)}")
+            # 在错误情况下，使用应急注意力（均匀分布）
+            attention = torch.ones(batch_size, width, width, device=device) / width
         
         # 使用注意力权重更新值
         out = torch.bmm(value, attention.permute(0, 2, 1))
@@ -1355,8 +1608,25 @@ class SpectralResCNN_GCN(nn.Module):
         # 记录输入大小，可能为None表示自动适应
         self.input_size = input_size
         
-        # 设置设备
-        self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # 设置设备，支持CPU、GPU和TPU
+        if device is None:
+            if hasattr(config, 'training_config') and 'device' in config.training_config:
+                device = config.training_config['device']
+            else:
+                # 尝试检测TPU
+                if is_tpu_available():
+                    try:
+                        import torch_xla.core.xla_model as xm
+                        device = xm.xla_device()
+                        logger.info(f"使用TPU设备: {device}")
+                    except Exception as e:
+                        logger.warning(f"TPU初始化失败: {str(e)}")
+                        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                else:
+                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                    
+        self.device = device
+        logger.info(f"模型将使用设备: {self.device}")
         
         # 特征提取层
         self.feature_extractor = nn.Sequential(
@@ -1416,9 +1686,8 @@ class SpectralResCNN_GCN(nn.Module):
         self.to(self.device)
         
     def forward(self, x, training=False):
-        # 确保输入在正确的设备上
-        if x.device != self.device:
-            x = x.to(self.device)
+        # 确保输入在正确的设备上，支持TPU
+        x = move_to_device(x, self.device)
             
         # 获取实际输入维度
         batch_size, channels, seq_len = x.size()
@@ -1426,10 +1695,14 @@ class SpectralResCNN_GCN(nn.Module):
         # 如果input_size为None，自动设置为当前序列长度
         if self.input_size is None:
             self.input_size = seq_len
-            print(f"自动适应输入大小: {seq_len}")
+            logger.info(f"自动适应输入大小: {seq_len}")
         
         # 特征提取
         x = self.feature_extractor(x)
+        
+        # 当在TPU上运行时，可能需要进行同步以确保计算完成
+        if str(self.device).startswith('xla'):
+            sync_device(self.device)
         
         # 残差特征提取
         res_features = x
@@ -1443,6 +1716,10 @@ class SpectralResCNN_GCN(nn.Module):
         
         # 应用光谱注意力
         attention_features = self.spectral_attention(rec_features)
+        
+        # TPU同步点 - 多次重形状操作后
+        if str(self.device).startswith('xla'):
+            sync_device(self.device)
         
         # GCN处理 - 首先需要转置数据
         gcn_features = attention_features.permute(0, 2, 1)  # [batch, length, channels]
@@ -1463,6 +1740,10 @@ class SpectralResCNN_GCN(nn.Module):
         # 使用自适应池化层将特征图压缩为固定大小
         x = self.adaptive_pool(x)
         x = x.view(x.size(0), -1)  # 展平
+        
+        # TPU同步点 - 在最终分类前
+        if str(self.device).startswith('xla'):
+            sync_device(self.device)
         
         # 全连接层 (如果在训练模式下且training=True，则保持dropout启用)
         if training:

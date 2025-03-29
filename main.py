@@ -42,6 +42,22 @@ logger = logging.getLogger('main')
 # 创建缓存管理器
 cache_manager = CacheManager(cache_dir=os.path.join(config.output_config['cache_dir'], 'main'))
 
+# 处理torch_xla导入问题
+try:
+    import torch_xla
+    import torch_xla.core.xla_model as xm
+    HAS_XLA = True
+    try:
+        import torch_xla.distributed.parallel_loader as pl
+        HAS_PARALLEL_LOADER = True
+    except ImportError:
+        HAS_PARALLEL_LOADER = False
+        print("torch_xla.distributed.parallel_loader导入失败，将禁用并行加载功能")
+except ImportError:
+    HAS_XLA = False
+    HAS_PARALLEL_LOADER = False
+    print("torch_xla导入失败，将禁用TPU支持")
+
 def load_data(data_path, element=None):
     """加载数据集并返回numpy数组"""
     try:
@@ -518,105 +534,111 @@ def visualize_training(element, train_metrics, val_metrics, output_dir=None):
     
     logger.info(f"已保存训练过程可视化图表")
 
-def process_element(element, config=None, tune_hyperparams=False):
+def process_element(element, model_type=None, input_size=None, use_gpu=True):
     """
-    处理单个元素的训练过程
-    """
-    try:
-        from model import train, SpectralResCNN_GCN  # 导入需要的模块
-        
-        # 设置设备
-        device = config.training_config['device'] if config else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        logger.info(f"使用设备: {device}")
-        
-        # 加载数据
-        if config and hasattr(config, 'data_paths'):
-            train_data = load_data(config.data_paths['train_data'], element)
-            val_data = load_data(config.data_paths['val_data'], element)
-            test_data = load_data(config.data_paths['test_data'], element)
-        else:
-            # 使用默认路径
-            train_data = load_data(os.path.join('processed_data', 'train_dataset.npz'), element)
-            val_data = load_data(os.path.join('processed_data', 'val_dataset.npz'), element)
-            test_data = load_data(os.path.join('processed_data', 'test_dataset.npz'), element)
+    处理单个元素的训练和评估
     
-        if train_data[0] is None or train_data[1] is None:
-            logger.error("加载训练数据失败")
-            return None, None
-            
-        if val_data[0] is None:
-            logger.warning("加载验证数据失败，使用训练数据代替")
-            val_data = train_data
-            
-        if test_data[0] is None:
-            logger.warning("加载测试数据失败，使用验证数据代替")
-            test_data = val_data
-        
-        # 创建数据加载器
-        train_loader = create_data_loaders(train_data[0], train_data[1], batch_size=config.training_config['batch_size'])
-        val_loader = create_data_loaders(val_data[0], val_data[1], batch_size=config.training_config['batch_size'])
-        test_loader = create_data_loaders(test_data[0], test_data[1], batch_size=config.training_config['batch_size'])
-        
-        # 获取输入大小
-        input_size = config.model_config.get('input_size')
-        # 如果输入大小为None，且有数据，则从数据中获取
-        if input_size is None and train_data[0] is not None:
-            if len(train_data[0].shape) > 1:  # 确保数据不是空的
-                input_size = train_data[0].shape[1]  # 获取特征维度
-                logger.info(f"从训练数据自动确定输入大小: {input_size}")
-        
-        # 创建模型
-        model = SpectralResCNN_GCN(input_size=input_size, device=device)
-        logger.info(f"创建模型: SpectralResCNN_GCN, 输入大小: {input_size}")
-        
-        # 尝试恢复训练
-        model_dir = config.model_config['model_dir'] if config else 'models'
-        model_path = os.path.join(model_dir, f"{element}_model.pth")
-
-        if config.training_config.get('resume_training', False) and os.path.exists(model_path):
-            logger.info(f"尝试从 {model_path} 恢复训练")
-            try:
-                from model import load_trained_model
-                model = load_trained_model(model_path, device)
-                logger.info(f"成功恢复模型，继续训练")
-            except Exception as e:
-                logger.warning(f"恢复训练失败: {str(e)}，将重新开始训练")
-        
-        # 是否进行超参数调优
-        if tune_hyperparams:
-            from hyperopt_tuning import run_hyperopt_tuning as hyperparameter_tuning
-            logger.info(f"开始 {element} 的超参数调优")
-            best_params = hyperparameter_tuning(
-                element,
-                train_loader,
-                val_loader,
-                device=device
-            )
-            logger.info(f"{element} 超参数调优完成，最佳参数: {best_params}")
-            return best_params, None  # 由于没有返回模型，返回None作为模型
-        
-        # 正常训练流程
+    参数:
+        element (str): 元素名称，如"C_FE"
+        model_type (str, optional): 模型类型，默认从配置中获取
+        input_size (int, optional): 输入大小，默认从配置中获取
+        use_gpu (bool): 是否使用GPU，默认True
+    """
+    logger = logging.getLogger('main')
+    logger.info(f"开始处理元素: {element}")
+    
+    # 配置设备
+    if use_gpu:
+        if torch.cuda.is_available():
+            device = torch.device('cuda')
+            logger.info(f"使用GPU: {torch.cuda.get_device_name(0)}")
         else:
-            from model import train_and_evaluate_model
-            logger.info(f"开始 {element} 的训练和评估")
-            best_model, best_val_loss, test_metrics = train_and_evaluate_model(
-                train_loader=train_loader,
-                val_loader=val_loader,
-                test_loader=test_loader,
-                element=element,
-                config=config
-            )
-            
-            logger.info(f"{element} 训练和评估完成，最佳验证损失: {best_val_loss:.6f}")
-            logger.info(f"测试指标: {test_metrics}")
-            
-            return best_model, test_metrics
-            
-    except Exception as e:
-        logger.error(f"处理元素 {element} 时出错: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return None, None
+            device = torch.device('cpu')
+            logger.info("GPU不可用，使用CPU")
+    else:
+        # 如果明确不使用GPU，尝试使用TPU
+        try:
+            if HAS_XLA:
+                device = xm.xla_device()
+                logger.info(f"使用TPU设备: {device}")
+            else:
+                logger.info("TPU不可用（未安装PyTorch XLA），使用CPU")
+                device = torch.device('cpu')
+        except Exception as e:
+            logger.warning(f"TPU初始化失败: {str(e)}，使用CPU")
+            device = torch.device('cpu')
+    
+    # 设置配置中的设备
+    config.training_config['device'] = device
+    
+    # 加载数据
+    logger.info(f"加载元素 {element} 的数据")
+    train_path = os.path.join('processed_data', 'train_dataset.npz')
+    val_path = os.path.join('processed_data', 'val_dataset.npz')
+    test_path = os.path.join('processed_data', 'test_dataset.npz')
+    
+    X_train, y_train, _ = load_data(train_path, element)
+    X_val, y_val, _ = load_data(val_path, element)
+    X_test, y_test, _ = load_data(test_path, element)
+    
+    # 获取实际输入大小
+    actual_input_size = X_train.shape[1] if len(X_train.shape) == 2 else X_train.shape[2]
+    if input_size is None:
+        input_size = actual_input_size
+        logger.info(f"使用实际输入大小: {input_size}")
+    
+    # 创建模型
+    if model_type is None:
+        # 使用配置中的模型类型
+        model_type = config.model_config.get('model_type', 'SpectralResCNN_GCN')
+    
+    logger.info(f"为元素 {element} 创建 {model_type} 模型，输入大小: {input_size}")
+    
+    if model_type == 'SpectralResCNN_GCN':
+        model = SpectralResCNN_GCN(input_size=input_size, device=device)
+    elif model_type == 'SpectralResCNN':
+        model = SpectralResCNN(input_size=input_size)
+    elif model_type == 'SpectralResCNNEnsemble':
+        model = SpectralResCNNEnsemble(input_size=input_size)
+    else:
+        logger.error(f"未知的模型类型: {model_type}")
+        raise ValueError(f"未知的模型类型: {model_type}")
+    
+    # 创建数据加载器
+    batch_size = config.training_config.get('batch_size', 32)
+    logger.info(f"创建数据加载器，批量大小: {batch_size}")
+    
+    train_loader = create_data_loaders(X_train, y_train, batch_size=batch_size)
+    val_loader = create_data_loaders(X_val, y_val, batch_size=batch_size, shuffle=False)
+    test_loader = create_data_loaders(X_test, y_test, batch_size=batch_size, shuffle=False)
+    
+    # 训练和评估模型
+    logger.info(f"开始训练 {element} 模型")
+    
+    # 如果为TPU，添加特殊数据加载器处理
+    if str(device).startswith('xla'):
+        try:
+            if HAS_PARALLEL_LOADER:
+                logger.info("使用TPU并行数据加载器")
+                # 用TPU特定的数据加载器包装原始加载器
+                train_loader = pl.MpDeviceLoader(train_loader, device)
+                val_loader = pl.MpDeviceLoader(val_loader, device)
+                test_loader = pl.MpDeviceLoader(test_loader, device)
+            else:
+                logger.warning("无法使用TPU并行数据加载器，使用标准加载器")
+        except ImportError:
+            logger.warning("无法使用TPU并行数据加载器，使用标准加载器")
+    
+    # 进行训练和评估
+    best_model, val_loss, test_metrics = train_and_evaluate_model(
+        train_loader, val_loader, test_loader, element, config
+    )
+    
+    logger.info(f"元素 {element} 的处理完成")
+    logger.info(f"验证损失: {val_loss:.6f}")
+    logger.info(f"测试指标: {test_metrics}")
+    
+    return best_model, val_loss, test_metrics
 
 def process_multiple_elements(csv_file, fits_dir, element_columns=None, 
                              test_size=0.2, val_size=0.1, batch_size=32, 
@@ -733,7 +755,7 @@ def process_multiple_elements(csv_file, fits_dir, element_columns=None,
         
         try:
             # 训练模型
-            best_model, test_metrics = process_element(element, config, tune_hyperparams=tune_hyperparams)
+            best_model, test_metrics = process_element(element, config.model_config.get('model_type'), config.model_config.get('input_size'), config.training_config['device'] == 'cuda')
             
             # 保存结果
             result_info = {
@@ -1382,7 +1404,7 @@ def main():
             try:
                 # 根据命令行参数决定是否进行超参数调优
                 tune_hyperparams = args.tune_hyperparams or args.mode == 'tune'
-                process_element(element, config, tune_hyperparams=tune_hyperparams)
+                process_element(element, config.model_config.get('model_type'), config.model_config.get('input_size'), config.training_config['device'] == 'cuda')
             except Exception as e:
                 logger.error(f"训练元素 {element} 时出错: {str(e)}")
                 logger.error(f"Traceback: {traceback.format_exc()}")

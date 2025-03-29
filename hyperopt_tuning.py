@@ -32,58 +32,50 @@ logger = logging.getLogger('hyperopt')
 
 def objective(params, element, train_loader, val_loader, device=None):
     """
-    优化目标函数：根据超参数创建并训练模型，返回验证集上的损失
-    
-    参数:
-        params (dict): 超参数字典
-        element (str): 元素名称
-        train_loader: 训练数据加载器
-        val_loader: 验证数据加载器
-        device: 计算设备
-    
-    返回:
-        dict: 包含损失值和状态的字典
+    Hyperopt优化的目标函数
     """
-    if device is None:
-        device = config.training_config['device']
-    
     try:
-        logger.info(f"评估超参数: {params}")
         start_time = time.time()
+        logger.info(f"评估超参数: {params}")
         
-        # 创建模型 - 使用新的GCN模型
+        if device is None:
+            device = config.training_config['device']
+        
+        # 设置模型
+        input_size = config.model_config['input_size']
+        
+        # 选择模型类型
+        use_gcn = params.get('use_gcn', True)
+        
+        # 设置dropout率
         dropout_rate = params.get('dropout_rate', 0.5)
-        use_gcn = params.get('use_gcn', True)  # 默认使用GCN模型
+        logger.info(f"已将模型中的dropout层设置为 {dropout_rate}")
         
         if use_gcn:
             model = SpectralResCNN_GCN(
-                input_size=config.model_config['input_size'],
+                input_size=input_size,
+                dropout_rate=dropout_rate,
                 device=device
             )
         else:
             model = SpectralResCNN(
-                input_size=config.model_config['input_size']
+                input_size=input_size,
+                dropout_rate=dropout_rate
             ).to(device)
         
-        # 手动修改模型中的dropout层
-        try:
-            if hasattr(model, 'fc') and isinstance(model.fc, nn.Sequential):
-                for i, layer in enumerate(model.fc):
-                    if isinstance(layer, nn.Dropout):
-                        model.fc[i] = nn.Dropout(dropout_rate)
-                logger.info(f"已将模型中的dropout层设置为 {dropout_rate}")
-        except Exception as e:
-            logger.warning(f"设置dropout率失败: {str(e)}")
-        
         # 设置训练配置
-        train_config = config.CONFIG.copy()
-        train_config['training_config'] = {
+        train_config = {}
+        train_config['training'] = {
             'device': device,
             'batch_size': int(params.get('batch_size', 32)),
             'num_epochs': int(params.get('num_epochs', 50)),  # 调优时使用较少的epochs
             'lr': float(params.get('lr', 0.001)),
             'weight_decay': float(params.get('weight_decay', 1e-4)),
             'early_stopping_patience': int(params.get('patience', 10))
+        }
+        train_config['model_config'] = {
+            'model_dir': config.model_config['model_dir'],
+            'use_gcn': use_gcn
         }
         
         # 训练模型
