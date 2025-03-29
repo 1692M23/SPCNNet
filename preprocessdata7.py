@@ -1737,36 +1737,113 @@ class LAMOSTPreprocessor:
             print("处理后没有有效数据")
             return None, None, None, None
             
-        # 转换为NumPy数组
-        X = np.array(spectra, dtype=np.float32)
-        y = np.array(labels, dtype=np.float32)
+        # 检查所有光谱的长度是否一致
+        expected_length = len(spectra[0])
+        inconsistent_indices = []
         
-        # 最终检查X中的无效值
-        n_samples, n_features = X.shape
-        for i in range(n_samples):
-            if np.isnan(X[i]).any() or np.isinf(X[i]).any():
-                nan_count = np.isnan(X[i]).sum()
-                inf_count = np.isinf(X[i]).sum()
-                print(f"警告: 样本 {i} ({filenames[i]}) 包含 {nan_count} 个NaN和 {inf_count} 个无限值，替换为0")
-                X[i] = np.nan_to_num(X[i], nan=0.0, posinf=0.0, neginf=0.0)
+        for i, spec in enumerate(spectra):
+            if len(spec) != expected_length:
+                print(f"警告: 光谱 {i} ({filenames[i]}) 长度不一致。期望长度: {expected_length}, 实际长度: {len(spec)}")
+                inconsistent_indices.append(i)
         
-        # 检查y中的无效值
-        if np.isnan(y).any() or np.isinf(y).any():
-            nan_count = np.isnan(y).sum()
-            inf_count = np.isinf(y).sum()
-            print(f"警告: 标签中包含 {nan_count} 个NaN和 {inf_count} 个无限值")
-            # 找出包含NaN的样本
-            nan_indices = np.where(np.isnan(y))[0]
-            for idx in nan_indices:
-                print(f"  样本 {idx} ({filenames[idx]}) 的标签为NaN")
-            # 替换NaN为中位数
-            if nan_count > 0:
-                median_y = np.nanmedian(y)
-                print(f"  使用中位数 {median_y} 替换标签中的NaN")
-                y = np.nan_to_num(y, nan=median_y)
+        if inconsistent_indices:
+            print(f"发现 {len(inconsistent_indices)} 个光谱长度不一致，将从数据集中移除")
+            # 从后往前删除，避免索引变化
+            for i in sorted(inconsistent_indices, reverse=True):
+                print(f"移除不一致光谱: {filenames[i]}")
+                del spectra[i]
+                del labels[i]
+                del filenames[i]
+                del elements[i]
         
-        print(f"准备完成 {len(X)} 个样本, 特征数: {X.shape[1]}")
-        return X, y, filenames, elements
+        if not spectra:
+            print("移除不一致光谱后没有有效数据")
+            return None, None, None, None
+        
+        try:
+            # 转换为NumPy数组
+            X = np.array(spectra, dtype=np.float32)
+            y = np.array(labels, dtype=np.float32)
+            
+            # 最终检查X中的无效值
+            n_samples, n_features = X.shape
+            for i in range(n_samples):
+                if np.isnan(X[i]).any() or np.isinf(X[i]).any():
+                    nan_count = np.isnan(X[i]).sum()
+                    inf_count = np.isinf(X[i]).sum()
+                    print(f"警告: 样本 {i} ({filenames[i]}) 包含 {nan_count} 个NaN和 {inf_count} 个无限值，替换为0")
+                    X[i] = np.nan_to_num(X[i], nan=0.0, posinf=0.0, neginf=0.0)
+            
+            # 检查y中的无效值
+            if np.isnan(y).any() or np.isinf(y).any():
+                nan_count = np.isnan(y).sum()
+                inf_count = np.isinf(y).sum()
+                print(f"警告: 标签中包含 {nan_count} 个NaN和 {inf_count} 个无限值")
+                # 找出包含NaN的样本
+                nan_indices = np.where(np.isnan(y))[0]
+                for idx in nan_indices:
+                    print(f"  样本 {idx} ({filenames[idx]}) 的标签为NaN")
+                # 替换NaN为中位数
+                if nan_count > 0:
+                    median_y = np.nanmedian(y)
+                    print(f"  使用中位数 {median_y} 替换标签中的NaN")
+                    y = np.nan_to_num(y, nan=median_y)
+            
+            print(f"准备完成 {len(X)} 个样本, 特征数: {X.shape[1]}")
+            return X, y, filenames, elements
+            
+        except ValueError as e:
+            print(f"创建数组时出错: {e}")
+            print("尝试诊断问题...")
+            
+            # 收集长度信息进行诊断
+            lengths = [len(spec) for spec in spectra]
+            unique_lengths = set(lengths)
+            
+            if len(unique_lengths) > 1:
+                print(f"发现多种不同的光谱长度: {unique_lengths}")
+                
+                # 选择最常见的长度
+                from collections import Counter
+                length_counts = Counter(lengths)
+                most_common_length = length_counts.most_common(1)[0][0]
+                print(f"最常见的光谱长度为 {most_common_length}，将只保留这个长度的光谱")
+                
+                # 只保留长度一致的光谱
+                consistent_data = []
+                for i, spec in enumerate(spectra):
+                    if len(spec) == most_common_length:
+                        consistent_data.append((spectra[i], labels[i], filenames[i], elements[i]))
+                
+                if not consistent_data:
+                    print("没有足够的一致长度光谱")
+                    return None, None, None, None
+                
+                # 重建数据
+                spectra, labels, filenames, elements = zip(*consistent_data)
+                
+                # 再次尝试创建数组
+                try:
+                    X = np.array(spectra, dtype=np.float32)
+                    y = np.array(labels, dtype=np.float32)
+                    print(f"成功创建一致长度的数组: {X.shape}")
+                    
+                    # 最终检查无效值
+                    n_samples, n_features = X.shape
+                    for i in range(n_samples):
+                        if np.isnan(X[i]).any() or np.isinf(X[i]).any():
+                            X[i] = np.nan_to_num(X[i], nan=0.0, posinf=0.0, neginf=0.0)
+                    
+                    if np.isnan(y).any() or np.isinf(y).any():
+                        y = np.nan_to_num(y, nan=np.nanmedian(y))
+                    
+                    return X, y, filenames, elements
+                except Exception as e2:
+                    print(f"第二次尝试创建数组时出错: {e2}")
+                    return None, None, None, None
+            else:
+                print(f"所有光谱长度都相同 ({lengths[0]})，但仍然发生错误")
+                return None, None, None, None
     
     def split_dataset(self, X, y, elements, ask_for_split=True):
         """按照7:1:2的比例分割数据集为训练集、验证集和测试集，可选择是否分割"""
