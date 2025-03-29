@@ -1703,20 +1703,102 @@ class LAMOSTPreprocessor:
                     all_data = pickle.load(f)
                 print(f"从缓存加载全部数据，共 {len(all_data)} 条记录")
                 
-                # 检查数据结构，可能是直接结果列表或者包含元数据的字典
-                if not isinstance(all_data, list):
-                    print(f"警告: 缓存数据格式不正确，类型: {type(all_data)}")
-                    print("不使用缓存，重新处理数据")
-                    all_data = []
-                elif len(all_data) == 0:
-                    print("缓存数据为空，将重新处理")
-                else:
-                    # 检查列表中第一个元素，确认其结构
+                # 检查数据并修复错误格式
+                if len(all_data) > 0:
                     print(f"缓存数据第一条记录类型: {type(all_data[0])}")
-                    if all_data[0] is not None and not isinstance(all_data[0], dict):
-                        print(f"警告: 缓存数据记录格式不正确，第一条记录类型: {type(all_data[0])}")
-                        print("不使用缓存，重新处理数据")
+                    
+                    # 特殊情况：如果缓存是字符串列表，尝试转换为适当的结构
+                    if isinstance(all_data[0], str):
+                        print("检测到缓存中包含字符串记录，尝试从各元素缓存中恢复数据...")
+                        
+                        # 清空当前all_data并从元素级缓存中重建
                         all_data = []
+                        
+                        # 扫描progress目录中的所有元素级缓存
+                        element_progress_files = glob.glob(os.path.join(self.progress_dir, "*_progress.pkl"))
+                        print(f"找到 {len(element_progress_files)} 个元素缓存文件")
+                        
+                        # 从每个元素级缓存中加载数据
+                        for progress_file in element_progress_files:
+                            element_name = os.path.basename(progress_file).replace("_progress.pkl", "")
+                            print(f"正在加载元素 {element_name} 的缓存...")
+                            
+                            try:
+                                with open(progress_file, 'rb') as f:
+                                    element_data = pickle.load(f)
+                                
+                                # 检查元素数据格式
+                                if isinstance(element_data, dict) and 'results' in element_data:
+                                    # 新格式：包含results键的字典
+                                    element_results = element_data['results']
+                                elif isinstance(element_data, list):
+                                    # 旧格式：直接是结果列表
+                                    element_results = element_data
+                                else:
+                                    print(f"跳过元素 {element_name}: 未知的缓存格式")
+                                    continue
+                                
+                                # 确保每个记录都有元素信息
+                                for record in element_results:
+                                    if isinstance(record, dict):
+                                        if 'metadata' in record and 'element' not in record['metadata']:
+                                            record['metadata']['element'] = element_name
+                                        elif 'element' not in record:
+                                            record['element'] = element_name
+                                
+                                print(f"从元素 {element_name} 缓存中加载了 {len(element_results)} 条记录")
+                                all_data.extend(element_results)
+                            except Exception as e:
+                                print(f"加载元素 {element_name} 缓存时出错: {e}")
+                            
+                        print(f"已从元素缓存中恢复共 {len(all_data)} 条记录")
+                        
+                        # 保存恢复后的总缓存
+                        if all_data:
+                            try:
+                                with open(all_progress_file, 'wb') as f:
+                                    pickle.dump(all_data, f)
+                                print("已保存修复后的总缓存文件")
+                            except Exception as e:
+                                print(f"保存修复后的总缓存失败: {e}")
+                        
+                        # 如果仍然没有有效记录或仍然是非字典格式，则放弃使用缓存
+                        if len(all_data) == 0 or (len(all_data) > 0 and not isinstance(all_data[0], dict)):
+                            print("警告: 缓存数据记录格式不正确或为空")
+                            choice = input("是否尝试手动恢复之前的处理结果? (y/n): ")
+                            if choice.lower() == 'y':
+                                # 手动恢复模式
+                                try:
+                                    # 清空当前all_data
+                                    all_data = []
+                                    # 扫描progress目录中的所有元素级缓存
+                                    element_progress_files = glob.glob(os.path.join(self.progress_dir, "*_progress.pkl"))
+                                    
+                                    for progress_file in element_progress_files:
+                                        element_name = os.path.basename(progress_file).replace("_progress.pkl", "")
+                                        print(f"尝试恢复元素 {element_name} 的缓存...")
+                                        
+                                        try:
+                                            # 先尝试进行正常加载
+                                            with open(progress_file, 'rb') as f:
+                                                element_data = pickle.load(f)
+                                            
+                                            # 检查元素数据格式并添加到总缓存
+                                            if isinstance(element_data, dict) and 'results' in element_data:
+                                                all_data.extend(element_data['results'])
+                                                print(f"从 {element_name} 恢复了 {len(element_data['results'])} 条记录")
+                                            elif isinstance(element_data, list):
+                                                all_data.extend(element_data)
+                                                print(f"从 {element_name} 恢复了 {len(element_data)} 条记录")
+                                        except Exception as e:
+                                            print(f"恢复元素 {element_name} 失败: {e}")
+                                        
+                                    print(f"手动恢复完成，共恢复 {len(all_data)} 条记录")
+                                except Exception as e:
+                                    print(f"手动恢复过程出错: {e}")
+                            else:
+                                print("不使用缓存，重新处理数据")
+                                all_data = []
                     else:
                         # 验证每条记录是否有必要的字段
                         valid_records = []
