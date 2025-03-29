@@ -57,17 +57,27 @@ def load_data(data_path, element=None):
         # 检查元素标签是否存在
         elements = data['elements'] if 'elements' in data else None
         
-        # 如果指定了元素且elements是字典，尝试获取特定元素的索引
-        if element is not None and elements is not None and isinstance(elements, dict):
-            if element in elements:
-                print(f"找到元素 {element} 的索引")
+        # 如果指定了元素，检查元素信息
+        if element is not None:
+            if elements is not None:
+                if isinstance(elements, dict) and element in elements:
+                    logger.info(f"找到元素 {element} 的索引")
+                elif isinstance(elements, dict):
+                    logger.warning(f"元素 {element} 不在索引字典中")
+                else:
+                    logger.warning(f"elements不是字典类型，无法查找特定元素索引")
+                    # 如果elements是数组，表示我们可能有每个样本的ID，而不是元素索引
+                    # 在这种情况下，返回mock字典，将特定元素映射到0，表示我们的abundance是单元素的
+                    elements = {element: 0}  # 创建模拟字典，用于单元素数据
             else:
-                print(f"在elements字典中找不到元素 {element} 的索引")
+                # 如果没有elements信息，创建一个简单的映射
+                logger.warning(f"数据中没有元素索引信息，假设abundance对应 {element}")
+                elements = {element: 0}  # 创建模拟字典，用于单元素数据
                 
-        print(f"成功加载数据: {X.shape}, {y.shape}")
+        logger.info(f"成功加载数据: {X.shape}, {y.shape}")
         return X, y, elements
     except Exception as e:
-        print(f"加载数据时出错: {e}")
+        logger.error(f"加载数据时出错: {e}")
         raise
 
 def create_data_loaders(spectra, labels, batch_size=32, shuffle=True):

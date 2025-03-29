@@ -16,7 +16,7 @@ import time
 
 # 导入自定义模块
 import config
-from model import SpectralResCNN, train_model, evaluate_model
+from model import SpectralResCNN, train, evaluate_model
 
 # 配置日志
 logging.basicConfig(
@@ -69,7 +69,7 @@ def objective(params, element, train_loader, val_loader, device=None):
         }
         
         # 训练模型
-        train_losses, val_losses = train_model(
+        train_losses, val_losses = train(
             model=model,
             train_loader=train_loader,
             val_loader=val_loader,
