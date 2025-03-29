@@ -543,16 +543,21 @@ def train(model, train_loader, val_loader, config, device, element):
                 total_loss += loss.item()
                 batch_count += 1
                 
-                # 定期显示进度
-                if batch_idx % 10 == 0:
-                    # 确保TPU操作完成后再记录日志
+                # 每个批次后添加进度显示 (无论TPU/GPU/CPU)
+                if batch_idx % 5 == 0 or batch_idx == len(train_loader) - 1:
+                    # 确保TPU上的操作完成后再输出
                     if device_type == 'tpu' and HAS_XLA:
-                        xm.mark_step()  # 添加同步点确保操作完成
+                        import torch_xla.core.xla_model as xm
+                        xm.mark_step()
                     
-                    # 使用直接打印而不仅仅是logger
-                    current_lr = optimizer.param_groups[0]['lr']
-                    print(f"阶段{stage} - Epoch {epoch+1}/{config['training']['num_epochs']} [{batch_idx}/{len(train_loader)}] Loss: {loss.item():.6f} LR: {current_lr:.6f}")
-                    logger.info(f"阶段{stage} - Epoch {epoch+1}/{config['training']['num_epochs']} [{batch_idx}/{len(train_loader)}] Loss: {loss.item():.6f} LR: {current_lr:.6f}")
+                    # 使用print直接输出，确保显示在控制台
+                    progress_msg = f"阶段{stage} - Epoch {epoch+1}/{config['training']['num_epochs']} - 批次 {batch_idx+1}/{len(train_loader)} ({batch_idx+1*100/len(train_loader):.1f}%) - 损失: {loss.item():.6f}"
+                    print(progress_msg)
+                    logger.info(progress_msg)
+                    
+                    # 强制刷新标准输出
+                    import sys
+                    sys.stdout.flush()
             
             # 更新学习率
             scheduler.step()
