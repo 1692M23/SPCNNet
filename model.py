@@ -1064,104 +1064,70 @@ def predict(model, data_loader, device=None):
 # =============== 4. 工具函数 ===============
 def load_trained_model(model_path, device=None):
     """加载训练好的模型，确保正确处理状态字典"""
-    logger.info(f"尝试加载模型: {model_path}")
-    
     try:
-        # 创建模型实例
-        input_size = 3921  # 默认输入大小
-        model = SpectralResCNN_GCN(input_size)
-        
-        if not os.path.exists(model_path):
-            logger.error(f"模型文件不存在: {model_path}")
-            # 移动到设备
-            if device:
-                model = model.to(device)
-            model.eval()
-            logger.warning(f"模型文件不存在，使用未训练的新模型作为备选")
-            return model
-        
-        try:
-            # 使用CPU加载避免GPU内存问题
-            checkpoint = torch.load(model_path, map_location='cpu')
+        if os.path.exists(model_path):
+            # 创建模型实例
+            input_size = 3921  # 默认输入大小
+            model = SpectralResCNN_GCN(input_size)
             
-            # 检查是否是状态字典格式
-            if isinstance(checkpoint, dict):
-                if 'model_state_dict' in checkpoint:
-                    # 最常见的格式：包含model_state_dict的字典
+            # 加载状态字典
+            try:
+                # 首先尝试使用map_location避免设备不匹配问题
+                checkpoint = torch.load(model_path, map_location='cpu')
+                
+                # 检查是否是状态字典格式
+                if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
                     model.load_state_dict(checkpoint['model_state_dict'])
-                    logger.info(f"使用model_state_dict成功加载模型")
-                elif 'state_dict' in checkpoint:
-                    # 另一种常见格式：包含state_dict的字典
+                    logger.info(f"从检查点的model_state_dict加载模型状态")
+                elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
                     model.load_state_dict(checkpoint['state_dict'])
-                    logger.info(f"使用state_dict成功加载模型")
+                    logger.info(f"从检查点的state_dict加载模型状态")
                 else:
-                    # 可能直接是状态字典
+                    # 尝试直接加载，假设是状态字典
                     try:
                         model.load_state_dict(checkpoint)
                         logger.info(f"直接加载状态字典成功")
                     except Exception as e:
-                        logger.error(f"尝试直接加载状态字典失败: {str(e)}")
-                        logger.warning(f"无法识别的模型格式，使用未训练模型")
-            else:
-                # 这可能是旧版本保存的整个模型对象
-                logger.error(f"加载的对象不是字典，可能是整个模型对象，尝试获取状态字典")
-                try:
-                    if hasattr(checkpoint, 'state_dict'):
-                        model.load_state_dict(checkpoint.state_dict())
-                        logger.info(f"从模型对象获取状态字典成功")
-                    else:
-                        logger.error(f"无法从加载的对象获取状态字典")
-                        logger.warning(f"无法识别的模型格式，使用未训练模型")
-                except Exception as e:
-                    logger.error(f"从模型对象获取状态字典失败: {str(e)}")
-                    logger.warning(f"无法加载模型，使用未训练的模型作为备选")
-        except RuntimeError as e:
-            if "maximum recursion depth exceeded" in str(e):
-                logger.error(f"加载模型时递归深度超出错误，这通常是由于保存了整个模型而非状态字典: {str(e)}")
-                # 创建备用模型路径
-                backup_path = model_path.replace('.pth', '_backup.pth')
-                if os.path.exists(backup_path):
-                    logger.info(f"尝试加载备用模型: {backup_path}")
-                    try:
-                        backup_checkpoint = torch.load(backup_path, map_location='cpu')
-                        if isinstance(backup_checkpoint, dict) and 'model_state_dict' in backup_checkpoint:
-                            model.load_state_dict(backup_checkpoint['model_state_dict'])
-                            logger.info(f"成功从备用模型加载状态字典")
-                        else:
-                            logger.warning(f"备用模型格式不正确，使用未训练模型")
-                    except Exception as e2:
-                        logger.error(f"加载备用模型失败: {str(e2)}")
-            else:
-                logger.error(f"加载模型时运行时错误: {str(e)}")
-        except Exception as e:
-            logger.error(f"加载模型时未知错误: {str(e)}")
+                        logger.error(f"直接加载状态字典失败: {str(e)}")
+                        # 如果所有尝试都失败，创建一个新模型
+                        logger.warning(f"无法加载模型，将使用未初始化的模型")
+            except RecursionError as re:
+                logger.error(f"加载模型时递归深度超出错误: {str(re)}")
+                logger.warning("检测到可能是保存了整个模型而非状态字典，创建新模型")
+                # 出现递归深度错误时，返回未初始化的模型
+            except RuntimeError as e:
+                if "maximum recursion depth exceeded" in str(e):
+                    logger.error(f"加载模型时递归深度超出错误: {str(e)}")
+                    logger.warning("检测到可能是保存了整个模型而非状态字典，创建新模型")
+                else:
+                    logger.error(f"加载模型运行时错误: {str(e)}")
+                # 出现递归深度错误时，返回未初始化的模型
             
-        # 移动到设备
-        if device:
-            model = model.to(device)
-            
-        model.eval()
-        logger.info(f"模型已加载并设置为评估模式")
-        return model
-    except Exception as e:
-        logger.error(f"加载模型全过程失败: {str(e)}")
-        # 创建一个空模型作为备选
-        try:
+            # 移动到设备
+            if device:
+                model = model.to(device)
+                
+            model.eval()
+            logger.info(f"模型已加载并设置为评估模式")
+            return model
+        else:
+            logger.error(f"模型文件不存在: {model_path}")
+            # 创建新模型作为备选
             model = SpectralResCNN_GCN(3921)
             if device:
                 model = model.to(device)
             model.eval()
-            logger.warning(f"由于异常，使用未训练的新模型作为备选")
+            logger.warning(f"使用未训练的新模型作为备选")
             return model
-        except Exception as e2:
-            logger.error(f"创建新模型也失败: {str(e2)}")
-            # 如果连创建新模型都失败，则尝试一个更简单的模型
-            model = SpectralResCNN(3921)
-            if device:
-                model = model.to(device)
-            model.eval()
-            logger.warning(f"创建GCN模型失败，使用简单CNN模型作为备选")
-            return model
+    except Exception as e:
+        logger.error(f"加载模型失败: {str(e)}")
+        # 创建新模型作为备选
+        model = SpectralResCNN_GCN(3921)
+        if device:
+            model = model.to(device)
+        model.eval()
+        logger.warning(f"加载失败，使用未训练的新模型作为备选")
+        return model
 
 # 在模型训练完成后添加
 def analyze_model_performance(self, element, train_loader, val_loader, test_loader):
@@ -1326,97 +1292,70 @@ def load_trained_model_compat(input_size_or_path, element_or_device=None, config
     # 检测调用方式
     if isinstance(input_size_or_path, str) and (element_or_device is None or isinstance(element_or_device, (str, torch.device))):
         # 新方式: load_trained_model(model_path, device=None)
-        return load_trained_model(input_size_or_path, element_or_device)
+        return load_trained_model_core(input_size_or_path, element_or_device)
     
     # 旧方式: load_trained_model(input_size, element, config)
     input_size = input_size_or_path
     element = element_or_device
-    
-    if hasattr(config, 'training_config') and 'device' in config.training_config:
-        device = config.training_config['device']
-    else:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = config.training_config['device']
     
     # 尝试找到模型路径
     try:
-        # 确定模型目录
-        if hasattr(config, 'model_config') and 'model_dir' in config.model_config:
-            model_dir = config.model_config['model_dir']
-        else:
-            model_dir = 'models'
-            logger.warning(f"配置中未找到model_dir，使用默认值: {model_dir}")
+        # 确保模型目录存在
+        os.makedirs(config.model_config['model_dir'], exist_ok=True)
         
-        # 确保目录存在
-        os.makedirs(model_dir, exist_ok=True)
-        
-        # 优先尝试加载最终模型（SpectralResCNN_GCN格式）
-        final_model_path = os.path.join(model_dir, f'SpectralResCNN_GCN_{element}.pth')
-        if os.path.exists(final_model_path):
-            logger.info(f"找到最终模型文件: {final_model_path}")
-            return load_trained_model(final_model_path, device)
-        
-        # 尝试加载最佳模型（best_model格式）
-        best_model_path = os.path.join(model_dir, f'best_model_{element}.pth')
-        if os.path.exists(best_model_path):
-            logger.info(f"找到最佳模型文件: {best_model_path}")
-            return load_trained_model(best_model_path, device)
-        
-        # 尝试加载检查点模型（checkpoint格式）
-        checkpoint_path = os.path.join(model_dir, f'checkpoint_{element}.pth')
-        if os.path.exists(checkpoint_path):
-            logger.info(f"找到检查点模型文件: {checkpoint_path}")
-            try:
-                # 创建新模型实例
-                model = SpectralResCNN_GCN(input_size)
-                model.to(device)
-                
-                # 使用CPU加载检查点避免GPU内存问题
-                checkpoint = torch.load(checkpoint_path, map_location='cpu')
-                
-                # 只加载状态字典，不加载整个模型对象
-                if 'model_state_dict' in checkpoint:
-                    model.load_state_dict(checkpoint['model_state_dict'])
-                    logger.info(f"使用model_state_dict成功加载检查点")
-                    model.eval()
-                    return model
-                else:
-                    logger.warning(f"检查点中没有model_state_dict，创建未训练模型")
-            except RuntimeError as e:
-                if "maximum recursion depth exceeded" in str(e):
-                    logger.error(f"加载检查点时递归深度超出: {str(e)}")
-                else:
-                    logger.error(f"加载检查点时运行时错误: {str(e)}")
-                # 创建一个空模型作为后备选择
-                logger.warning(f"由于加载错误，使用未训练的模型作为后备")
-        
-        # 尝试其他常见格式
-        other_paths = [
-            os.path.join(model_dir, f"{element}_model.pth"),
-            os.path.join(model_dir, f"{element.lower()}_model.pth"),
-            os.path.join(model_dir, f"model_{element}.pth"),
+        # 尝试多种可能的模型文件命名模式
+        model_paths = [
+            os.path.join(config.model_config['model_dir'], f"{element}_model.pth"),  # 标准格式
+            os.path.join(config.model_config['model_dir'], f"{element.lower()}_model.pth"),  # 小写
+            os.path.join(config.model_config['model_dir'], f"{element.upper()}_model.pth"),  # 大写
+            os.path.join(config.model_config['model_dir'], f"{element}_best_model.pth"),  # best前缀
+            os.path.join(config.model_config['model_dir'], f"model_{element}.pth"),  # 另一种格式
+            os.path.join(config.model_config['model_dir'], f"best_model_{element}.pth"),  # 另一种最佳模型格式
+            os.path.join(config.model_config['model_dir'], f"checkpoint_{element}.pth"),  # 检查点格式
         ]
         
-        for path in other_paths:
+        model_path = None
+        for path in model_paths:
             if os.path.exists(path):
-                logger.info(f"找到模型文件: {path}")
-                try:
-                    return load_trained_model(path, device)
-                except Exception as e:
-                    logger.error(f"加载模型失败: {str(e)}")
-                    break
+                model_path = path
+                break
+                
+        if model_path is None:
+            logger.warning(f"找不到{element}的模型文件，尝试其他格式")
+            
+            # 检查目录中的所有文件，查找可能匹配的模型
+            if os.path.exists(config.model_config['model_dir']):
+                for file in os.listdir(config.model_config['model_dir']):
+                    if file.endswith('.pth') and element.lower() in file.lower():
+                        model_path = os.path.join(config.model_config['model_dir'], file)
+                        logger.info(f"找到可能匹配的模型文件: {file}")
+                        break
         
-        # 如果所有尝试都失败，创建未训练的模型
-        logger.warning(f"找不到元素 {element} 的有效模型文件，使用未训练的模型作为后备")
+        if model_path is None:
+            logger.error(f"找不到元素 {element} 的模型文件")
+            # 创建一个空模型作为后备选择
+            backup_model = SpectralResCNN_GCN(input_size)
+            backup_model.to(device)
+            backup_model.eval()
+            logger.warning(f"使用未训练的模型作为后备")
+            return backup_model
+        
+        # 找到模型文件，加载它
+        return load_trained_model_core(model_path, device)
         
     except Exception as e:
-        logger.error(f"加载模型过程中发生错误: {str(e)}")
-    
-    # 创建一个新模型作为后备
-    model = SpectralResCNN_GCN(input_size)
-    model.to(device)
-    model.eval()
-    logger.warning(f"使用未训练的新模型作为后备")
-    return model
+        logger.error(f"Error loading model: {str(e)}")
+        # 创建一个空模型作为后备选择
+        backup_model = SpectralResCNN_GCN(input_size)
+        backup_model.to(device)
+        backup_model.eval()
+        logger.warning(f"Using untrained model as backup")
+        return backup_model
+
+# 修改原来的load_trained_model函数名为load_trained_model_core，保持旧函数名对旧函数的向后兼容性
+load_trained_model_core = load_trained_model
+load_trained_model = load_trained_model_compat 
 
 def save_model(model, optimizer, scheduler, epoch_val, val_loss, model_dir, element):
     """保存模型检查点"""
@@ -1709,33 +1648,28 @@ class SpectralResCNN_GCN(nn.Module):
     
     结合残差CNN和图卷积网络处理光谱数据
     """
-    def __init__(self, input_size=3921, device=None):
+    def __init__(self, input_size=None, device=None):
         super(SpectralResCNN_GCN, self).__init__()
         
-        # 记录输入大小
+        # 记录输入大小，可能为None表示自动适应
         self.input_size = input_size
-        logger.info(f"创建SpectralResCNN_GCN模型，输入大小: {input_size}")
         
         # 设置设备，支持CPU、GPU和TPU
         if device is None:
-            try:
-                if hasattr(config, 'training_config') and 'device' in config.training_config:
-                    device = config.training_config['device']
-                else:
-                    # 尝试检测TPU
-                    if is_tpu_available():
-                        try:
-                            import torch_xla.core.xla_model as xm
-                            device = xm.xla_device()
-                            logger.info(f"使用TPU设备: {device}")
-                        except Exception as e:
-                            logger.warning(f"TPU初始化失败: {str(e)}")
-                            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-                    else:
+            if hasattr(config, 'training_config') and 'device' in config.training_config:
+                device = config.training_config['device']
+            else:
+                # 尝试检测TPU
+                if is_tpu_available():
+                    try:
+                        import torch_xla.core.xla_model as xm
+                        device = xm.xla_device()
+                        logger.info(f"使用TPU设备: {device}")
+                    except Exception as e:
+                        logger.warning(f"TPU初始化失败: {str(e)}")
                         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            except Exception as e:
-                logger.warning(f"设备检测失败: {str(e)}, 使用CPU")
-                device = torch.device('cpu')
+                else:
+                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
                     
         self.device = device
         logger.info(f"模型将使用设备: {self.device}")
@@ -1795,25 +1729,11 @@ class SpectralResCNN_GCN(nn.Module):
         )
         
         # 将模型移动到指定设备
-        try:
-            self.to(self.device)
-        except Exception as e:
-            logger.error(f"将模型移动到设备{self.device}时出错: {str(e)}")
-            # 如果移动到指定设备失败，尝试使用CPU
-            self.device = torch.device('cpu')
-            self.to(self.device)
-            logger.warning(f"将模型移动到CPU作为备选")
+        self.to(self.device)
         
     def forward(self, x, training=False):
         # 确保输入在正确的设备上，支持TPU
-        try:
-            x = move_to_device(x, self.device)
-        except Exception as e:
-            logger.error(f"将输入移动到设备{self.device}时出错: {str(e)}")
-            # 如果移动输入失败，尝试将模型移动到输入设备
-            self.to(x.device)
-            self.device = x.device
-            logger.warning(f"将模型移动到输入设备{x.device}")
+        x = move_to_device(x, self.device)
             
         # 获取实际输入维度
         batch_size, channels, seq_len = x.size()
@@ -1823,75 +1743,69 @@ class SpectralResCNN_GCN(nn.Module):
             self.input_size = seq_len
             logger.info(f"自动适应输入大小: {seq_len}")
         
-        try:
-            # 特征提取
-            x = self.feature_extractor(x)
+        # 特征提取
+        x = self.feature_extractor(x)
+        
+        # 当在TPU上运行时，可能需要进行同步以确保计算完成
+        if str(self.device).startswith('xla'):
+            sync_device(self.device)
+        
+        # 残差特征提取
+        res_features = x
+        for res_block in self.res_blocks:
+            res_features = res_block(res_features)
             
-            # 当在TPU上运行时，可能需要进行同步以确保计算完成
-            if str(self.device).startswith('xla'):
-                sync_device(self.device)
-            
-            # 残差特征提取
-            res_features = x
-            for res_block in self.res_blocks:
-                res_features = res_block(res_features)
-                
-            # 循环特征提取
-            rec_features = x.permute(0, 2, 1)  # [batch, length, channels]
-            rec_features, _ = self.gru(rec_features)
-            rec_features = rec_features.permute(0, 2, 1)  # [batch, channels*2, length]
-            
-            # 应用光谱注意力
-            attention_features = self.spectral_attention(rec_features)
-            
-            # TPU同步点 - 多次重形状操作后
-            if str(self.device).startswith('xla'):
-                sync_device(self.device)
-            
-            # GCN处理 - 首先需要转置数据
-            gcn_features = attention_features.permute(0, 2, 1)  # [batch, length, channels]
-            for gcn_layer in self.gcn_layers:
-                gcn_features = gcn_layer(gcn_features)
-                gcn_features = F.relu(gcn_features)
-            
-            # 处理GCN输出
-            gcn_features = self.gcn_process(gcn_features)
-            
-            # 将GCN特征转回原始格式
-            gcn_features = gcn_features.permute(0, 2, 1)  # [batch, channels, length]
-            
-            # 特征融合 (CNN + GRU + GCN)
-            combined_features = torch.cat([res_features, attention_features, gcn_features], dim=1)
-            x = self.fusion(combined_features)
-            
-            # 使用自适应池化层将特征图压缩为固定大小
-            x = self.adaptive_pool(x)
-            x = x.view(x.size(0), -1)  # 展平
-            
-            # TPU同步点 - 在最终分类前
-            if str(self.device).startswith('xla'):
-                sync_device(self.device)
-            
-            # 全连接层 (如果在训练模式下且training=True，则保持dropout启用)
-            if training:
-                # 保存当前模式
-                training_mode = self.training
-                # 设置为训练模式启用dropout
-                self.train()
-                # 前向传播
-                x = self.fc(x)
-                # 恢复原始模式
-                if not training_mode:
-                    self.eval()
-            else:
-                x = self.fc(x)
-            
-            return x
-        except Exception as e:
-            logger.error(f"前向传播时出错: {str(e)}")
-            # 在出错的情况下，返回全零输出
-            logger.warning(f"前向传播失败，返回全零输出")
-            return torch.zeros((batch_size, 1), device=self.device)
+        # 循环特征提取
+        rec_features = x.permute(0, 2, 1)  # [batch, length, channels]
+        rec_features, _ = self.gru(rec_features)
+        rec_features = rec_features.permute(0, 2, 1)  # [batch, channels*2, length]
+        
+        # 应用光谱注意力
+        attention_features = self.spectral_attention(rec_features)
+        
+        # TPU同步点 - 多次重形状操作后
+        if str(self.device).startswith('xla'):
+            sync_device(self.device)
+        
+        # GCN处理 - 首先需要转置数据
+        gcn_features = attention_features.permute(0, 2, 1)  # [batch, length, channels]
+        for gcn_layer in self.gcn_layers:
+            gcn_features = gcn_layer(gcn_features)
+            gcn_features = F.relu(gcn_features)
+        
+        # 处理GCN输出
+        gcn_features = self.gcn_process(gcn_features)
+        
+        # 将GCN特征转回原始格式
+        gcn_features = gcn_features.permute(0, 2, 1)  # [batch, channels, length]
+        
+        # 特征融合 (CNN + GRU + GCN)
+        combined_features = torch.cat([res_features, attention_features, gcn_features], dim=1)
+        x = self.fusion(combined_features)
+        
+        # 使用自适应池化层将特征图压缩为固定大小
+        x = self.adaptive_pool(x)
+        x = x.view(x.size(0), -1)  # 展平
+        
+        # TPU同步点 - 在最终分类前
+        if str(self.device).startswith('xla'):
+            sync_device(self.device)
+        
+        # 全连接层 (如果在训练模式下且training=True，则保持dropout启用)
+        if training:
+            # 保存当前模式
+            training_mode = self.training
+            # 设置为训练模式启用dropout
+            self.train()
+            # 前向传播
+            x = self.fc(x)
+            # 恢复原始模式
+            if not training_mode:
+                self.eval()
+        else:
+            x = self.fc(x)
+        
+        return x 
 
 def load_checkpoint(model, optimizer, scheduler, element, checkpoint_type='checkpoint'):
     """加载训练检查点，兼容新旧格式"""
@@ -1910,7 +1824,6 @@ def load_checkpoint(model, optimizer, scheduler, element, checkpoint_type='check
         return model, optimizer, scheduler, 0, float('inf')
     
     try:
-        # 使用map_location='cpu'避免设备不匹配问题
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
         
         # 处理新格式检查点（包含state_dict）
@@ -1961,22 +1874,13 @@ def load_checkpoint(model, optimizer, scheduler, element, checkpoint_type='check
         
         logger.info(f"成功加载检查点 (轮次 {epoch}): {checkpoint_path}")
         return model, optimizer, scheduler, epoch, loss
-    
-    except RuntimeError as e:
-        # 特别处理递归深度超出错误，这通常是由于保存了整个模型对象而非状态字典
-        if "maximum recursion depth exceeded" in str(e):
-            logger.error(f"加载检查点时递归深度超出错误: {str(e)}")
-            logger.warning("检测到可能是保存了整个模型而非状态字典，返回未修改的模型")
-        else:
-            logger.error(f"加载检查点失败: {str(e)}")
-        return model, optimizer, scheduler, 0, float('inf')
-    
+        
     except Exception as e:
         logger.error(f"加载检查点失败: {str(e)}")
         return model, optimizer, scheduler, 0, float('inf')
 
 def save_checkpoint(model, optimizer, scheduler, epoch_val, loss, element, checkpoint_type='checkpoint'):
-    """保存训练检查点，使用state_dict确保兼容性"""
+    """保存训练检查点"""
     if isinstance(config, dict):
         model_dir = config.get('model_config', {}).get('model_dir', 'models')
     else:
@@ -1984,36 +1888,23 @@ def save_checkpoint(model, optimizer, scheduler, epoch_val, loss, element, check
             model_dir = config.model_config['model_dir']
         except:
             model_dir = 'models'
-            
-    # 确保目录存在
+    
     os.makedirs(model_dir, exist_ok=True)
-    
-    # 创建检查点字典
-    checkpoint = {
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict() if optimizer is not None else None,
-        'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
-        'epoch': epoch_val,
-        'loss': loss,
-        'element': element,
-        'timestamp': time.time(),
-        'date': time.strftime('%Y-%m-%d %H:%M:%S')
-    }
-    
-    # 保存检查点
     checkpoint_path = os.path.join(model_dir, f'{checkpoint_type}_{element}.pth')
+    
+    # 只保存状态字典，不保存整个模型对象
+    checkpoint = {
+        'epoch': epoch_val,  # 使用epoch_val而不是epoch
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict() if optimizer else None,
+        'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+        'loss': loss
+    }
     
     try:
         torch.save(checkpoint, checkpoint_path)
         logger.info(f"成功保存检查点: {checkpoint_path}")
-        
-        # 同时保存为最终模型文件，使用一致的命名格式
-        if checkpoint_type == 'best_model':
-            final_model_path = os.path.join(model_dir, f'SpectralResCNN_GCN_{element}.pth')
-            torch.save(checkpoint, final_model_path)
-            logger.info(f"成功保存最终模型: {final_model_path}")
-            
+        return True
     except Exception as e:
         logger.error(f"保存检查点失败: {str(e)}")
-        
-    return checkpoint_path
+        return False
