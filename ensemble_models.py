@@ -167,13 +167,19 @@ if __name__ == "__main__":
     from main import load_data, create_data_loaders
     
     # 加载数据
-    X_train, y_train, X_val, y_val, X_test, y_test = load_data(args.element)
+    train_path = os.path.join('processed_data', 'train_dataset.npz')
+    val_path = os.path.join('processed_data', 'val_dataset.npz')
+    test_path = os.path.join('processed_data', 'test_dataset.npz')
+    
+    # 加载训练、验证和测试数据
+    X_train, y_train, elements_train = load_data(train_path, args.element)
+    X_val, y_val, elements_val = load_data(val_path, args.element)
+    X_test, y_test, elements_test = load_data(test_path, args.element)
     
     # 创建数据加载器
-    train_loader, val_loader, test_loader = create_data_loaders(
-        X_train, y_train, X_val, y_val, X_test, y_test, 
-        batch_size=64
-    )
+    train_loader = create_data_loaders(X_train, y_train, batch_size=64)
+    val_loader = create_data_loaders(X_val, y_val, batch_size=64, shuffle=False)
+    test_loader = create_data_loaders(X_test, y_test, batch_size=64, shuffle=False)
     
     # 训练模型集成
     models = train_ensemble(
