@@ -601,7 +601,8 @@ def train(model, train_loader, val_loader, num_epochs=50, patience=10, device=No
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 patience_counter = 0
-                # 保存最佳模型
+                # 保存最佳模型 - 使用当前循环的 epoch 变量
+                save_checkpoint(model, optimizer, scheduler, epoch, val_loss, element, 'checkpoint')
                 save_model(model, optimizer, scheduler, epoch, val_loss, config['model_config']['model_dir'], element)
             else:
                 patience_counter += 1
@@ -1048,18 +1049,26 @@ def load_trained_model(model_path, device=None):
     try:
         if os.path.exists(model_path):
             # 创建模型实例
-            model = SpectralResCNN_GCN()
+            input_size = 3921  # 默认输入大小，您可能需要根据实际情况调整
+            model = SpectralResCNN_GCN(input_size)
             
             # 加载状态字典
             checkpoint = torch.load(model_path, map_location='cpu')
             
             if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
                 model.load_state_dict(checkpoint['model_state_dict'])
+                logger.info(f"从检查点的model_state_dict加载模型状态")
             elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
                 model.load_state_dict(checkpoint['state_dict'])
+                logger.info(f"从检查点的state_dict加载模型状态")
             else:
                 # 尝试直接加载，假设是状态字典
-                model.load_state_dict(checkpoint)
+                try:
+                    model.load_state_dict(checkpoint)
+                    logger.info(f"直接加载状态字典成功")
+                except Exception as e:
+                    logger.error(f"直接加载状态字典失败: {str(e)}")
+                    raise
                 
             # 移动到设备
             if device:
@@ -1743,7 +1752,15 @@ class SpectralResCNN_GCN(nn.Module):
 
 def load_checkpoint(model, optimizer, scheduler, element, checkpoint_type='checkpoint'):
     """加载训练检查点，兼容新旧格式"""
-    checkpoint_path = os.path.join(config.model_config['model_dir'], f'{checkpoint_type}_{element}.pth')
+    if isinstance(config, dict):
+        model_dir = config.get('model_config', {}).get('model_dir', 'models')
+    else:
+        try:
+            model_dir = config.model_config['model_dir']
+        except:
+            model_dir = 'models'
+            
+    checkpoint_path = os.path.join(model_dir, f'{checkpoint_type}_{element}.pth')
     
     if not os.path.exists(checkpoint_path):
         logger.warning(f"找不到检查点文件: {checkpoint_path}")
@@ -1756,10 +1773,10 @@ def load_checkpoint(model, optimizer, scheduler, element, checkpoint_type='check
         if 'model_state_dict' in checkpoint:
             model.load_state_dict(checkpoint['model_state_dict'])
             
-            if optimizer is not None and 'optimizer_state_dict' in checkpoint:
+            if optimizer is not None and 'optimizer_state_dict' in checkpoint and checkpoint['optimizer_state_dict'] is not None:
                 optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
                 
-            if scheduler is not None and 'scheduler_state_dict' in checkpoint:
+            if scheduler is not None and 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict'] is not None:
                 scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
                 
             epoch = checkpoint.get('epoch', 0)
@@ -1787,8 +1804,16 @@ def load_checkpoint(model, optimizer, scheduler, element, checkpoint_type='check
             epoch = checkpoint.get('epoch', 0)
             loss = checkpoint.get('loss', float('inf'))
         else:
-            logger.error("未知的检查点格式")
-            return model, optimizer, scheduler, 0, float('inf')
+            # 尝试直接加载为状态字典
+            try:
+                model.load_state_dict(checkpoint)
+                logger.info(f"尝试直接加载检查点为状态字典成功")
+                epoch = 0
+                loss = float('inf')
+            except Exception as e:
+                logger.error(f"尝试直接加载检查点为状态字典失败: {str(e)}")
+                logger.error("未知的检查点格式")
+                return model, optimizer, scheduler, 0, float('inf')
         
         logger.info(f"成功加载检查点 (轮次 {epoch}): {checkpoint_path}")
         return model, optimizer, scheduler, epoch, loss
@@ -1812,7 +1837,7 @@ def save_checkpoint(model, optimizer, scheduler, epoch_val, loss, element, check
     
     # 只保存状态字典，不保存整个模型对象
     checkpoint = {
-        'epoch': epoch_val,  # 使用传入的epoch_val参数，避免使用未定义的epoch
+        'epoch': epoch_val,  # 使用传入的epoch_val而不是未定义的epoch
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict() if optimizer else None,
         'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
