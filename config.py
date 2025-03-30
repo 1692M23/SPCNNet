@@ -130,9 +130,8 @@ data_config = {
     },
     'augmentation_enabled': True,
     'augmentation_params': {
-        'noise_level': 0.01,  # 随机噪声水平
-        'shift_range': 0.05,  # 偏移范围
-        'dropout_prob': 0.05  # 随机丢弃概率
+        'noise_level': 0.02,
+        'shift_range': 0.1
     }
 }
 
@@ -158,7 +157,7 @@ training_config = {
     'weight_decay': 1e-4,
     'force_new_model': True,
     'num_epochs': 100,
-    'early_stopping_patience': 25,
+    'early_stopping_patience': 20,
     'device': device_config['device'],  # 使用检测到的设备
     'device_type': device_config['device_type'],  # 设备类型（'cpu', 'cuda', 或 'tpu'）
     'multi_device': device_config['multi_device'],  # 是否有多个设备可用
@@ -169,7 +168,9 @@ training_config = {
     'tpu_config': {
         'use_xla_compilation': True,  # 是否使用XLA编译加速
         'use_dynamic_shapes': False,  # 是否使用动态形状（某些操作在TPU上需要固定形状）
-    }
+    },
+    'scheduler': 'cosine',  # 余弦退火学习率
+    'lr_min': 1e-6  # 最小学习率
 }
 
 # 超参数调优配置
@@ -469,3 +470,6 @@ class Config:
     USE_GPU = True  # 自动检测
     MAX_WORKERS = 4  # 并行处理的工作线程数
     MEMORY_LIMIT = 0.7  # 内存使用限制百分比 
+
+    # 第一阶段保持0.0005
+    # 第二阶段降低到0.00005 
