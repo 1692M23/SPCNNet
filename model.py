@@ -473,13 +473,13 @@ def train(model, train_loader, val_loader, num_epochs=50, patience=10, device=No
     # 在train函数中修改创建scheduler的代码部分
     if 'scheduler' in config['training'] and config['training']['scheduler'] == 'cosine':
         scheduler_params = config['training'].get('scheduler_params', {})
-        T_0 = scheduler_params.get('T_0', 5)
-        T_mult = scheduler_params.get('T_mult', 1)
-        eta_min = scheduler_params.get('eta_min', 1e-6)
+        T_0 = scheduler_params.get('T_0', 10)
+        T_mult = scheduler_params.get('T_mult', 1) 
+        eta_min = scheduler_params.get('eta_min', 5e-6)
         
         scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-            optimizer, 
-            T_0=T_0,
+            optimizer,
+            T_0=T_0, 
             T_mult=T_mult,
             eta_min=eta_min
         )
@@ -1693,9 +1693,9 @@ class SpectralResCNN_GCN(nn.Module):
         # 特征提取层
         self.feature_extractor = nn.Sequential(
             nn.Conv1d(1, 64, kernel_size=7, padding=3),
-            nn.BatchNorm1d(64, momentum=0.01),  # 降低动量，使统计更稳定
+            nn.BatchNorm1d(64, momentum=0.1),  # 更大的动量
             nn.ReLU(),
-            nn.Dropout(0.2),  # 添加dropout
+            nn.Dropout(0.1),  # 添加小的dropout
             nn.MaxPool1d(2)
         )
         
