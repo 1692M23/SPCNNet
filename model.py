@@ -1701,7 +1701,7 @@ class SpectralResCNN_GCN(nn.Module):
         
         # 残差模块 - 参数驱动的纵向特征提取
         self.res_blocks = nn.ModuleList([
-            ResidualBlock(64) for _ in range(2)  # 降低至2个残差块
+            ResidualBlock(64) for _ in range(3)
         ])
         
         # 循环模块 - 跨波段信念增强
@@ -1713,7 +1713,8 @@ class SpectralResCNN_GCN(nn.Module):
         # GCN模块 - 建模波长点之间的关系
         # 注意：这里无需指定具体的序列长度，将在forward中动态适应
         self.gcn_layers = nn.ModuleList([
-            GraphConvLayer(128, 128)  # 只保留1层GCN
+            GraphConvLayer(128, 128),
+            GraphConvLayer(128, 128)
         ])
         
         # GCN输出处理
@@ -1735,10 +1736,13 @@ class SpectralResCNN_GCN(nn.Module):
         
         # 全连接层
         self.fc = nn.Sequential(
-            nn.Linear(64, 128),
+            nn.Linear(64, 256),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(256, 64),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(128, 1)
+            nn.Linear(64, 1)
         )
         
         # 将模型移动到指定设备
