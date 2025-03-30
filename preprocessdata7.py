@@ -1,30 +1,34 @@
 import numpy as np
 import pandas as pd
-from astropy.io import fits
 import os
 import glob
-from sklearn.model_selection import train_test_split, KFold
-from scipy import signal, interpolate
-from multiprocessing import Pool, cpu_count
-import time
-from tqdm import tqdm, trange
 import matplotlib.pyplot as plt
-import gc  # 垃圾回收
-import psutil  # 系统资源监控
-import pickle  # 用于保存中间结果
-import warnings
-import subprocess  # 用于执行shell命令
-import zipfile  # 用于解压文件
-import sys  # 用于检测环境
-import shutil
-from utils import CacheManager
-import concurrent.futures
+import pickle
+import time
 import json
-import traceback
-import re
-from sklearn.model_selection import KFold, train_test_split
+import warnings
+from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor
+import psutil
+from scipy import signal
+from scipy import interpolate
+from scipy.ndimage import gaussian_filter1d
+from sklearn.model_selection import KFold
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.metrics import mean_squared_error, r2_score
+from astropy.io import fits
 import random
-warnings.filterwarnings('ignore')  # 忽略不必要的警告
+import re
+import datetime
+import sys
+import shutil
+
+# 添加GPU支持库
+import torch
+import cupy as cp
+import cupyx.scipy.ndimage as cupy_ndimage
+import cupyx.scipy.signal as cupy_signal
+from numba import cuda, jit
 
 # 判断是否在Colab环境中
 def is_in_colab():
@@ -52,8 +56,8 @@ class LAMOSTPreprocessor:
                  max_workers=None,  # 最大工作进程数，None表示自动确定
                  batch_size=20,  # 批处理大小
                  memory_limit=0.7,  # 内存使用限制(占总内存比例)
-                 verbose=1,  # 输出详细程度，0=静默，1=基本信息，2=详细信息
-                 low_memory_mode=False):  # 低内存模式
+                 low_memory_mode=False,  # 低内存模式
+                 use_gpu=True):  # 新增参数，控制是否使用GPU
         
         # 设置文件路径
         # 默认使用当前目录下所有的CSV文件
@@ -93,7 +97,7 @@ class LAMOSTPreprocessor:
         print("正在加载文件查找缓存...")
         self._load_files_cache()
         
-        self.wavelength_range = wavelength_range if wavelength_range else (3690, 9100)  # 默认范围
+        self.wavelength_range = wavelength_range if wavelength_range else (2690, 9100)  # 默认范围
         self.n_points = n_points
         self.log_step = log_step
         self.compute_common_range = compute_common_range
@@ -124,8 +128,18 @@ class LAMOSTPreprocessor:
         
         self.update_cache_manager()
         
-        # 输出详细程度
-        self.verbose = verbose
+        self.use_gpu = use_gpu
+        
+        # 检查GPU是否可用
+        self.gpu_available = torch.cuda.is_available() if use_gpu else False
+        if self.use_gpu and not self.gpu_available:
+            print("警告：要求使用GPU但未检测到可用GPU，将回退到CPU计算")
+        elif self.use_gpu and self.gpu_available:
+            print(f"GPU加速已启用: {torch.cuda.get_device_name(0)}")
+            # 设置CUDA设备
+            self.device = torch.device("cuda:0")
+            # 预热GPU
+            torch.cuda.empty_cache()
         
     def _load_files_cache(self):
         """加载文件查找缓存"""
@@ -281,6 +295,22 @@ class LAMOSTPreprocessor:
             self.fits_file_cache[spec_name] = direct_path
             return direct_path
         
+        # 检查是否是元素名称而不是文件路径（例如"C_FE"）
+        if spec_name in ["C_FE", "MG_FE", "CA_FE"]:
+            print(f"检测到元素名称: {spec_name}，尝试查找对应的示例FITS文件")
+            # 查找与元素相关的CSV文件中的FITS文件样例
+            csv_path = f"{spec_name}.csv"
+            if os.path.exists(csv_path):
+                try:
+                    import pandas as pd
+                    df = pd.read_csv(csv_path)
+                    if 'spec' in df.columns and len(df) > 0:
+                        first_spec = df['spec'].iloc[0]
+                        print(f"从CSV文件中获取第一个样例: {first_spec}")
+                        return self._find_fits_file(first_spec)
+                except Exception as e:
+                    print(f"从CSV读取样例时出错: {e}")
+        
         # 尝试直接在fits目录下按基础名称匹配（常规后缀）
         for ext in ['', '.fits', '.fits.gz', '.fit', '.fit.gz']:
             path = os.path.join(self.fits_dir, base_name + ext)
@@ -290,14 +320,16 @@ class LAMOSTPreprocessor:
                 return path
         
         # 进行递归搜索，处理嵌套目录
+        print(f"开始递归搜索FITS目录: {self.fits_dir}")
+        fits_files_found = []
+        
         for root, dirs, files in os.walk(self.fits_dir):
             for file in files:
                 # 检查文件名是否匹配（忽略大小写）
                 if base_name.lower() in file.lower():
                     found_path = os.path.join(root, file)
+                    fits_files_found.append(found_path)
                     print(f"部分名称匹配成功: {found_path}")
-                    self.fits_file_cache[spec_name] = found_path
-                    return found_path
                 
                 # 尝试去除可能的后缀后再比较
                 file_base = file.lower()
@@ -308,9 +340,8 @@ class LAMOSTPreprocessor:
                 
                 if base_name.lower() == file_base:
                     found_path = os.path.join(root, file)
+                    fits_files_found.append(found_path)
                     print(f"去除后缀后匹配成功: {found_path}")
-                    self.fits_file_cache[spec_name] = found_path
-                    return found_path
                 
                 # 尝试更模糊的匹配方式
                 # 移除路径分隔符，便于匹配跨目录文件
@@ -319,9 +350,36 @@ class LAMOSTPreprocessor:
                 
                 if clean_base_name.lower() in clean_file_base or clean_file_base in clean_base_name.lower():
                     found_path = os.path.join(root, file)
+                    fits_files_found.append(found_path)
                     print(f"模糊匹配成功: {found_path}")
-                    self.fits_file_cache[spec_name] = found_path
-                    return found_path
+        
+        # 处理找到的文件
+        if fits_files_found:
+            # 优先选择与查询名称最匹配的文件
+            best_match = fits_files_found[0]  # 默认第一个
+            for found_path in fits_files_found:
+                file_name = os.path.basename(found_path).lower()
+                # 如果文件名包含查询名称，优先选择
+                if base_name.lower() in file_name:
+                    best_match = found_path
+                    break
+            
+            print(f"从{len(fits_files_found)}个匹配结果中选择: {best_match}")
+            self.fits_file_cache[spec_name] = best_match
+            return best_match
+        
+        # 尝试其他备选方案 - 如果目录中有任何FITS文件，作为最后的备选方案
+        fits_files = []
+        for root, _, files in os.walk(self.fits_dir):
+            for file in files:
+                if any(file.lower().endswith(ext) for ext in ['.fits', '.fits.gz', '.fit', '.fit.gz']):
+                    fits_files.append(os.path.join(root, file))
+        
+        if fits_files:
+            # 显示可用的备选文件
+            print(f"未直接找到 {spec_name} 匹配的文件。")
+            print(f"FITS目录中有 {len(fits_files)} 个FITS文件可用。")
+            print(f"可用的FITS文件示例: {fits_files[0] if fits_files else '无'}")
         
         # 如果以上都没找到，返回None
         print(f"未找到匹配文件: {spec_name}")
@@ -560,7 +618,47 @@ class LAMOSTPreprocessor:
             return None, None, 0, 0, 0, {}
     
     def denoise_spectrum(self, wavelength, flux):
-        """对光谱进行去噪处理"""
+        """使用GPU加速的光谱去噪"""
+        if self.use_gpu and self.gpu_available:
+            try:
+                # 检查数据有效性
+                valid_mask = ~np.isnan(flux)
+                if not np.any(valid_mask):
+                    print("全部为NaN值，无法去噪")
+                    return wavelength, flux
+                
+                # 对有效数据进行处理
+                wavelength_valid = wavelength[valid_mask]
+                flux_valid = flux[valid_mask]
+                
+                if len(flux_valid) < 5:  # 最小窗口大小
+                    print(f"有效数据点数太少({len(flux_valid)})，无法去噪")
+                    return wavelength, flux
+                
+                # 转换为GPU数组
+                flux_gpu = cp.asarray(flux_valid)
+                
+                # 使用cupy的高斯滤波
+                window_length = 5  # 窗口大小
+                sigma = 1.0  # 高斯标准差
+                
+                # 使用高斯滤波进行平滑
+                smoothed_flux = cupy_ndimage.gaussian_filter1d(flux_gpu, sigma=sigma)
+                
+                # 结果回传到CPU
+                result_flux = np.copy(flux)
+                result_flux[valid_mask] = cp.asnumpy(smoothed_flux)
+                
+                return wavelength, result_flux
+            except Exception as e:
+                print(f"GPU去噪失败: {e}，回退到CPU实现")
+                return self._denoise_spectrum_cpu(wavelength, flux)
+        else:
+            # 使用CPU实现
+            return self._denoise_spectrum_cpu(wavelength, flux)
+        
+    def _denoise_spectrum_cpu(self, wavelength, flux):
+        """CPU版本的光谱去噪实现"""
         try:
             # 使用Savitzky-Golay滤波器去噪
             window_length = 5  # 窗口大小
@@ -569,31 +667,29 @@ class LAMOSTPreprocessor:
             # 防止窗口长度不足的错误
             if len(flux) < window_length:
                 print(f"数据点数太少({len(flux)})，无法使用窗口为{window_length}的滤波器")
-                return flux  # 数据点太少，直接返回原始数据
+                return wavelength, flux  # 数据点太少，直接返回原始数据
             
             # 处理无效值
             mask = ~np.isnan(flux)
             if not np.any(mask):
                 print("全部为NaN值，无法去噪")
-                return None
+                return wavelength, flux
             
             # 只对有效数据进行滤波
             valid_flux = flux[mask]
             
             if len(valid_flux) < window_length:
                 print(f"有效数据点数太少({len(valid_flux)})，无法去噪")
-                return flux
+                return wavelength, flux
             
             # 对有效数据进行滤波
             flux_denoised = np.copy(flux)
             flux_denoised[mask] = signal.savgol_filter(valid_flux, window_length, polyorder)
             
-            return flux_denoised
+            return wavelength, flux_denoised
         except Exception as e:
             print(f"去噪处理出错: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
+            return wavelength, flux
     
     def correct_redshift(self, wavelength, flux, z):
         """校正红移
@@ -651,33 +747,97 @@ class LAMOSTPreprocessor:
             common_min = max(r[0] for r in self.processed_ranges)
             common_max = min(r[1] for r in self.processed_ranges)
             
-            # 检查计算出的公共范围是否有效
             if common_min < common_max:
-                # 获取默认范围
-                default_min, default_max = (3690, 9100)  # 默认波长范围
-                
-                # 修正：只有当计算出的范围超出默认范围时，才使用默认范围作为约束
-                # 如果计算出的最小值比默认最小值还小，则保留计算出的值
-                if common_min < default_min:
-                    print(f"计算的最小波长({common_min:.2f})小于默认范围，使用默认最小值: {default_min:.2f}")
-                    common_min = default_min
-                    
-                # 如果计算出的最大值比默认最大值还大，则保留计算出的值
-                if common_max > default_max:
-                    print(f"计算的最大波长({common_max:.2f})大于默认范围，使用默认最大值: {default_max:.2f}")
-                    common_max = default_max
-                
-                # 仅当修正后的范围有效时更新
-                if common_min < common_max:
-                    self.wavelength_range = (common_min, common_max)
-                    print(f"更新最大公有波长范围: {common_min:.2f}~{common_max:.2f}")
-                else:
-                    print(f"警告: 修正后的波长范围无效 ({common_min:.2f}~{common_max:.2f})，保持原有范围")
+                self.wavelength_range = (common_min, common_max)
+                print(f"更新最大公有波长范围: {common_min:.2f}~{common_max:.2f}")
             else:
-                print(f"警告: 无法更新公有波长范围，当前范围不重叠 ({common_min:.2f}~{common_max:.2f})")
+                print(f"警告: 无法更新公有波长范围，当前范围不重叠")
     
     def resample_spectrum(self, wavelength, flux):
-        """对光谱进行重采样，支持对数空间重采样"""
+        """使用GPU加速的光谱重采样"""
+        if self.use_gpu and self.gpu_available:
+            try:
+                # 检查并过滤无效值
+                valid_mask = ~np.isnan(flux)
+                if not np.any(valid_mask):
+                    print("所有流量值都是NaN，无法重采样")
+                    return None, None
+                
+                wavelength_valid = wavelength[valid_mask]
+                flux_valid = flux[valid_mask]
+                
+                if len(wavelength_valid) < 2:
+                    print(f"有效数据点数太少({len(wavelength_valid)})，无法进行插值")
+                    return None, None
+                
+                # 更新最大公有波长范围
+                self.update_common_wavelength_range(wavelength_valid)
+                
+                # 获取波长范围
+                w_min, w_max = self.wavelength_range
+                
+                # 检查数据范围
+                if w_min < wavelength_valid.min() or w_max > wavelength_valid.max():
+                    w_min_valid = max(w_min, wavelength_valid.min())
+                    w_max_valid = min(w_max, wavelength_valid.max())
+                    
+                    if w_min_valid >= w_max_valid:
+                        print("重采样范围无效")
+                        return None, None
+                    
+                    w_min, w_max = w_min_valid, w_max_valid
+                
+                # 转换为GPU张量
+                wavelength_gpu = torch.tensor(wavelength_valid, device=self.device, dtype=torch.float32)
+                flux_gpu = torch.tensor(flux_valid, device=self.device, dtype=torch.float32)
+                
+                # 在对数空间中创建等间隔网格
+                log_w_min = torch.log10(torch.tensor(w_min, device=self.device))
+                log_w_max = torch.log10(torch.tensor(w_max, device=self.device))
+                
+                # 根据步长计算点数
+                if self.n_points is None:
+                    n_points = int((log_w_max - log_w_min) / self.log_step) + 1
+                else:
+                    n_points = self.n_points
+                
+                # 创建新的对数波长网格
+                log_wavelength = torch.linspace(log_w_min, log_w_max, n_points, device=self.device)
+                
+                # 转换回线性波长
+                new_wavelength = torch.pow(10, log_wavelength)
+                
+                # 转回CPU进行插值
+                new_wavelength_cpu = new_wavelength.cpu().numpy()
+                wavelength_valid_cpu = wavelength_gpu.cpu().numpy()
+                flux_valid_cpu = flux_gpu.cpu().numpy()
+                
+                # 使用scipy的插值
+                interp_func = interpolate.interp1d(wavelength_valid_cpu, flux_valid_cpu, 
+                                                 kind='linear', bounds_error=False, 
+                                                 fill_value=np.nan)
+                new_flux = interp_func(new_wavelength_cpu)
+                
+                # 检查结果
+                if np.isnan(new_flux).all():
+                    print("重采样后所有数据都是NaN")
+                    return None, None
+                
+                # 替换NaN值
+                if np.isnan(new_flux).any():
+                    new_flux = np.nan_to_num(new_flux, nan=0.0)
+                
+                return new_wavelength_cpu, new_flux
+            except Exception as e:
+                print(f"GPU重采样失败: {e}")
+                # 失败时回退到CPU实现
+                return self._resample_spectrum_cpu(wavelength, flux)
+        else:
+            # 使用CPU实现
+            return self._resample_spectrum_cpu(wavelength, flux)
+    
+    def _resample_spectrum_cpu(self, wavelength, flux):
+        """CPU版本的光谱重采样实现"""
         try:
             # 检查并过滤无效值
             valid_mask = ~np.isnan(flux)
@@ -692,15 +852,14 @@ class LAMOSTPreprocessor:
                 print(f"有效数据点数太少({len(wavelength_valid)})，无法进行插值")
                 return None, None
             
-            # 不再调用update_common_wavelength_range，只使用预先计算好的波长范围
+            # 更新最大公有波长范围
+            self.update_common_wavelength_range(wavelength_valid)
             
             # 获取波长范围
             w_min, w_max = self.wavelength_range
             
             # 检查数据范围是否覆盖目标范围
             if w_min < wavelength_valid.min() or w_max > wavelength_valid.max():
-                print(f"目标波长范围({w_min:.2f}~{w_max:.2f})超出有效数据范围({wavelength_valid.min():.2f}~{wavelength_valid.max():.2f})")
-                # 调整为有效范围的交集
                 w_min_valid = max(w_min, wavelength_valid.min())
                 w_max_valid = min(w_max, wavelength_valid.max())
                 
@@ -709,7 +868,6 @@ class LAMOSTPreprocessor:
                     return None, None
                 
                 print(f"调整波长范围为有效数据的交集: {w_min_valid:.2f}~{w_max_valid:.2f}")
-                # 只在局部变量中调整范围，不修改类的wavelength_range属性
                 w_min, w_max = w_min_valid, w_max_valid
             
             # 在对数空间中进行重采样
@@ -719,12 +877,8 @@ class LAMOSTPreprocessor:
             # 根据步长计算点数（如果未指定点数）
             if self.n_points is None:
                 n_points = int((log_w_max - log_w_min) / self.log_step) + 1
-                print(f"根据对数步长{self.log_step} dex计算重采样点数: {n_points}")
             else:
                 n_points = self.n_points
-                # 如果指定了点数，计算实际使用的步长
-                actual_log_step = (log_w_max - log_w_min) / (n_points - 1)
-                print(f"使用指定点数{n_points}，对数步长为: {actual_log_step} dex")
             
             # 在对数空间中创建等间隔网格
             log_wavelength = np.linspace(log_w_min, log_w_max, n_points)
@@ -753,7 +907,7 @@ class LAMOSTPreprocessor:
                 n_inf = np.isinf(new_flux).sum()
                 print(f"重采样后有{n_inf}/{len(new_flux)}个点是无限值，将替换为0")
                 new_flux = np.nan_to_num(new_flux, nan=0.0, posinf=0.0, neginf=0.0)
-                
+            
             return new_wavelength, new_flux
         except Exception as e:
             print(f"重采样失败: {e}")
@@ -761,82 +915,92 @@ class LAMOSTPreprocessor:
             traceback.print_exc()
             return None, None
     
-    def normalize_spectrum(self, wavelength, flux):
-        """
-        对光谱进行最大最小归一化处理，确保结果严格在[0,1]范围内
-        
-        参数:
-            wavelength (ndarray): 波长数组
-            flux (ndarray): 原始光谱强度
+    def normalize_spectrum(self, flux):
+        """使用GPU加速的光谱标准化"""
+        if self.use_gpu and self.gpu_available:
+            # 转换为GPU数组
+            flux_gpu = cp.asarray(flux)
             
-        返回:
-            ndarray: 归一化后的光谱强度，范围严格在[0,1]之间
-        """
-        try:
-            # 连续谱归一化 (简单的最大值归一化)
-            valid_flux = flux[~np.isnan(flux)]
-            if len(valid_flux) == 0:
+            # 检查数据有效性
+            valid_mask = ~cp.isnan(flux_gpu) & ~cp.isinf(flux_gpu)
+            if not cp.any(valid_mask):
                 print("所有流量值都是NaN，无法归一化")
                 return None
             
-            # 检查输入数据有效性
-            if flux is None or len(flux) == 0:
-                print("警告: 归一化失败 - 输入光谱为空")
-                return None
-            
-            # 处理无效值
-            valid_mask = ~np.isnan(flux) & ~np.isinf(flux)
-            if not np.any(valid_mask):
-                print("警告: 归一化失败 - 所有值都是NaN或无穷大")
-                return None
+            valid_flux = flux_gpu[valid_mask]
             
             # 最大最小值归一化
-            flux_min = np.nanmin(flux)
-            flux_max = np.nanmax(flux)
+            flux_min = cp.min(valid_flux)
+            flux_max = cp.max(valid_flux)
             
-            print(f"归一化：最小值={flux_min}，最大值={flux_max}")
+            # 创建归一化后的数组
+            normalized_flux = cp.zeros_like(flux_gpu)
             
-            if np.isclose(flux_max, flux_min) or np.isinf(flux_max) or np.isinf(flux_min):
-                print(f"流量范围无效: min={flux_min}, max={flux_max}")
-                return None
-            
-            normalized_flux = (flux - flux_min) / (flux_max - flux_min)
+            if cp.isclose(flux_max, flux_min):
+                normalized_flux[valid_mask] = 0.5  # 所有有效值设为0.5
+            else:
+                normalized_flux[valid_mask] = (valid_flux - flux_min) / (flux_max - flux_min)
             
             # 确保所有值都严格在0-1范围内
-            normalized_flux = np.clip(normalized_flux, 0.0, 1.0)
+            normalized_flux = cp.clip(normalized_flux, 0.0, 1.0)
             
-            # 检查归一化结果是否有效
-            if np.isnan(normalized_flux).any() or np.isinf(normalized_flux).any():
-                print("归一化后出现无效值(NaN或Inf)")
-                if len(normalized_flux) < 20:
-                    print(f"归一化结果: {normalized_flux}")
-                # 尝试替换无效值
-                normalized_flux = np.nan_to_num(normalized_flux, nan=0.0, posinf=1.0, neginf=0.0)
+            # 替换无效值
+            normalized_flux[~valid_mask] = 0.0
             
-            # 验证归一化后的范围
-            valid_norm = normalized_flux[valid_mask]
-            if len(valid_norm) > 0:
-                min_norm = np.min(valid_norm)
-                max_norm = np.max(valid_norm)
-                print(f"归一化后范围: [{min_norm}, {max_norm}]")
+            # 转回CPU
+            return cp.asnumpy(normalized_flux), {'flux_min': float(flux_min), 'flux_max': float(flux_max)}
+        else:
+            # 原始CPU实现
+            try:
+                # 检查数据有效性
+                if flux is None or len(flux) == 0:
+                    print("无效的流量数据，无法归一化")
+                    return None
+                    
+                # 处理全为NaN的情况
+                if np.isnan(flux).all():
+                    print("所有流量值都是NaN，无法归一化")
+                    return None
                 
-                if min_norm < 0 or max_norm > 1:
-                    print("警告: 归一化结果超出[0,1]范围，进行裁剪")
-                    normalized_flux = np.clip(normalized_flux, 0.0, 1.0)
-            
-            # 记录归一化参数供后续使用
-            self.normalization_params = {
-                'min': float(flux_min),
-                'max': float(flux_max),
-                'wavelength_range': (float(np.min(wavelength)), float(np.max(wavelength))) if wavelength is not None else None
-            }
-            
-            return normalized_flux
-        except Exception as e:
-            print(f"归一化失败: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
+                # 连续谱归一化 (简单的最大值归一化)
+                valid_mask = ~np.isnan(flux) & ~np.isinf(flux)
+                valid_flux = flux[valid_mask]
+                
+                if len(valid_flux) == 0:
+                    print("没有有效的流量值，无法归一化")
+                    return None
+                
+                # 最大最小值归一化
+                flux_min = np.min(valid_flux)
+                flux_max = np.max(valid_flux)
+                
+                print(f"归一化：最小值={flux_min}，最大值={flux_max}")
+                
+                if np.isclose(flux_max, flux_min):
+                    print(f"流量范围无效: min={flux_min}, max={flux_max}，设置为0-1范围")
+                    normalized_flux = np.zeros_like(flux)
+                    normalized_flux[valid_mask] = 0.5  # 所有有效值设为0.5
+                    return normalized_flux, {'flux_min': flux_min, 'flux_max': flux_max}
+                
+                # 创建归一化后的数组
+                normalized_flux = np.zeros_like(flux)
+                normalized_flux[valid_mask] = (valid_flux - flux_min) / (flux_max - flux_min)
+                
+                # 确保所有值都严格在0-1范围内
+                normalized_flux = np.clip(normalized_flux, 0.0, 1.0)
+                
+                # 替换无效值
+                normalized_flux[~valid_mask] = 0.0
+                
+                # 最终检查确保没有NaN或无限值
+                if np.isnan(normalized_flux).any() or np.isinf(normalized_flux).any():
+                    print("归一化后仍有无效值，进行最终替换")
+                    normalized_flux = np.nan_to_num(normalized_flux, nan=0.0, posinf=1.0, neginf=0.0)
+                    
+                return normalized_flux, {'flux_min': flux_min, 'flux_max': flux_max}
+            except Exception as e:
+                print(f"归一化失败: {e}")
+                return None, None
     
     def correct_wavelength(self, wavelength, flux):
         """对光谱进行波长标准化校正
@@ -1088,309 +1252,157 @@ class LAMOSTPreprocessor:
                 return flux, {'flux_min': None, 'flux_max': None}
     
     def denoise_spectrum_second(self, wavelength, flux):
-        """对光谱进行二次去噪处理，更强地移除噪声，但保留明显的特征"""
-        try:
-            # 检查是否有无效值
-            if flux is None or np.all(np.isnan(flux)):
-                print("无效的流量数据，无法进行二次去噪")
-                return flux
-            
-            # 对OI线区域进行特殊检查
-            oi_region = (wavelength >= 7700) & (wavelength <= 7850)
-            has_oi_anomaly = False
-            if np.any(oi_region):
-                oi_flux = flux[oi_region]
-                if np.max(oi_flux) > np.median(flux[~np.isnan(flux)]) * 1.5:
-                    print("OI线(7774埃)附近检测到异常，将加强平滑")
-                    has_oi_anomaly = True
-            
-            # 保存原始数据的副本
-            flux_denoised = np.copy(flux)
-            
-            # 使用SavGol滤波器进行平滑去噪
-            from scipy.signal import savgol_filter
-            
-            # 确定窗口大小 - 正常区域和异常区域使用不同的参数
-            standard_window = 7  # 默认窗口大小
-            oi_window = 15      # OI区域使用更大窗口
-            
-            # 处理NaN值
-            valid_mask = ~np.isnan(flux)
-            if not np.any(valid_mask):
-                return flux
-            
-            # 创建一个有效数据的副本用于填充
-            valid_flux = flux[valid_mask]
-            valid_wavelength = wavelength[valid_mask]
-            
-            # 对一般区域应用滤波
+        """第二次去噪，使用更温和的参数，支持GPU加速"""
+        if self.use_gpu and self.gpu_available:
             try:
-                flux_denoised[valid_mask] = savgol_filter(valid_flux, standard_window, 2)
-                print(f"二次去噪完成，使用窗口长度= {standard_window}")
+                # 检查数据有效性
+                valid_mask = ~np.isnan(flux)
+                if not np.any(valid_mask):
+                    print("全部为NaN值，无法去噪")
+                    return wavelength, flux
+                
+                # 转换为GPU数组
+                flux_gpu = cp.asarray(flux)
+                
+                # 使用更温和的高斯滤波参数
+                sigma = 0.5  # 更小的sigma值，保留更多细节
+                
+                # 应用高斯滤波
+                smoothed_flux = cupy_ndimage.gaussian_filter1d(flux_gpu, sigma=sigma)
+                
+                # 转回CPU
+                return wavelength, cp.asnumpy(smoothed_flux)
             except Exception as e:
-                print(f"SavGol滤波失败: {e}")
-                return flux
-                
-            # 如果OI区域有异常，使用更强的滤波参数专门处理
-            if has_oi_anomaly:
-                # 找到OI区域的有效数据点
-                oi_valid_mask = oi_region & valid_mask
-                if np.sum(oi_valid_mask) > oi_window:  # 确保有足够的点进行滤波
-                    try:
-                        # 对OI区域使用更大窗口和更高阶多项式
-                        oi_indices = np.where(oi_valid_mask)[0]
-                        if len(oi_indices) >= oi_window:
-                            oi_flux_section = flux[oi_valid_mask]
-                            # 使用更大窗口进行强平滑
-                            oi_smoothed = savgol_filter(oi_flux_section, oi_window, 3)
-                            flux_denoised[oi_valid_mask] = oi_smoothed
-                            print(f"OI区域增强去噪完成，使用窗口长度= {oi_window}")
-                    except Exception as e:
-                        print(f"OI区域特殊去噪失败: {e}")
+                print(f"二次去噪GPU处理失败: {e}，回退到CPU")
+                return self._denoise_spectrum_second_cpu(wavelength, flux)
+        else:
+            # 使用CPU实现
+            return self._denoise_spectrum_second_cpu(wavelength, flux)
+        
+    def _denoise_spectrum_second_cpu(self, wavelength, flux):
+        """CPU版本的第二次去噪实现"""
+        try:
+            # 使用中值滤波去除尖峰噪声
+            window_size = 3  # 更小的窗口，保留更多细节
             
-            # 还可以额外进行中值滤波以移除尖峰
-            from scipy.signal import medfilt
+            # 处理无效值
+            mask = ~np.isnan(flux)
+            if not np.any(mask):
+                print("全部为NaN值，无法进行二次去噪")
+                return wavelength, flux
             
-            # 对特别突出的峰值使用中值滤波
-            if has_oi_anomaly:
-                # 寻找异常峰值
-                flux_mean = np.mean(flux_denoised[valid_mask])
-                flux_std = np.std(flux_denoised[valid_mask])
-                spike_threshold = flux_mean + 1.5 * flux_std
-                
-                spike_mask = (flux_denoised > spike_threshold) & valid_mask
-                if np.any(spike_mask):
-                    print(f"检测到{np.sum(spike_mask)}个异常峰值点，进行中值滤波")
-                    # 将这些点替换为周围7个点的中值
-                    for idx in np.where(spike_mask)[0]:
-                        start = max(0, idx - 3)
-                        end = min(len(flux_denoised), idx + 4)
-                        if end - start >= 3:  # 确保至少有3个点用于中值计算
-                            neighbors = flux_denoised[start:end]
-                            flux_denoised[idx] = np.median(neighbors)
+            # 复制数据进行处理
+            flux_smooth = np.copy(flux)
             
-            # 最后确保没有NaN值
-            flux_denoised = np.nan_to_num(flux_denoised, nan=np.median(flux_denoised[valid_mask]))
+            # 对有效数据使用中值滤波
+            valid_flux = flux[mask]
+            if len(valid_flux) >= window_size:
+                smooth_valid = signal.medfilt(valid_flux, window_size)
+                flux_smooth[mask] = smooth_valid
             
-            return flux_denoised
-            
+            return wavelength, flux_smooth
         except Exception as e:
-            print(f"二次去噪失败: {e}")
-            import traceback
-            traceback.print_exc()
-            return flux
+            print(f"二次去噪处理出错: {e}")
+            return wavelength, flux
     
     def process_single_spectrum(self, spec_file, label):
-        """处理单个光谱"""
-        # 确保spec_file是字符串类型
-        spec_file = str(spec_file)
-        
-        # 检查参数合法性
-        if spec_file is None:
-            raise ValueError("spec_file不能为None")
-        
-        # 使用CacheManager替代直接缓存操作
-        cache_key = f"processed_{spec_file.replace('/', '_')}"
-        # 检查缓存
-        processed_result = self.cache_manager.get_cache(cache_key)
-        if processed_result:
-            print(f"使用缓存的预处理光谱: {spec_file}")
-            return processed_result
-        
+        """处理单个光谱（支持GPU加速）"""
         try:
+            spec_name = os.path.basename(spec_file).split('.')[0]
+            print(f"处理光谱: {spec_name}")
+            
             # 读取FITS文件
-            print(f"处理光谱: {spec_file}")
-            # 注意：这里只解包6个值，与read_fits_file返回值匹配
-            wavelength, flux, v_helio, z_fits, snr, snr_bands = self.read_fits_file(spec_file)
+            wavelength, flux, header = self.read_fits_file(spec_file)
             if wavelength is None or flux is None:
-                print(f"无法读取FITS文件: {spec_file}")
+                print(f"读取失败: {spec_file}")
                 return None
-            
-            # 检查数据有效性
-            if np.isnan(flux).all() or len(flux) == 0:
-                print(f"文件{spec_file}中的流量数据全为NaN或为空")
-                return None
-            
-            print(f"原始数据: 波长范围{wavelength[0]}~{wavelength[-1]}, 点数={len(wavelength)}")
-            
-            # 获取红移数据
-            z = z_fits  # 优先使用从fits文件中读取的红移值
-            cv = 0      # 视向速度默认值
-            try:
-                # 尝试从文件名匹配到CSV中的记录获取红移和视向速度
-                base_file = os.path.basename(spec_file)
-                if '.' in base_file:
-                    base_file = base_file.split('.')[0]
                 
-                for csv_file in self.csv_files:
-                    if os.path.exists(csv_file):
-                        df = pd.read_csv(csv_file)
+            # 提取红移或径向速度信息
+            z = header.get('Z', None)
+            v_helio = header.get('V', None)  # 可能的径向速度键名
+            
+            # 如果没找到标准键名，尝试其他可能的键名
+            if z is None:
+                for key in header.keys():
+                    if key.lower() in ('redshift', 'z_helio', 'z_value'):
+                        z = header.get(key)
+                        print(f"找到红移键: {key}")
+                        break
                         
-                        # 检查CSV是否有spec列
-                        if 'spec' in df.columns:
-                            # 确保spec列是字符串类型
-                            if not pd.api.types.is_string_dtype(df['spec']):
-                                df['spec'] = df['spec'].astype(str)
-                                
-                            # 在CSV中查找匹配记录
-                            matches = df[df['spec'].str.contains(base_file, case=False, na=False)]
-                            if not matches.empty:
-                                # 如果z值为0且CSV中有z列，则从CSV读取
-                                if z == 0 and 'z' in df.columns:
-                                    z = matches.iloc[0]['z']
-                                    print(f"从CSV找到红移值: z = {z}")
-                                
-                                # 读取视向速度 - 从cv或rv列
-                                for vel_col in ['cv', 'rv', 'velocity', 'RV']:
-                                    if vel_col in df.columns:
-                                        cv = matches.iloc[0][vel_col]
-                                        print(f"从CSV找到视向速度: {vel_col} = {cv} km/s")
-                                        # 如果视向速度值有效，更新v_helio
-                                        if not pd.isna(cv) and cv != 0:
-                                            v_helio = cv
-                                            print(f"使用CSV中的视向速度值: {v_helio} km/s")
-                                        break
-                                break
-            except Exception as e:
-                print(f"查找红移或视向速度数据出错: {e}")
-                # 出错时使用默认值或已读取的值
+            if v_helio is None:
+                for key in header.keys():
+                    if key.lower() in ('v_helio', 'vhelio', 'rv', 'rv_value'):
+                        v_helio = header.get(key)
+                        print(f"找到径向速度键: {key}")
+                        break
+            
+            # 去噪
+            if self.use_gpu and self.gpu_available:
+                print("使用GPU去噪...")
+            wavelength, flux = self.denoise_spectrum(wavelength, flux)
+            if flux is None:
+                print(f"去噪失败: {spec_file}")
+                return None
                 
-            # 如果fits中未找到信噪比数据，尝试从CSV获取
-            if all(v == 0 for v in snr_bands.values()):
-                try:
-                    for csv_file in self.csv_files:
-                        if os.path.exists(csv_file):
-                            df = pd.read_csv(csv_file)
-                            
-                            # 检查CSV是否有spec列
-                            if 'spec' in df.columns:
-                                # 确保spec列是字符串类型
-                                if not pd.api.types.is_string_dtype(df['spec']):
-                                    df['spec'] = df['spec'].astype(str)
-                                    
-                                # 在CSV中查找匹配记录
-                                base_file = os.path.basename(spec_file)
-                                if '.' in base_file:
-                                    base_file = base_file.split('.')[0]
-                                
-                                matches = df[df['spec'].str.contains(base_file, case=False, na=False)]
-                                if not matches.empty:
-                                    for band in snr_bands:
-                                        if band in df.columns:
-                                            snr_bands[band] = matches.iloc[0][band]
-                                            print(f"从CSV找到{band}波段信噪比: {snr_bands[band]}")
-                                    break  # 找到匹配项后退出循环
-                except Exception as e:
-                    print(f"从CSV读取信噪比失败: {e}")
+            # 红移或速度校正
+            if z is not None and z != 0:
+                print(f"校正红移: {z}")
+                wavelength, flux = self.correct_redshift(wavelength, flux, z)
+            elif v_helio is not None and v_helio != 0:
+                print(f"校正径向速度: {v_helio} km/s")
+                wavelength, flux = self.correct_velocity(wavelength, flux, v_helio)
+                
+            # 波长校正
+            wavelength, flux = self.correct_wavelength(wavelength, flux)
             
-            # 检查红移和视向速度值是否为NaN
-            if pd.isna(z):
-                print("警告: 红移值为NaN，设置为0")
-                z = 0
-            if pd.isna(v_helio):
-                print("警告: 视向速度值为NaN，设置为0")
-                v_helio = 0
-            
-            # 1. 波长校正
-            wavelength_calibrated = self.correct_wavelength(wavelength, flux)
-            print(f"波长校正后: 波长范围{wavelength_calibrated[0]}~{wavelength_calibrated[-1]}")
-            
-            # 2. 视向速度校正
-            wavelength_corrected = self.correct_velocity(wavelength_calibrated, flux, v_helio)
-            print(f"视向速度校正后: 波长范围{wavelength_corrected[0]}~{wavelength_corrected[-1]}")
-            
-            # 3. 去噪
-            flux_denoised = self.denoise_spectrum(wavelength_corrected, flux)
-            if flux_denoised is None:
-                print(f"去噪{spec_file}失败")
+            # 连续谱归一化
+            if self.use_gpu and self.gpu_available:
+                print("使用GPU归一化连续谱...")
+            wavelength, norm_flux = self.normalize_continuum(wavelength, flux)
+            if norm_flux is None:
+                print(f"归一化失败: {spec_file}")
+                return None
+                
+            # 重采样到统一波长网格
+            if self.use_gpu and self.gpu_available:
+                print("使用GPU重采样...")
+            new_wave, new_flux = self.resample_spectrum(wavelength, norm_flux)
+            if new_wave is None:
+                print(f"重采样失败: {spec_file}")
+                return None
+                
+            # 流量归一化
+            if self.use_gpu and self.gpu_available:
+                print("使用GPU归一化流量...")
+            norm_flux, norm_params = self.normalize_spectrum(new_flux)
+            if norm_flux is None:
+                print(f"归一化失败: {spec_file}")
+                return None
+                
+            # 二次去噪
+            if self.use_gpu and self.gpu_available:
+                print("使用GPU二次去噪...")
+            wavelength, final_flux = self.denoise_spectrum_second(new_wave, norm_flux)
+            if final_flux is None:
+                print(f"二次去噪失败: {spec_file}")
                 return None
             
-            # 4. 红移校正
-            wavelength_rest = self.correct_redshift(wavelength_corrected, flux_denoised, z)
-            print(f"红移校正后: 波长范围{wavelength_rest[0]}~{wavelength_rest[-1]}")
-            
-            # 5. 重采样
-            print(f"重采样到波长范围: {self.wavelength_range}, 点数={self.n_points}")
-            wavelength_resampled, flux_resampled = self.resample_spectrum(wavelength_rest, flux_denoised)
-            if wavelength_resampled is None or flux_resampled is None:
-                print(f"重采样{spec_file}失败")
-                return None
-            
-            # 6. 连续谱归一化
-            flux_continuum, continuum_params = self.normalize_continuum(wavelength_resampled, flux_resampled)
-            if flux_continuum is None:
-                print(f"连续谱归一化{spec_file}失败")
-                return None
-            
-            # 7. 二次去噪
-            flux_denoised_second = self.denoise_spectrum_second(wavelength_resampled, flux_continuum)
-            
-            # 8. 最终归一化 (最大最小值归一化)
-            print(f"对流量进行最终归一化")
-            flux_normalized = self.normalize_spectrum(wavelength_resampled, flux_denoised_second)
-            if flux_normalized is None:
-                print(f"归一化{spec_file}失败")
-                return None
-            
-            # 不再需要额外的归一化验证，normalize_spectrum已经完成了完整的验证
-            print(f"成功处理光谱: {spec_file}")
-            
-            # 记录标准化参数
-            normalization_params = {
-                # 波长范围信息
-                'wavelength_range': self.wavelength_range,
-                'log_step': self.log_step,
-                'flux_min': continuum_params['flux_min'] if continuum_params else None,
-                'flux_max': continuum_params['flux_max'] if continuum_params else None,
-                'mean': np.mean(flux_normalized),
-                'std': np.std(flux_normalized)
-            }
-            
-            # 返回处理后的光谱和标签，包括中间处理结果
+            # 构建结果字典
             result = {
-                'data': flux_normalized,  # 将spectrum改为data
-                'metadata': {
-                    'label': label,
-                    'filename': spec_file,
-                    'element': '',  # 会在process_element_data方法中被设置
-                    # 保存中间结果用于可视化
-                    'original_wavelength': wavelength,
-                    'original_flux': flux,
-                    'wavelength_calibrated': wavelength_calibrated,
-                    'wavelength_corrected': wavelength_corrected,
-                    'denoised_flux': flux_denoised,
-                    'wavelength_rest': wavelength_rest,
-                    'wavelength_resampled': wavelength_resampled, 
-                    'flux_resampled': flux_resampled,
-                    'flux_continuum': flux_continuum,
-                    'flux_denoised_second': flux_denoised_second,
-                    'z': z,  # 保存红移值
-                    'v_helio': v_helio,
-                    'snr': snr,  # 信噪比
-                    'snr_bands': snr_bands,  # 各波段信噪比
-                    'normalization_params': normalization_params
-                },
-                'validation_metrics': {
-                    'quality_metrics': {
-                        'snr': np.mean(flux_normalized) / np.std(flux_normalized) if np.std(flux_normalized) > 0 else 0,
-                        'wavelength_coverage': 1.0,  # 默认为完整覆盖
-                        'normalization_quality': 1.0  # 默认为良好质量
-                    }
-                }
+                'filename': spec_file,
+                'spec_name': spec_name,
+                'wavelength': new_wave,
+                'flux': final_flux,
+                'original_wavelength': wavelength,
+                'original_flux': flux,
+                'norm_params': norm_params,
+                'label': label,
+                'header': header
             }
             
-            # 为了保持向后兼容，添加旧字段
-            result['spectrum'] = result['data']
-            result['label'] = label
-            result['filename'] = spec_file
-            
-            # 使用CacheManager保存结果
-            self.cache_manager.set_cache(cache_key, result)
             return result
         except Exception as e:
-            print(f"处理{spec_file}时出错: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"处理光谱时出错: {e}")
             return None
     
     def check_memory_usage(self):
@@ -1431,85 +1443,25 @@ class LAMOSTPreprocessor:
                 try:
                     with open(progress_file, 'rb') as f:
                         saved_data = pickle.load(f)
-                        
-                        # 检查保存的数据结构
-                        if isinstance(saved_data, dict) and 'results' in saved_data:
-                            # 新格式：字典中包含results和last_idx
-                            results = saved_data.get('results', [])
-                            start_idx = saved_data.get('last_idx', 0)
-                        elif isinstance(saved_data, list):
-                            # 旧格式：直接是结果列表
-                            results = saved_data
-                            # 如果是列表，start_idx应该等于已处理的数量
-                            start_idx = len(results)
-                        else:
-                            print(f"未识别的缓存数据格式: {type(saved_data)}，将从头开始处理")
-                            results = []
-                            start_idx = 0
-                        
+                        results = saved_data.get('results', [])
+                        start_idx = saved_data.get('last_idx', 0)
                         total_processed = len(results)
                         print(f"从上次中断处继续（已处理{total_processed}条记录，进度：{total_processed/len(spec_files):.2%}）")
-                        
-                        # 确保所有结果都有元素信息
-                        for result in results:
-                            if isinstance(result, dict):
-                                if 'metadata' in result and 'element' not in result['metadata']:
-                                    result['metadata']['element'] = element
-                                elif 'element' not in result:
-                                    result['element'] = element
-                        
-                        # 如果已经处理完所有数据，直接返回
-                        if total_processed >= len(spec_files):
-                            print(f"{element}数据已全部处理完成，共{total_processed}条记录")
-                            return results
-                        
                 except Exception as e:
                     print(f"加载进度文件出错: {e}，将从头开始处理")
-                    import traceback
-                    traceback.print_exc()
                     start_idx = 0
-                    results = []
-                    
             # 如果标准目录没有，尝试Google Drive
             elif os.path.exists(drive_progress_file):
                 try:
                     with open(drive_progress_file, 'rb') as f:
                         saved_data = pickle.load(f)
-                        
-                        # 同样检查数据结构
-                        if isinstance(saved_data, dict) and 'results' in saved_data:
-                            results = saved_data.get('results', [])
-                            start_idx = saved_data.get('last_idx', 0)
-                        elif isinstance(saved_data, list):
-                            results = saved_data
-                            start_idx = len(results)
-                        else:
-                            print(f"未识别的缓存数据格式: {type(saved_data)}，将从头开始处理")
-                            results = []
-                            start_idx = 0
-                        
+                        results = saved_data.get('results', [])
+                        start_idx = saved_data.get('last_idx', 0)
                         total_processed = len(results)
                         print(f"从Google Drive加载进度（已处理{total_processed}条记录，进度：{total_processed/len(spec_files):.2%}）")
-                        
-                        # 确保所有结果都有元素信息
-                        for result in results:
-                            if isinstance(result, dict):
-                                if 'metadata' in result and 'element' not in result['metadata']:
-                                    result['metadata']['element'] = element
-                                elif 'element' not in result:
-                                    result['element'] = element
-                        
-                        # 如果已经处理完所有数据，直接返回
-                        if total_processed >= len(spec_files):
-                            print(f"{element}数据已全部处理完成，共{total_processed}条记录")
-                            return results
-                        
                 except Exception as e:
                     print(f"加载Google Drive进度文件出错: {e}，将从头开始处理")
-                    import traceback
-                    traceback.print_exc()
                     start_idx = 0
-                    results = []
         
         # 计算剩余的批次
         remaining = len(spec_files) - start_idx
@@ -1668,652 +1620,540 @@ class LAMOSTPreprocessor:
         print(f"成功处理{total_processed}/{len(spec_files)}条{element}光谱数据 (完成率: {total_processed/len(spec_files):.2%})")
         return results
     
-    def process_all_elements(self, elements, df_list, resume=True):
-        """处理所有元素数据"""
-        print(f"\n=== 开始预处理所有元素数据 ===")
-        
-        all_results = []
-        
-        # 统计总数据量用于进度显示
-        total_records = sum(len(df) for df in df_list)
-        print(f"总共需要处理 {len(elements)} 个元素，共 {total_records} 条记录")
-        
-        # 对每个元素进行处理
-        for i, (element, df) in enumerate(zip(elements, df_list)):
-            print(f"\n[{i+1}/{len(elements)}] 处理元素 {element} (共{len(df)}条记录)...")
-            
-            # 检查是否有缓存
-            if resume:
-                progress_file = os.path.join(self.progress_dir, f"{element}_progress.pkl")
-                if os.path.exists(progress_file):
-                    try:
-                        with open(progress_file, 'rb') as f:
-                            element_data = pickle.load(f)
-                        print(f"从缓存加载 {element} 数据，共 {len(element_data)} 条记录")
-                        all_results.extend(element_data)
-                        continue
-                    except Exception as e:
-                        print(f"加载 {element} 缓存失败: {e}，将重新处理")
-            
-            # 处理元素数据
-            element_data = self.process_element_data(df, element)
-            
-            # 保存进度
-            if element_data:
-                try:
-                    progress_file = os.path.join(self.progress_dir, f"{element}_progress.pkl")
-                    with open(progress_file, 'wb') as f:
-                        pickle.dump(element_data, f)
-                    print(f"保存 {element} 处理进度，共 {len(element_data)} 条记录")
-                except Exception as e:
-                    print(f"保存 {element} 进度失败: {e}")
-            
-            # 添加到总结果中
-            all_results.extend(element_data)
-        
-        # 保存总体进度
-        if all_results:
-            try:
-                all_progress_file = os.path.join(self.progress_dir, "all_progress.pkl")
-                with open(all_progress_file, 'wb') as f:
-                    pickle.dump(all_results, f)
-                print(f"保存总处理进度，共 {len(all_results)} 条记录")
-            except Exception as e:
-                print(f"保存总进度失败: {e}")
-        
-        return all_results
-    
     def process_all_data(self, resume=True):
-        """预处理所有数据"""
-        print("\n=== 开始预处理所有数据 ===")
+        """数据处理的主函数，可使用GPU加速部分计算"""
+        start_time = time.time()
         
-        # 初始化返回变量，确保所有路径都能访问它们
-        X, y, elements, filenames = None, None, None, None
+        # 在批处理中使用GPU
+        if self.use_gpu and self.gpu_available:
+            print("使用GPU加速数据处理")
+            # 预热GPU
+            torch.cuda.empty_cache()
+            
+            # 在适当的地方添加内存管理代码
+            if hasattr(torch.cuda, 'memory_stats'):
+                print(f"GPU内存情况: {torch.cuda.memory_summary()}")
         
-        # 加载CSV数据
-        dataframes, elements_list = self.read_csv_data()
-        if not dataframes:
-            print("错误: 没有找到有效的CSV文件")
-            return None, None, None, None
+        # 进度文件路径
+        progress_file = os.path.join(self.progress_dir, 'all_data_progress.pkl')
+        wave_range_file = os.path.join(self.progress_dir, 'wave_range_progress.pkl')
+        drive_progress_file = '/content/drive/My Drive/SPCNNet_Results/processed_data/progress/all_data_progress.pkl'
         
-        # 显示各元素数据情况
-        print("\n=== CSV文件数据统计 ===")
-        total_rows = 0
-        for i, (element, df) in enumerate(zip(elements_list, dataframes)):
-            num_rows = len(df)
-            total_rows += num_rows
-            print(f"{i+1}. 元素 {element}: {num_rows} 行数据")
-            # 如果行数为0，显示警告
-            if num_rows == 0:
-                print(f"   警告: {element} 元素没有数据")
-            # 如果行数过少，显示前几行
-            elif num_rows < 10:
-                print(f"   数据过少，显示全部数据:")
-                print(df.head(num_rows))
-        print(f"总计: {total_rows} 行数据\n")
+        # 初始化全部数据列表
+        all_data = []
         
-        # 检查是否从缓存加载
-        all_progress_file = os.path.join(self.progress_dir, "all_progress.pkl")
-        if resume and os.path.exists(all_progress_file):
-            try:
-                with open(all_progress_file, 'rb') as f:
-                    all_data = pickle.load(f)
-                print(f"从缓存加载全部数据，共 {len(all_data)} 条记录")
-                
-                # 检查数据并修复错误格式
-                if len(all_data) > 0:
-                    print(f"缓存数据第一条记录类型: {type(all_data[0])}")
+        # 如果有进度文件，考虑恢复
+        if resume:
+            # 先尝试从标准路径加载
+            if os.path.exists(progress_file):
+                try:
+                    with open(progress_file, 'rb') as f:
+                        all_data = pickle.load(f)
+                    print(f"已加载保存的处理结果，共{len(all_data)}条记录")
                     
-                    # 特殊情况：如果缓存是字符串列表，尝试转换为适当的结构
-                    if isinstance(all_data[0], str):
-                        print("检测到缓存中包含字符串记录，尝试从各元素缓存中恢复数据...")
+                    # 读取CSV文件来获取总记录数
+                    dataframes, elements = self.read_csv_data()
+                    if not dataframes:
+                        print("错误: 没有有效的数据集")
+                        return np.array([]), np.array([]), np.array([]), np.array([])
+                    
+                    # 计算总数据量
+                    total_records = sum(len(df) for df in dataframes)
+                    
+                    # 显示进度并询问是否继续
+                    progress_percent = len(all_data)/total_records * 100
+                    print(f"当前进度: {len(all_data)}/{total_records} 条记录 ({progress_percent:.2f}%)")
+                    
+                    if len(all_data) >= total_records:
+                        print(f"所有数据已处理完成，进入数据准备阶段")
+                        return self._prepare_arrays(all_data)
+                    else:
+                        if input(f"是否继续处理剩余{total_records - len(all_data)}条数据？(y/n): ").lower() != 'y':
+                            print("跳过处理阶段，直接使用已有数据")
+                            return self._prepare_arrays(all_data)
+                        else:
+                            print(f"继续处理剩余数据...")
+                except Exception as e:
+                    print(f"加载进度文件出错: {e}，将重新处理所有数据")
+                    all_data = []
+            # 如果标准路径没有，尝试从Google Drive加载
+            elif os.path.exists(drive_progress_file):
+                try:
+                    with open(drive_progress_file, 'rb') as f:
+                        all_data = pickle.load(f)
+                    print(f"从Google Drive加载处理结果，共{len(all_data)}条记录")
+                    
+                    # 读取CSV文件来获取总记录数
+                    dataframes, elements = self.read_csv_data()
+                    if not dataframes:
+                        print("错误: 没有有效的数据集")
+                        return np.array([]), np.array([]), np.array([]), np.array([])
+                    
+                    # 计算总数据量
+                    total_records = sum(len(df) for df in dataframes)
+                    
+                    # 显示进度并询问是否继续
+                    progress_percent = len(all_data)/total_records * 100
+                    print(f"当前进度: {len(all_data)}/{total_records} 条记录 ({progress_percent:.2f}%)")
+                    
+                    if len(all_data) >= total_records:
+                        print(f"所有数据已处理完成，进入数据准备阶段")
+                        return self._prepare_arrays(all_data)
+                    else:
+                        if input(f"是否继续处理剩余{total_records - len(all_data)}条数据？(y/n): ").lower() != 'y':
+                            print("跳过处理阶段，直接使用已有数据")
+                            return self._prepare_arrays(all_data)
+                        else:
+                            print(f"继续处理剩余数据...")
+                except Exception as e:
+                    print(f"加载Google Drive进度文件出错: {e}，将重新处理所有数据")
+                    all_data = []
+        
+        # 读取CSV文件
+        dataframes, elements = self.read_csv_data()
+        if not dataframes:
+            print("错误: 没有有效的数据集")
+            return np.array([]), np.array([]), np.array([]), np.array([])
+        
+        # 计算总数据量
+        total_records = sum(len(df) for df in dataframes)
+        print(f"总数据量: {total_records}条记录")
+        
+        # 输出缓存目录信息
+        print(f"\n===== 缓存目录信息 =====")
+        print(f"缓存目录: {self.cache_dir}")
+        cache_files = glob.glob(os.path.join(self.cache_dir, "*"))
+        print(f"缓存文件总数: {len(cache_files)}")
+        wavelength_cache_files = glob.glob(os.path.join(self.cache_dir, "wavelength_range_*"))
+        print(f"波长范围缓存文件数: {len(wavelength_cache_files)}")
+        spectrum_cache_files = glob.glob(os.path.join(self.cache_dir, "processed_spectrum_*"))
+        print(f"光谱处理缓存文件数: {len(spectrum_cache_files)}")
+        
+        # 打印CSV中spec列的样本值
+        for i, (df, element) in enumerate(zip(dataframes, elements)):
+            if 'spec' in df.columns:
+                print(f"\n元素 {element} 的spec列前10个样本:")
+                for j, spec in enumerate(df['spec'].values[:10]):
+                    print(f"  {j+1}. '{spec}'")
+            
+            # 打印缓存文件名示例
+            if wavelength_cache_files:
+                print(f"\n波长范围缓存文件示例:")
+                for j, cache_file in enumerate(wavelength_cache_files[:5]):
+                    print(f"  {j+1}. '{os.path.basename(cache_file)}'")
+            
+            if spectrum_cache_files:
+                print(f"\n光谱处理缓存文件示例:")
+                for j, cache_file in enumerate(spectrum_cache_files[:5]):
+                    print(f"  {j+1}. '{os.path.basename(cache_file)}'")
+            
+            break  # 只显示第一个元素的信息
+        
+        # 第一阶段：计算所有光谱的最大公共波长范围
+        # 检查是否已经完成了第一阶段
+        first_stage_done = False
+        if os.path.exists(wave_range_file):
+            try:
+                with open(wave_range_file, 'rb') as f:
+                    saved_range_data = pickle.load(f)
+                    self.processed_ranges = saved_range_data.get('processed_ranges', [])
+                    self.wavelength_range = saved_range_data.get('wavelength_range', self.wavelength_range)
+                    first_stage_processed = saved_range_data.get('processed_count', 0)
+                    
+                    print(f"已从缓存加载波长范围信息:")
+                    print(f"已处理: {first_stage_processed}/{total_records} 条记录")
+                    print(f"当前最大公共波长范围: {self.wavelength_range}")
+                    
+                    # 如果已经处理了所有记录，第一阶段完成
+                    if first_stage_processed >= total_records:
+                        first_stage_done = True
+                        print("第一阶段(计算公共波长范围)已完成")
+                    else:
+                        print(f"将继续进行第一阶段处理剩余的 {total_records - first_stage_processed} 条记录")
+            except Exception as e:
+                print(f"加载波长范围进度文件出错: {e}，将重新计算公共波长范围")
+                self.processed_ranges = []
+                first_stage_processed = 0
+        else:
+            self.processed_ranges = []
+            first_stage_processed = 0
+        
+        # 如果第一阶段未完成，进行第一阶段处理
+        if not first_stage_done:
+            print(f"\n===== 第一阶段：计算最大公共波长范围 =====")
+            first_stage_count = 0
+            
+            # 处理每个元素的数据
+            for i, (df, element) in enumerate(zip(dataframes, elements)):
+                print(f"\n处理元素 {i+1}/{len(dataframes)}: {element} (第一阶段)")
+                
+                # 处理每个光谱文件计算波长范围
+                spec_files = df['spec'].values
+                for j, spec_file in enumerate(tqdm(spec_files, desc=f"处理{element}光谱波长范围")):
+                    # 如果已经处理过，跳过
+                    if first_stage_processed + first_stage_count > j:
+                        continue
+                    
+                    # 尝试从缓存获取
+                    cache_key = f"wavelength_range_{spec_file.replace('/', '_')}"
+                    cached_range = self.cache_manager.get_cache(cache_key)
+                    
+                    if cached_range:
+                        # 如果有缓存，直接使用缓存的波长范围
+                        w_min, w_max = cached_range
+                        self.processed_ranges.append((w_min, w_max))
+                        print(f"使用缓存的波长范围 {spec_file}: {w_min:.2f}~{w_max:.2f}")
                         
-                        # 清空当前all_data并从元素级缓存中重建
-                        all_data = []
-                        
-                        # 扫描progress目录中的所有元素级缓存
-                        element_progress_files = glob.glob(os.path.join(self.progress_dir, "*_progress.pkl"))
-                        print(f"找到 {len(element_progress_files)} 个元素缓存文件")
-                        
-                        # 从每个元素级缓存中加载数据
-                        for progress_file in element_progress_files:
-                            element_name = os.path.basename(progress_file).replace("_progress.pkl", "")
-                            print(f"正在加载元素 {element_name} 的缓存...")
+                    if cached_range:
+                        # 如果有缓存，需要检查数据类型并提取波长范围
+                        try:
+                            # 打印缓存数据类型以便调试
+                            print(f"缓存数据类型: {type(cached_range)}, 值: {cached_range}")
                             
-                            try:
-                                with open(progress_file, 'rb') as f:
-                                    element_data = pickle.load(f)
-                                
-                                # 检查元素数据格式
-                                if isinstance(element_data, dict) and 'results' in element_data:
-                                    # 新格式：包含results键的字典
-                                    element_results = element_data['results']
-                                elif isinstance(element_data, list):
-                                    # 旧格式：直接是结果列表
-                                    element_results = element_data
+                            # 处理不同类型的缓存数据
+                            if isinstance(cached_range, tuple) and len(cached_range) == 2:
+                                # 标准的二元组格式
+                                w_min, w_max = cached_range
+                            elif isinstance(cached_range, tuple) and len(cached_range) > 2:
+                                # 如果元组有超过2个元素，只取前两个
+                                print(f"警告: 缓存元组长度 > 2: {len(cached_range)}")
+                                w_min, w_max = cached_range[0], cached_range[1]
+                            elif isinstance(cached_range, list) and len(cached_range) >= 2:
+                                # 列表格式
+                                w_min, w_max = cached_range[0], cached_range[1]
+                            elif isinstance(cached_range, dict) and 'data' in cached_range:
+                                # 字典格式
+                                data_array = cached_range['data']
+                                if isinstance(data_array, np.ndarray) and len(data_array) == 2:
+                                    w_min, w_max = data_array[0], data_array[1]
+                                elif 'metadata' in cached_range and 'wavelength_range' in cached_range['metadata']:
+                                    # 从元数据中获取
+                                    w_range = cached_range['metadata']['wavelength_range']
+                                    w_min, w_max = w_range[0], w_range[1]
                                 else:
-                                    print(f"跳过元素 {element_name}: 未知的缓存格式")
-                                    continue
+                                    # 无法提取，跳过缓存数据
+                                    print(f"缓存数据格式不正确: {spec_file}，重新处理")
+                                    cached_range = None
+                            elif isinstance(cached_range, np.ndarray) and len(cached_range) >= 2:
+                                # numpy数组格式
+                                w_min, w_max = cached_range[0], cached_range[1]
+                            else:
+                                # 不支持的格式
+                                print(f"缓存数据类型不支持: {type(cached_range)}，重新处理")
+                                cached_range = None
                                 
-                                # 确保每个记录都有元素信息
-                                for record in element_results:
-                                    if isinstance(record, dict):
-                                        if 'metadata' in record and 'element' not in record['metadata']:
-                                            record['metadata']['element'] = element_name
-                                        elif 'element' not in record:
-                                            record['element'] = element_name
+                            if cached_range:  # 如果成功提取了波长范围
+                                self.processed_ranges.append((w_min, w_max))
+                                print(f"使用缓存的波长范围 {spec_file}: {w_min:.2f}~{w_max:.2f}")
+                        except Exception as e:
+                            print(f"处理缓存数据时出错 {spec_file}: {e}，重新处理")
+                            cached_range = None
+                    
+                    if not cached_range:  # 如果没有缓存或者缓存处理失败
+                        # 没有缓存，需要读取文件提取波长范围
+                        try:
+                            # 查找FITS文件
+                            file_path = self._get_file_extension(spec_file)
+                            if not file_path:
+                                print(f"无法找到文件: {spec_file}")
+                                continue
                                 
-                                print(f"从元素 {element_name} 缓存中加载了 {len(element_results)} 条记录")
-                                all_data.extend(element_results)
-                            except Exception as e:
-                                print(f"加载元素 {element_name} 缓存时出错: {e}")
+                            # 读取FITS文件，获取波长和流量
+                            wavelength, flux, v_helio, z, snr, snr_bands = self.read_fits_file(file_path)
+                            if wavelength is None or flux is None:
+                                print(f"无法读取波长和流量数据: {file_path}")
+                                continue
+                            
+                            # 检查并过滤无效值
+                            valid_mask = ~np.isnan(flux) & ~np.isinf(flux)
+                            if not np.any(valid_mask):
+                                print(f"所有流量值都是无效的: {file_path}")
+                                continue
+                                
+                            wavelength_valid = wavelength[valid_mask]
+                            if len(wavelength_valid) < 2:
+                                print(f"有效波长点数太少: {file_path}")
+                                continue
+                                
+                            # 获取波长范围
+                            w_min, w_max = wavelength_valid.min(), wavelength_valid.max()
+                            self.processed_ranges.append((w_min, w_max))
+                            
+                            # 保存波长范围到缓存 - 使用字典格式
+                            wavelength_range_data = {
+                                'data': np.array([w_min, w_max]),  # 数据必须是numpy数组
+                                'metadata': {
+                                    'filename': spec_file,
+                                    'wavelength_range': [w_min, w_max]
+                                },
+                                'validation_metrics': {
+                                    'quality_metrics': {
+                                        'snr': 10.0,  # 占位值
+                                        'wavelength_coverage': 1.0,
+                                        'normalization_quality': 1.0
+                                    }
+                                }
+                            }
+                            self.cache_manager.set_cache(cache_key, wavelength_range_data)
+                            
+                            # 更新最大公有范围
+                            if len(self.processed_ranges) > 1:
+                                common_min = max(r[0] for r in self.processed_ranges)
+                                common_max = min(r[1] for r in self.processed_ranges)
+                                
+                                if common_min < common_max:
+                                    self.wavelength_range = (common_min, common_max)
+                                    
+                        except Exception as e:
+                            print(f"处理文件 {spec_file} 波长范围时出错: {e}")
+                            continue
+                    
+                    first_stage_count += 1
+                    
+                    # 每处理100个文件保存一次进度
+                    if first_stage_count % 100 == 0:
+                        # 保存波长范围进度
+                        with open(wave_range_file, 'wb') as f:
+                            pickle.dump({
+                                'processed_ranges': self.processed_ranges,
+                                'wavelength_range': self.wavelength_range,
+                                'processed_count': first_stage_processed + first_stage_count
+                            }, f)
+                        print(f"\n已保存波长范围进度: {first_stage_processed + first_stage_count}/{total_records}")
+                        print(f"当前最大公共波长范围: {self.wavelength_range}")
+            
+            # 保存最终的波长范围进度
+            with open(wave_range_file, 'wb') as f:
+                pickle.dump({
+                    'processed_ranges': self.processed_ranges,
+                    'wavelength_range': self.wavelength_range,
+                    'processed_count': total_records  # 标记为全部处理完成
+                }, f)
+            print(f"\n第一阶段完成：已确定最大公共波长范围 {self.wavelength_range}")
+        
+        # 第二阶段：重采样和后续处理
+        print(f"\n===== 第二阶段：重采样和后续处理 =====")
+        print(f"使用确定的公共波长范围: {self.wavelength_range}")
+        
+        # 如果没有有效的公共波长范围，使用默认范围
+        if not hasattr(self, 'wavelength_range') or self.wavelength_range is None:
+            self.wavelength_range = (3690, 9100)
+            print(f"警告: 未找到有效的公共波长范围，使用默认范围 {self.wavelength_range}")
+        
+        # 处理每个元素的数据
+        processed_records = 0
+        for i, (df, element) in enumerate(zip(dataframes, elements)):
+            # 更高效的方式统计已处理元素记录
+            # 首先检查缓存中已有的处理结果数量
+            cached_element_count = 0
+            
+            print(f"检查{element}元素的缓存预处理结果...")
+            
+            # 直接搜索缓存目录中的文件
+            cache_files = glob.glob(os.path.join(self.cache_dir, "processed_spectrum_*"))
+            print(f"发现 {len(cache_files)} 个缓存文件")
+            
+            # 获取元素中所有样本的spec文件名
+            spec_files = df['spec'].values
+            
+            # 创建映射，将spec文件名的各种可能形式映射到实际的spec文件
+            spec_mapping = {}
+            for spec_file in spec_files:
+                spec_base = os.path.basename(str(spec_file))
+                if '.' in spec_base:
+                    spec_base = spec_base.split('.')[0]
+                
+                # 存储不同的形式
+                spec_mapping[spec_file] = spec_file
+                spec_mapping[spec_base] = spec_file
+                
+                # 还可以添加其他可能的变体
+                if spec_base.isdigit():
+                    spec_mapping[spec_base.lstrip('0')] = spec_file
+            
+            # 遍历所有缓存文件，检查是否匹配任何spec
+            for cache_file in tqdm(cache_files, desc=f"扫描{element}缓存"):
+                try:
+                    cache_basename = os.path.basename(cache_file)
+                    # 从缓存文件名中提取可能的spec标识
+                    if cache_basename.startswith("processed_spectrum_"):
+                        cache_spec = cache_basename.replace("processed_spectrum_", "")
                         
-                        # 更直接地加载单独的处理文件缓存
-                        print("尝试从独立的处理文件缓存中加载数据...")
-                        cache_files = glob.glob(os.path.join(self.cache_dir, "processed_*.pkl"))
-                        print(f"找到 {len(cache_files)} 个独立缓存文件")
+                        # 检查是否能在映射中找到匹配
+                        matched = False
+                        matched_spec = None
                         
-                        loaded_count = 0
-                        # 从每个缓存文件加载处理结果
-                        for cache_file in cache_files:
+                        for spec_key, spec_value in spec_mapping.items():
+                            if str(spec_key) in cache_spec or cache_spec in str(spec_key):
+                                matched = True
+                                matched_spec = spec_value
+                                break
+                        
+                        if matched:
+                            print(f"找到匹配: {cache_basename} -> {matched_spec}")
+                            # 从文件直接读取缓存内容
                             try:
                                 with open(cache_file, 'rb') as f:
-                                    processed_data = pickle.load(f)
-                                
-                                # 检查数据格式
-                                if isinstance(processed_data, dict):
-                                    # 将缓存文件名添加到元数据中，以便跟踪来源
-                                    filename = os.path.basename(cache_file).replace("processed_", "").replace(".pkl", "")
-                                    if 'metadata' not in processed_data:
-                                        processed_data['metadata'] = {'filename': filename}
-                                    else:
-                                        processed_data['metadata']['filename'] = filename
+                                    cached_result = pickle.load(f)
                                     
-                                    # 添加到总数据中
-                                    all_data.append(processed_data)
-                                    loaded_count += 1
+                                if cached_result is not None:
+                                    cached_element_count += 1
+                                    # 将已缓存的结果直接添加到all_data中
+                                    if 'metadata' not in cached_result:
+                                        cached_result['metadata'] = {}
+                                    cached_result['metadata']['element'] = element
+                                    all_data.append(cached_result)
                             except Exception as e:
-                                print(f"加载缓存文件 {cache_file} 时出错: {e}")
-                        
-                        print(f"从独立缓存文件中成功加载了 {loaded_count} 条记录")
-                        
-                        print(f"已从所有缓存中恢复共 {len(all_data)} 条记录")
-                        
-                        # 保存恢复后的总缓存
-                        if all_data:
-                            try:
-                                with open(all_progress_file, 'wb') as f:
-                                    pickle.dump(all_data, f)
-                                print("已保存修复后的总缓存文件")
-                            except Exception as e:
-                                print(f"保存修复后的总缓存失败: {e}")
-                        
-                        # 如果仍然没有有效记录或仍然是非字典格式，则放弃使用缓存
-                        if len(all_data) == 0 or (len(all_data) > 0 and not isinstance(all_data[0], dict)):
-                            print("警告: 缓存数据记录格式不正确或为空")
-                            choice = input("是否尝试手动恢复之前的处理结果? (y/n): ")
-                            if choice.lower() == 'y':
-                                # 手动恢复模式
-                                try:
-                                    # 清空当前all_data
-                                    all_data = []
-                                    # 扫描progress目录中的所有元素级缓存
-                                    element_progress_files = glob.glob(os.path.join(self.progress_dir, "*_progress.pkl"))
-                                    
-                                    for progress_file in element_progress_files:
-                                        element_name = os.path.basename(progress_file).replace("_progress.pkl", "")
-                                        print(f"尝试恢复元素 {element_name} 的缓存...")
-                                        
-                                        try:
-                                            # 先尝试进行正常加载
-                                            with open(progress_file, 'rb') as f:
-                                                element_data = pickle.load(f)
-                                            
-                                            # 检查元素数据格式并添加到总缓存
-                                            if isinstance(element_data, dict) and 'results' in element_data:
-                                                all_data.extend(element_data['results'])
-                                                print(f"从 {element_name} 恢复了 {len(element_data['results'])} 条记录")
-                                            elif isinstance(element_data, list):
-                                                all_data.extend(element_data)
-                                                print(f"从 {element_name} 恢复了 {len(element_data)} 条记录")
-                                        except Exception as e:
-                                            print(f"恢复元素 {element_name} 失败: {e}")
-                                    
-                                    # 手动恢复独立处理结果
-                                    print("尝试手动恢复独立的处理文件缓存...")
-                                    cache_files = glob.glob(os.path.join(self.cache_dir, "processed_*.pkl"))
-                                    loaded_count = 0
-                                    
-                                    for cache_file in cache_files:
-                                        try:
-                                            with open(cache_file, 'rb') as f:
-                                                processed_data = pickle.load(f)
-                                            
-                                            # 检查数据格式
-                                            if isinstance(processed_data, dict):
-                                                filename = os.path.basename(cache_file).replace("processed_", "").replace(".pkl", "")
-                                                if 'metadata' not in processed_data:
-                                                    processed_data['metadata'] = {'filename': filename}
-                                                else:
-                                                    processed_data['metadata']['filename'] = filename
-                                                
-                                                all_data.append(processed_data)
-                                                loaded_count += 1
-                                        except Exception as e:
-                                            print(f"手动恢复缓存文件 {cache_file} 时出错: {e}")
-                                    
-                                    print(f"手动从独立缓存文件中恢复了 {loaded_count} 条记录")                                    
-                                    print(f"手动恢复完成，共恢复 {len(all_data)} 条记录")
-                                except Exception as e:
-                                    print(f"手动恢复过程出错: {e}")
-                            else:
-                                print("不使用缓存，重新处理数据")
-                                all_data = []
-                    else:
-                        # 验证每条记录是否有必要的字段
-                        valid_records = []
-                        for i, record in enumerate(all_data):
-                            if record is None:
-                                print(f"跳过第{i+1}条记录: 记录为None")
-                                continue
-                            if not isinstance(record, dict):
-                                print(f"跳过第{i+1}条记录: 不是字典类型，而是 {type(record)}")
-                                continue
-                            if 'data' not in record and 'spectrum' not in record:
-                                print(f"跳过第{i+1}条记录: 缺少光谱数据")
-                                continue
-                            if 'metadata' not in record and 'filename' not in record:
-                                print(f"跳过第{i+1}条记录: 缺少元数据")
-                                continue
-                            
-                            valid_records.append(record)
-                        
-                        all_data = valid_records
-                        print(f"验证后有效记录数: {len(all_data)}")
-                
-                # 询问是否继续
-                if isinstance(all_data, list) and len(all_data) > 0:
-                    choice = input(f"找到{len(all_data)}条处理好的记录，是否使用这些缓存数据? (y/n): ")
-                    if choice.lower() == 'y':
-                        print("使用缓存数据")
-                        
-                        # 从已处理数据中恢复公共波长范围
-                        if self.compute_common_range:
-                            if all_data[0] and 'metadata' in all_data[0]:
-                                wavelength_range = all_data[0]['metadata'].get('normalization_params', {}).get('wavelength_range')
-                                if wavelength_range:
-                                    self.wavelength_range = wavelength_range
-                                    print(f"从缓存恢复波长范围: {self.wavelength_range}")
-                            
-                            # 重新计算点数
-                            if self.wavelength_range and self.log_step:
-                                start_wavelength, end_wavelength = self.wavelength_range
-                                # 在对数空间中计算点数
-                                self.n_points = int(np.ceil(np.log10(end_wavelength / start_wavelength) / self.log_step))
-                                print(f"重新计算点数: {self.n_points}")
-                        
-                        # 如果用户要求，随机可视化几条光谱
-                        visualize_choice = input("是否随机可视化几条光谱? (y/n): ").lower()
-                        if visualize_choice == 'y':
-                            n_samples = min(len(all_data), 3)
-                            try:
-                                samples = random.sample(all_data, n_samples)
-                                for sample in samples:
-                                    # 安全地获取文件名
-                                    filename = None
-                                    if isinstance(sample, dict):
-                                        if 'filename' in sample:
-                                            filename = sample['filename']
-                                        elif 'metadata' in sample and isinstance(sample['metadata'], dict) and 'filename' in sample['metadata']:
-                                            filename = sample['metadata']['filename']
-                                    elif isinstance(sample, str):
-                                        # 直接使用字符串作为文件名，但不将其作为sample_data传递
-                                        filename = sample
-                                        sample = None
-                                        print(f"警告: 样本是字符串 '{filename}'，将作为文件名使用但不会传递该字符串作为样本数据")
-                                        
-                                    if filename:
-                                        print(f"可视化: {filename}")
-                                        # 直接传递样本数据，避免重新处理
-                                        self.visualize_spectrum(filename, processed=True, save=True, 
-                                                               from_all_data=True, sample_data=sample)
-                                    else:
-                                        print(f"样本中没有文件名信息: {type(sample)}")
-                            except Exception as e:
-                                print(f"可视化过程中出错: {e}")
-                                import traceback
-                                traceback.print_exc()
-                        
-                        # 询问是否需要分割数据集
-                        split_choice = input("是否需要划分数据集? (y/n): ").lower()
-                        if split_choice == 'y':
-                            print("准备数据用于模型训练")
-                            X, y, elements, filenames = self._prepare_arrays(all_data)
-                            if X is not None and y is not None:
-                                print(f"准备完成，特征数据形状: {X.shape}, 标签数据形状: {y.shape}")
-                                self.split_dataset(X, y, elements)
-                            return X, y, elements, filenames
-                        else:
-                            # 即使不划分数据集，也需要准备数组以便返回
-                            print("准备数据但不划分数据集")
-                            X, y, elements, filenames = self._prepare_arrays(all_data)
-                            if X is not None and y is not None:
-                                print(f"准备完成，特征数据形状: {X.shape}, 标签数据形状: {y.shape}")
-                            
-                            # 用户选择不划分后，跳过main函数中的第二次询问
-                            # 保存完整数据集到单一文件
-                            if X is not None and y is not None:
-                                output_dir = self.output_dir
-                                if not os.path.exists(output_dir):
-                                    os.makedirs(output_dir, exist_ok=True)
-                                
-                                full_dataset_path = os.path.join(output_dir, 'full_dataset.npz')
-                                np.savez(full_dataset_path, spectra=X, abundance=y, elements=elements)
-                                print(f"完整数据集保存完成: {X.shape[0]}条记录，保存到{full_dataset_path}")
-                            
-                            # 如果用户选择不划分数据集但想要可视化示例，在此处理
-                            if visualize_choice != 'y' and input("是否可视化示例光谱? (y/n): ").lower() == 'y':
-                                if filenames is not None and len(filenames) > 0:
-                                    print("正在可视化示例光谱...")
-                                    sample_indices = random.sample(range(len(filenames)), min(3, len(filenames)))
-                                    for i in sample_indices:
-                                        self.visualize_spectrum(filenames[i], processed=True, save=True)
-                            
-                            return X, y, elements, filenames
-                    else:
-                        print("不使用缓存，重新处理数据")
-            except Exception as e:
-                print(f"加载缓存数据失败: {e}")
-                import traceback
-                traceback.print_exc()
-        
-        # 第一步：计算最大公共波长范围
-        print("\n=== 第一步：计算最大公共波长范围 ===")
-        
-        # 已存在波长范围文件，尝试加载
-        wavelength_range_file = os.path.join(self.cache_dir, 'wavelength_range.pkl')
-        if os.path.exists(wavelength_range_file) and resume:
-            try:
-                with open(wavelength_range_file, 'rb') as f:
-                    self.wavelength_range = pickle.load(f)
-                print(f"从缓存加载公共波长范围: {self.wavelength_range}")
-                
-                # 根据公共波长范围和步长计算点数
-                start_wavelength, end_wavelength = self.wavelength_range
-                self.n_points = int(np.ceil(np.log10(end_wavelength / start_wavelength) / self.log_step))
-                print(f"对应点数: {self.n_points} (步长={self.log_step})")
-                
-            except Exception as e:
-                print(f"加载公共波长范围失败: {e}，将重新计算")
-                # 如果加载失败，继续执行计算波长范围的步骤
-        
-        # 如果没有缓存的波长范围或加载失败，则计算波长范围
-        if self.compute_common_range and (not hasattr(self, 'wavelength_range') or self.wavelength_range is None):
-            print("计算所有光谱的公共波长范围...")
-            
-            # 临时收集波长范围信息
-            all_wave_ranges = []
-            
-            # 对每个元素进行处理，但只提取波长范围信息
-            for i, (element, df) in enumerate(zip(elements_list, dataframes)):
-                print(f"\n[{i+1}/{len(elements_list)}] 读取元素 {element} 的波长范围 (共{len(df)}条记录)...")
-                
-                # 只处理前几条记录快速确定波长范围
-                sample_size = min(len(df), 20)  # 限制样本数量加快处理
-                for j, (_, row) in enumerate(df.head(sample_size).iterrows()):
-                    try:
-                        spec_file = str(row['spec'])
-                        # 读取波长数据但不进行完整预处理
-                        wavelength, flux, _, _, _, _ = self.read_fits_file(spec_file)
-                        if wavelength is not None and len(wavelength) > 0:
-                            valid_mask = ~np.isnan(flux) & ~np.isinf(flux)
-                            if np.any(valid_mask):
-                                wavelength_valid = wavelength[valid_mask]
-                                w_min, w_max = wavelength_valid.min(), wavelength_valid.max()
-                                all_wave_ranges.append((w_min, w_max))
-                                print(f"  文件 {spec_file}: 波长范围 {w_min:.2f}~{w_max:.2f}")
-                    except Exception as e:
-                        print(f"  读取文件 {spec_file} 波长范围时出错: {e}")
-                        continue
-            
-            # 计算最大公共波长范围
-            if all_wave_ranges:
-                min_waves = [r[0] for r in all_wave_ranges]
-                max_waves = [r[1] for r in all_wave_ranges]
-                common_min = max(min_waves)
-                common_max = min(max_waves)
-                
-                if common_min >= common_max:
-                    print(f"警告: 计算出的公共范围无效 ({common_min}~{common_max})，使用默认范围")
-                    self.wavelength_range = (3900, 7000)  # 使用默认范围
-                else:
-                    # 添加一点余量
-                    self.wavelength_range = (common_min, common_max)
-                
-                # 保存波长范围信息
-                try:
-                    with open(wavelength_range_file, 'wb') as f:
-                        pickle.dump(self.wavelength_range, f)
-                    print(f"波长范围信息已保存")
+                                print(f"读取缓存文件 {cache_file} 时出错: {e}")
                 except Exception as e:
-                    print(f"保存波长范围信息失败: {e}")
-            else:
-                print("没有找到任何波长范围信息，使用默认范围")
-                self.wavelength_range = (3900, 7000)
-        
-        # 根据公共波长范围和步长计算点数
-        if hasattr(self, 'wavelength_range') and self.wavelength_range is not None:
-            start_wavelength, end_wavelength = self.wavelength_range
-            self.n_points = int(np.ceil(np.log10(end_wavelength / start_wavelength) / self.log_step))
-            print(f"公共波长范围: {self.wavelength_range}")
-            print(f"对应点数: {self.n_points} (步长={self.log_step})")
-        
-        # 第二步：处理所有光谱数据
-        print("\n=== 第二步：使用公共波长范围进行完整预处理 ===")
-        all_data = self.process_all_elements(elements_list, dataframes, resume)
-        
-        # 最终处理数据
-        if all_data:
-            # 准备数据用于模型训练
-            X, y, elements, filenames = self._prepare_arrays(all_data)
-            if X is None:
-                print("处理后没有有效数据")
-                return None, None, None, None
+                    print(f"处理缓存文件 {cache_file} 时出错: {e}")
             
-            # 询问是否需要划分数据集
-            if input("是否需要划分数据集? (y/n): ").lower() == 'y':
-                self.split_dataset(X, y, elements)
+            # 打印匹配情况的详细信息
+            print(f"\n===== 缓存匹配情况 =====")
+            print(f"元素: {element}")
+            print(f"总记录数: {len(df)}")
+            print(f"匹配到缓存的记录数: {cached_element_count}")
+            print(f"匹配率: {cached_element_count/len(df)*100:.2f}%")
+            print(f"=======================\n")
+            
+            # 统计已处理的元素记录数
+            element_records = cached_element_count
+            # 元素的总记录数
+            element_total = len(df)
+            
+            print(f"从缓存中发现{element}元素已处理记录: {element_records}/{element_total}")
+            
+            # 只有当元素的所有记录都已处理时，才认为该元素处理完成
+            if element_records >= element_total:
+                print(f"{element}数据已在之前的运行中处理完成 ({element_records}/{element_total}条记录)")
+                processed_records += element_records
+                # 注意：我们已经在扫描缓存时将数据添加到all_data中了
             else:
-                print("跳过数据集划分，将完整数据集保存到文件")
+                print(f"\n处理元素 {i+1}/{len(dataframes)}: {element} (第二阶段)")
+                print(f"已处理: {element_records}/{element_total}条记录")
+                print(f"当前进度: [{processed_records/total_records:.2%}]")
                 
-            # 询问是否可视化几个示例光谱
-            if input("是否可视化示例光谱? (y/n): ").lower() == 'y':
-                print("正在可视化示例光谱...")
-                n_samples = min(len(all_data), 3)
-                try:
-                    samples = random.sample(all_data, n_samples)
-                    for sample in samples:
-                        # 安全地获取文件名
-                        filename = None
-                        if isinstance(sample, dict):
-                            if 'filename' in sample:
-                                filename = sample['filename']
-                            elif 'metadata' in sample and isinstance(sample['metadata'], dict) and 'filename' in sample['metadata']:
-                                filename = sample['metadata']['filename']
-                        elif isinstance(sample, str):
-                            # 直接使用字符串作为文件名，但不作为样本数据传递
-                            filename = sample
-                            sample = None
-                            print(f"警告: 样本是字符串 '{filename}'，将作为文件名使用但不会传递该字符串作为样本数据")
-                            
-                        if filename:
-                            print(f"可视化: {filename}")
-                            # 直接传递样本数据，避免重新处理
-                            self.visualize_spectrum(filename, processed=True, save=True, 
-                                                   from_all_data=True, sample_data=sample)
-                        else:
-                            print(f"样本中没有文件名信息: {type(sample)}")
-                except Exception as e:
-                    print(f"可视化过程中出错: {e}")
-                    import traceback
-                    traceback.print_exc()
+                # 如果元素已部分处理，从未处理的部分继续
+                start_idx = element_records
+                print(f"从索引{start_idx}继续处理...")
+                
+                results = self.process_element_data(df, element, start_idx=start_idx)
+                all_data.extend(results)
+                processed_records += len(results)
+                
+                # 更新总体进度
+                overall_progress = processed_records / total_records
+                print(f"总进度: [{overall_progress:.2%}] 已完成{processed_records}/{total_records}条记录")
             
-            return X, y, elements, filenames
-        else:
-            print("没有有效数据可处理")
-            return None, None, None, None
+            # 保存总进度
+            with open(progress_file, 'wb') as f:
+                pickle.dump(all_data, f)
+                
+            # 输出阶段性统计
+            elapsed_time = time.time() - start_time
+            records_per_second = processed_records / elapsed_time if elapsed_time > 0 else 0
+            print(f"当前已处理总数据量: {len(all_data)}条")
+            print(f"处理速度: {records_per_second:.2f}条/秒")
+            
+            # 估计剩余时间
+            if processed_records < total_records and records_per_second > 0:
+                remaining_records = total_records - processed_records
+                estimated_time = remaining_records / records_per_second
+                hours, remainder = divmod(estimated_time, 3600)
+                minutes, seconds = divmod(remainder, 60)
+                print(f"预计剩余时间: {int(hours)}小时 {int(minutes)}分钟 {int(seconds)}秒")
+            
+            # 检查内存使用情况
+            self.check_memory_usage()
+        
+        # 如果没有处理到任何数据
+        if not all_data:
+            print("错误: 没有处理到任何有效数据，请检查fits文件路径和CSV文件")
+            return np.array([]), np.array([]), np.array([]), np.array([])
+        
+        # 输出最终统计
+        elapsed_time = time.time() - start_time
+        hours, remainder = divmod(elapsed_time, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        print(f"\n处理完成! 总耗时: {int(hours)}小时 {int(minutes)}分钟 {int(seconds)}秒")
+        print(f"处理记录: {len(all_data)}/{total_records} ({len(all_data)/total_records:.2%})")
+        
+        # 保存文件缓存
+        self._save_files_cache()
+        
+        # 转换为NumPy数组并返回
+        return self._prepare_arrays(all_data)
     
     def _prepare_arrays(self, all_data):
-        """准备训练、验证和测试数据数组"""
+        """使用GPU加速的数组准备"""
         if not all_data:
             print("没有可用的数据")
             return None, None, None, None
             
-        # 提取光谱数据和标签
-        spectra = []
-        labels = []
-        filenames = []
-        elements = []
-        
-        for data in all_data:
-            # 忽略无效数据
-            if not data or 'data' not in data or data['data'] is None:
-                continue
+        if self.use_gpu and self.gpu_available:
+            try:
+                print("使用GPU准备数据数组...")
+                # 提取波长和通量数据
+                X = np.array([data[0]['flux'] for data in all_data])
+                y = np.array([data[1] for data in all_data])
+                elements = np.array([data[2] for data in all_data])
                 
-            # 获取光谱数据
-            spectrum = data['data']
-            # 检查光谱数据有效性
-            if spectrum is None or len(spectrum) == 0:
-                continue
+                # 转换为GPU张量
+                X_gpu = torch.tensor(X, device=self.device, dtype=torch.float32)
                 
-            # 替换NaN和无穷值
-            if np.isnan(spectrum).any() or np.isinf(spectrum).any():
-                print(f"发现无效值，替换为0: {data['filename']}")
-                spectrum = np.nan_to_num(spectrum, nan=0.0, posinf=0.0, neginf=0.0)
-            
-            # 获取标签
-            label = data['metadata']['label']
-            # 检查标签有效性
-            if pd.isna(label):
-                print(f"跳过数据，标签为NaN: {data['filename']}")
-                continue
+                # 使用GPU进行标准化
+                if X_gpu.shape[0] > 0:
+                    mean = torch.mean(X_gpu, dim=0)
+                    std = torch.std(X_gpu, dim=0)
+                    std[std == 0] = 1.0  # 防止除以零
+                    X_gpu = (X_gpu - mean) / std
                 
-            spectra.append(spectrum)
-            labels.append(label)
-            filenames.append(data['filename'])
-            elements.append(data['metadata']['element'])
+                # 转回CPU
+                X = X_gpu.cpu().numpy()
+                
+                # 保存均值和标准差
+                self.scaler_mean = mean.cpu().numpy()
+                self.scaler_std = std.cpu().numpy()
+                
+                print(f"GPU加速: 数据标准化完成，形状: {X.shape}")
+                return X, y, elements
+            except Exception as e:
+                print(f"GPU数组准备失败: {e}，回退到CPU实现")
+                # 回退到CPU实现
         
-        if not spectra:
-            print("处理后没有有效数据")
-            return None, None, None, None
-            
-        # 检查所有光谱的长度是否一致
-        expected_length = len(spectra[0])
-        inconsistent_indices = []
-        
-        for i, spec in enumerate(spectra):
-            if len(spec) != expected_length:
-                print(f"警告: 光谱 {i} ({filenames[i]}) 长度不一致。期望长度: {expected_length}, 实际长度: {len(spec)}")
-                inconsistent_indices.append(i)
-        
-        if inconsistent_indices:
-            print(f"发现 {len(inconsistent_indices)} 个光谱长度不一致，将从数据集中移除")
-            # 从后往前删除，避免索引变化
-            for i in sorted(inconsistent_indices, reverse=True):
-                print(f"移除不一致光谱: {filenames[i]}")
-                del spectra[i]
-                del labels[i]
-                del filenames[i]
-                del elements[i]
-        
-        if not spectra:
-            print("移除不一致光谱后没有有效数据")
-            return None, None, None, None
-        
+        # CPU实现
+        print("使用CPU准备数据数组...")
         try:
+            # 提取特征和标签
+            print("提取特征和标签...")
+            X = []
+            y = []
+            elements = []
+            
+            for data in all_data:
+                spec_data, abundance, element = data
+                X.append(spec_data['flux'])
+                y.append(abundance)
+                elements.append(element)
+                
             # 转换为NumPy数组
-            X = np.array(spectra, dtype=np.float32)
-            y = np.array(labels, dtype=np.float32)
+            X = np.array(X)
+            y = np.array(y)
+            elements = np.array(elements)
             
-            # 最终检查X中的无效值
-            n_samples, n_features = X.shape
-            for i in range(n_samples):
-                if np.isnan(X[i]).any() or np.isinf(X[i]).any():
-                    nan_count = np.isnan(X[i]).sum()
-                    inf_count = np.isinf(X[i]).sum()
-                    print(f"警告: 样本 {i} ({filenames[i]}) 包含 {nan_count} 个NaN和 {inf_count} 个无限值，替换为0")
-                    X[i] = np.nan_to_num(X[i], nan=0.0, posinf=0.0, neginf=0.0)
+            # 标准化特征
+            print("标准化特征...")
+            scaler = StandardScaler()
+            X = scaler.fit_transform(X)
             
-            # 检查y中的无效值
-            if np.isnan(y).any() or np.isinf(y).any():
-                nan_count = np.isnan(y).sum()
-                inf_count = np.isinf(y).sum()
-                print(f"警告: 标签中包含 {nan_count} 个NaN和 {inf_count} 个无限值")
-                # 找出包含NaN的样本
-                nan_indices = np.where(np.isnan(y))[0]
-                for idx in nan_indices:
-                    print(f"  样本 {idx} ({filenames[idx]}) 的标签为NaN")
-                # 替换NaN为中位数
-                if nan_count > 0:
-                    median_y = np.nanmedian(y)
-                    print(f"  使用中位数 {median_y} 替换标签中的NaN")
-                    y = np.nan_to_num(y, nan=median_y)
+            # 保存均值和标准差，以便后续使用
+            self.scaler_mean = scaler.mean_
+            self.scaler_std = scaler.scale_
             
-            print(f"准备完成 {len(X)} 个样本, 特征数: {X.shape[1]}")
-            return X, y, elements, filenames
-            
-        except ValueError as e:
-            print(f"创建数组时出错: {e}")
-            print("尝试诊断问题...")
-            
-            # 收集长度信息进行诊断
-            lengths = [len(spec) for spec in spectra]
-            unique_lengths = set(lengths)
-            
-            if len(unique_lengths) > 1:
-                print(f"发现多种不同的光谱长度: {unique_lengths}")
-                
-                # 选择最常见的长度
-                from collections import Counter
-                length_counts = Counter(lengths)
-                most_common_length = length_counts.most_common(1)[0][0]
-                print(f"最常见的光谱长度为 {most_common_length}，将只保留这个长度的光谱")
-                
-                # 只保留长度一致的光谱
-                consistent_data = []
-                for i, spec in enumerate(spectra):
-                    if len(spec) == most_common_length:
-                        consistent_data.append((spectra[i], labels[i], filenames[i], elements[i]))
-                
-                if not consistent_data:
-                    print("没有足够的一致长度光谱")
-                    return None, None, None, None
-                
-                # 重建数据
-                spectra, labels, filenames, elements = zip(*consistent_data)
-                
-                # 再次尝试创建数组
-                try:
-                    X = np.array(spectra, dtype=np.float32)
-                    y = np.array(labels, dtype=np.float32)
-                    print(f"成功创建一致长度的数组: {X.shape}")
-                    
-                    # 最终检查无效值
-                    n_samples, n_features = X.shape
-                    for i in range(n_samples):
-                        if np.isnan(X[i]).any() or np.isinf(X[i]).any():
-                            X[i] = np.nan_to_num(X[i], nan=0.0, posinf=0.0, neginf=0.0)
-                    
-                    if np.isnan(y).any() or np.isinf(y).any():
-                        y = np.nan_to_num(y, nan=np.nanmedian(y))
-                    
-                    return X, y, elements, filenames
-                except Exception as e2:
-                    print(f"第二次尝试创建数组时出错: {e2}")
-                    return None, None, None, None
-            else:
-                print(f"所有光谱长度都相同 ({lengths[0]})，但仍然发生错误")
-                return None, None, None, None
+            return X, y, elements
+        except Exception as e:
+            print(f"准备数组出错: {e}")
+            return None, None, None
     
     def split_dataset(self, X, y, elements, ask_for_split=True):
         """将数据集分割为训练、验证和测试集"""
@@ -2404,35 +2244,22 @@ class LAMOSTPreprocessor:
             print(f"预测时出错: {e}")
             return None
     
-    def visualize_spectrum(self, spec_file, processed=True, save=True, from_all_data=False, sample_data=None):
-        """可视化光谱数据
-
-        Args:
-            spec_file (str): 光谱文件名
-            processed (bool, optional): 是否使用处理后的数据. Defaults to True.
-            save (bool, optional): 是否保存图像. Defaults to True.
-            from_all_data (bool, optional): 是否来自process_all_data方法调用. Defaults to False.
-            sample_data (dict, optional): 处理好的样本数据，避免重复处理. Defaults to None.
-        """
+    def visualize_spectrum(self, spec_file, processed=True, save=True):
+        """可视化单个光谱，原始光谱或处理后的光谱"""
         if processed:
-            # 首先检查是否提供了sample_data参数
-            if sample_data is not None:
-                processed_data = sample_data
-                print(f"使用提供的样本数据: {spec_file}")
+            # 检查是否有缓存
+            cache_key = f"processed_{spec_file.replace('/', '_')}"
+            cached_data = self.cache_manager.get_cache(cache_key)
+            
+            if cached_data is None:
+                # 如果没有缓存，处理光谱
+                print(f"没有找到处理后的光谱缓存，重新处理: {spec_file}")
+                processed_data = self.process_single_spectrum(spec_file, 0.0)  # 使用占位符标签
+                if processed_data is None:
+                    print(f"无法处理文件: {spec_file}")
+                    return
             else:
-                # 检查是否有缓存
-                cache_key = f"processed_{spec_file.replace('/', '_')}"
-                cached_data = self.cache_manager.get_cache(cache_key)
-                
-                if cached_data is None:
-                    # 如果没有缓存，处理光谱
-                    print(f"没有找到处理后的光谱缓存，重新处理: {spec_file}")
-                    processed_data = self.process_single_spectrum(spec_file, 0.0)  # 使用占位符标签
-                    if processed_data is None:
-                        print(f"无法处理文件: {spec_file}")
-                        return
-                else:
-                    processed_data = cached_data
+                processed_data = cached_data
                 
             # 提取数据，支持新旧缓存结构
             if 'metadata' in processed_data:
@@ -2738,7 +2565,11 @@ class LAMOSTPreprocessor:
             print(f"波长校正后: 波长范围{wavelength_calibrated[0]}~{wavelength_calibrated[-1]}")
             
             # 从FITS文件读取视向速度
-            v_helio = self.read_fits_file(spec_file).get('v_helio', 0)
+            v_helio = 0  # 默认值
+            try:
+                _, _, v_helio, _, _, _ = self.read_fits_file(spec_file)
+            except Exception as e:
+                print(f"读取FITS文件获取视向速度时出错: {e}")
             
             # 2. 视向速度校正
             wavelength_corrected = self.correct_velocity(wavelength_calibrated, original_flux, v_helio)
@@ -2762,14 +2593,17 @@ class LAMOSTPreprocessor:
                 return
             
             # 6. 连续谱归一化
-            flux_continuum = self.normalize_continuum(wavelength_resampled, flux_resampled)
+            flux_continuum, continuum_params = self.normalize_continuum(wavelength_resampled, flux_resampled)
+            if flux_continuum is None:
+                print(f"连续谱归一化{spec_file}失败")
+                return None
             
             # 7. 二次去噪
             flux_denoised_second = self.denoise_spectrum_second(wavelength_resampled, flux_continuum)
             
             # 8. 最终归一化 (最大最小值归一化)
             print(f"对流量进行最终归一化")
-            flux_normalized = self.normalize_spectrum(flux_denoised_second)
+            flux_normalized, norm_params = self.normalize_spectrum(flux_denoised_second)
             if flux_normalized is None:
                 print(f"归一化{spec_file}失败")
                 return
@@ -3210,301 +3044,168 @@ class LAMOSTPreprocessor:
         # 替换验证方法为类方法
         self.cache_manager._validate_cache_data = self._validate_wavelength_range
 
+    def visualize_example_spectra(self, element=None):
+        """可视化指定元素的示例光谱
+        
+        Args:
+            element (str, optional): 元素名称，如 'C_FE'、'MG_FE'、'CA_FE'。
+                                     为None时会尝试所有已处理的元素。
+        """
+        print(f"准备可视化示例光谱...")
+        
+        # 定义要处理的元素列表
+        elements_to_process = []
+        if element:
+            elements_to_process = [element]
+        else:
+            # 尝试从已知的CSV文件中获取元素列表
+            standard_elements = ['C_FE', 'MG_FE', 'CA_FE']
+            for elem in standard_elements:
+                if os.path.exists(f"{elem}.csv"):
+                    elements_to_process.append(elem)
+        
+        if not elements_to_process:
+            print("未找到指定元素或任何标准元素的CSV文件")
+            return
+        
+        print(f"将处理以下元素: {', '.join(elements_to_process)}")
+        
+        # 处理每个元素
+        for elem in elements_to_process:
+            print(f"\n===== 处理元素: {elem} =====")
+            
+            # 1. 查找该元素的CSV文件
+            csv_path = f"{elem}.csv"
+            if not os.path.exists(csv_path):
+                print(f"找不到{csv_path}，跳过此元素")
+                continue
+                
+            # 2. 读取CSV文件获取光谱文件列表
+            try:
+                import pandas as pd
+                df = pd.read_csv(csv_path)
+                
+                if 'spec' not in df.columns:
+                    print(f"CSV文件{csv_path}中找不到'spec'列")
+                    continue
+                    
+                # 取前5个示例
+                sample_specs = df['spec'].values[:5]
+                if len(sample_specs) == 0:
+                    print(f"CSV文件{csv_path}中没有光谱数据")
+                    continue
+                    
+                print(f"找到{len(sample_specs)}个样本光谱")
+                
+                # 3. 可视化每个样本光谱
+                for i, spec in enumerate(sample_specs):
+                    print(f"\n处理样本 {i+1}/{len(sample_specs)}: {spec}")
+                    
+                    # 检查缓存和处理该光谱
+                    cache_key = f"processed_{spec.replace('/', '_')}"
+                    cached_data = self.cache_manager.get_cache(cache_key)
+                    
+                    if cached_data is None:
+                        print(f"没有找到处理后的光谱缓存，尝试处理: {spec}")
+                        
+                        # 查找FITS文件
+                        fits_file = self._find_fits_file(spec)
+                        if fits_file is None:
+                            print(f"找不到FITS文件: {spec}")
+                            continue
+                            
+                        print(f"开始处理FITS文件: {fits_file}")
+                        try:
+                            # 使用0.0作为占位符标签处理光谱
+                            processed_data = self.process_single_spectrum(spec, 0.0)
+                            if processed_data is None:
+                                print(f"处理光谱失败: {spec}")
+                                continue
+                                
+                            print(f"光谱处理成功，保存到缓存")
+                        except Exception as e:
+                            print(f"处理光谱时出错: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            continue
+                    else:
+                        print(f"使用缓存的预处理光谱")
+                    
+                    # 可视化处理后的光谱
+                    try:
+                        print(f"可视化光谱: {spec}")
+                        self.visualize_spectrum(spec, processed=True, save=True)
+                        print(f"光谱可视化完成")
+                    except Exception as e:
+                        print(f"可视化光谱时出错: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        
+            except Exception as e:
+                print(f"处理元素{elem}时出错: {e}")
+                import traceback
+                traceback.print_exc()
+                
+        print("\n===== 示例光谱可视化完成 =====")
+        print(f"图像保存在: {os.path.abspath(self.output_dir)}")
+
 def main():
-    """主函数"""
-    start_time = time.time()
-    
-    # 处理命令行参数
+    # 设置命令行参数
     import argparse
-    
-    parser = argparse.ArgumentParser(description="LAMOST光谱数据预处理器")
-    parser.add_argument('--csv_files', nargs='+', default=None,
-                      help='要处理的CSV文件列表，每个文件包含一个元素的数据。不指定时自动检测当前目录所有CSV文件')
+    parser = argparse.ArgumentParser(description='LAMOST光谱数据预处理工具')
+    parser.add_argument('--csv_files', nargs='+', help='CSV文件路径列表')
     parser.add_argument('--fits_dir', default='fits', help='FITS文件目录')
     parser.add_argument('--output_dir', default='processed_data', help='输出目录')
-    parser.add_argument('--wavelength_range', nargs=2, type=float, default=None,
-                      help='波长范围，例如: 4000 8000')
-    parser.add_argument('--n_points', type=int, default=None,
-                      help='重采样后的点数')
-    parser.add_argument('--log_step', type=float, default=0.0001,
-                      help='对数空间中的重采样步长（dex）')
-    parser.add_argument('--batch_size', type=int, default=20,
-                      help='批处理大小')
-    parser.add_argument('--max_workers', type=int, default=None,
-                      help='最大工作进程数，默认为CPU核心数的一半')
-    parser.add_argument('--memory_limit', type=float, default=0.7,
-                      help='内存使用限制(占总内存比例)')
-    parser.add_argument('--no_resume', action='store_true',
-                      help='不恢复之前的进度，从头开始处理')
-    parser.add_argument('--evaluate', action='store_true',
-                      help='评估预处理效果')
-    parser.add_argument('--single_element', type=str, default=None,
-                      help='仅处理指定元素的CSV文件，例如: C_FE')
-    parser.add_argument('--low_memory_mode', action='store_true', 
-                      help='启用低内存模式，减少内存使用但速度变慢')
-    
+    parser.add_argument('--wavelength_min', type=float, help='最小波长范围')
+    parser.add_argument('--wavelength_max', type=float, help='最大波长范围')
+    parser.add_argument('--n_points', type=int, help='重采样点数')
+    parser.add_argument('--log_step', type=float, default=0.0001, help='对数空间重采样步长')
+    parser.add_argument('--n_splits', type=int, default=5, help='交叉验证折数')
+    parser.add_argument('--max_workers', type=int, help='最大工作进程数')
+    parser.add_argument('--batch_size', type=int, default=20, help='批处理大小')
+    parser.add_argument('--memory_limit', type=float, default=0.7, help='内存使用限制')
+    parser.add_argument('--low_memory', action='store_true', help='低内存模式')
+    parser.add_argument('--use_gpu', action='store_true', help='使用GPU加速计算')
+    parser.add_argument('--clean_cache', action='store_true', help='清理缓存')
+    parser.add_argument('--visualize', action='store_true', help='可视化处理后的光谱')
+    parser.add_argument('--element', type=str, help='指定元素')
+    parser.add_argument('--check_sources', action='store_true', help='检查数据源')
     args = parser.parse_args()
     
-    # 设置基础路径
-    base_path = '/content' if IN_COLAB else os.path.abspath('.')
-    print(f"基础路径: {base_path}")
+    # 设置波长范围
+    wavelength_range = None
+    if args.wavelength_min is not None and args.wavelength_max is not None:
+        wavelength_range = (args.wavelength_min, args.wavelength_max)
     
-    # 获取系统内存信息
-    mem_info = psutil.virtual_memory()
-    print(f"系统内存: 总计 {mem_info.total / (1024**3):.1f}GB, "
-          f"可用 {mem_info.available / (1024**3):.1f}GB, "
-          f"使用率 {mem_info.percent}%")
-    
-    # 检测内存情况，自动决定是否使用低内存模式
-    low_memory_mode = args.low_memory_mode or mem_info.percent > 80
-    
-    if low_memory_mode and not args.low_memory_mode:
-        print("检测到系统内存不足，自动启用低内存模式")
-        user_choice = input("是否启用低内存模式? 这将减少内存使用但处理速度会变慢 (y/n): ").lower()
-        low_memory_mode = user_choice == 'y'
-    
-    # 设置CSV文件路径
-    if args.csv_files is None:
-        # 自动检测当前目录下所有CSV文件
-        args.csv_files = [f for f in os.listdir() if f.endswith('.csv')]
-        if not args.csv_files:
-            print("错误: 当前目录未找到CSV文件，请指定--csv_files参数")
-            return
-        print(f"自动检测到以下CSV文件: {args.csv_files}")
-    
-    # 如果指定了单个元素，就只处理对应的CSV文件
-    if args.single_element:
-        # 查找匹配该元素的CSV文件
-        matching_files = []
-        for csv_file in args.csv_files:
-            element_name = os.path.basename(csv_file).split('.')[0]
-            if element_name == args.single_element:
-                matching_files.append(csv_file)
-        
-        if not matching_files:
-            print(f"错误: 找不到元素 {args.single_element} 对应的CSV文件")
-            return
-        
-        args.csv_files = matching_files
-        print(f"仅处理元素 {args.single_element} 的数据: {args.csv_files}")
-    
-    fits_dir = args.fits_dir
-    if not os.path.isabs(fits_dir):
-        fits_dir = os.path.join(base_path, fits_dir)
-    
-    output_dir = args.output_dir
-    if not os.path.isabs(output_dir):
-        output_dir = os.path.join(base_path, output_dir)
-    
-    # 展示路径信息
-    print(f"CSV文件路径: {args.csv_files}")
-    print(f"FITS目录路径: {fits_dir}")
-    print(f"输出目录路径: {output_dir}")
-    
-    # 确保fits目录存在
-    if not os.path.exists(fits_dir):
-        print(f"创建FITS目录: {fits_dir}")
-        os.makedirs(fits_dir, exist_ok=True)
-    
-    # 检测FITS文件是否有效
-    print("\n=== 检查FITS文件有效性 ===")
-    fits_files = []
-    if os.path.exists(fits_dir):
-        fits_files = [os.path.join(fits_dir, f) for f in os.listdir(fits_dir) 
-                    if f.endswith(('.fits', '.fits.gz', '.fit', '.fit.gz'))]
-    
-    if not fits_files:
-        print("警告：找不到任何FITS文件！")
-    else:
-        print(f"找到{len(fits_files)}个FITS文件，开始检查...")
-        
-        # 抽样检查几个文件
-        sample_size = min(5, len(fits_files))
-        sample_files = fits_files[:sample_size]
-        
-        valid_count = 0
-        for file in sample_files:
-            print(f"\n检查文件: {os.path.basename(file)}")
-            try:
-                with fits.open(file, ignore_missing_end=True, memmap=False) as hdul:
-                    print(f"  HDU数量: {len(hdul)}")
-                    print(f"  主HDU类型: {type(hdul[0]).__name__}")
-                    header = hdul[0].header
-                    print(f"  主要头信息: NAXIS={header.get('NAXIS')}, NAXIS1={header.get('NAXIS1')}")
-                    
-                    # 检查是否有数据
-                    has_data = False
-                    for i, hdu in enumerate(hdul):
-                        if hdu.data is not None:
-                            data_shape = hdu.data.shape if hasattr(hdu.data, 'shape') else "无形状"
-                            print(f"  HDU{i}有数据: 形状={data_shape}")
-                            has_data = True
-                            break
-                    
-                    if not has_data:
-                        print("  警告: 所有HDU中都没有数据")
-                    else:
-                        valid_count += 1
-                        
-            except Exception as e:
-                print(f"  读取错误: {e}")
-        
-        print(f"\n检查结果: {valid_count}/{sample_size}个文件有有效数据")
-        
-        if valid_count == 0:
-            print("所有测试文件都没有数据，可能是FITS文件格式有问题。")
-            fix_option = input("是否尝试自动修复FITS文件? (y/n): ").lower()
-            if fix_option == 'y':
-                print("尝试使用astropy修复FITS文件...")
-                # 这里只修复示例文件
-                for file in sample_files:
-                    try:
-                        # 读取文件并重新写入，可能会修复一些格式问题
-                        with fits.open(file, ignore_missing_end=True) as hdul:
-                            fixed_file = file + '.fixed'
-                            hdul.writeto(fixed_file, overwrite=True)
-                            print(f"  已修复: {os.path.basename(file)} -> {os.path.basename(fixed_file)}")
-                    except Exception as e:
-                        print(f"  修复失败: {e}")
-    
-    print("\n=== 检查完成 ===\n")
-    
-    # 初始化预处理器
-    wavelength_range = tuple(args.wavelength_range) if args.wavelength_range else None
-    
+    # 创建预处理器实例
     preprocessor = LAMOSTPreprocessor(
         csv_files=args.csv_files,
-        fits_dir=fits_dir,
-        output_dir=output_dir,
-        wavelength_range=None,  # 修改为None，表示将使用最大公有波长范围
-        n_points=None,  # 修改为None，点数将根据波长范围和步长自动计算
-        log_step=0.0001,  # 新增：对数空间中的重采样步长（dex）
-        compute_common_range=True,  # 新增：是否计算最大公有波长范围
- 
-        max_workers=1 if low_memory_mode else 2,  # 低内存模式使用单线程
-        batch_size=5 if low_memory_mode else 20,   # 低内存模式减小批次大小
-        memory_limit=0.7,  # 内存使用阈值
-        low_memory_mode=low_memory_mode,  # 低内存模式标志
-        verbose=1  # 输出详细程度，0=静默，1=基本信息，2=详细信息
+        fits_dir=args.fits_dir,
+        output_dir=args.output_dir,
+        wavelength_range=wavelength_range,
+        n_points=args.n_points,
+        log_step=args.log_step,
+        n_splits=args.n_splits,
+        max_workers=args.max_workers,
+        batch_size=args.batch_size,
+        memory_limit=args.memory_limit,
+        low_memory_mode=args.low_memory,
+        use_gpu=args.use_gpu
     )
     
-    # 检查数据源
-    preprocessor.check_data_sources()
-    
-    # 添加路径诊断
-    preprocessor.check_and_fix_file_paths()
-    
-    # 询问用户是否清理缓存
-    preprocessor.clean_cache()
-    
-    # 询问用户是否继续
-    user_input = input("是否继续处理数据? (y/n): ").strip().lower()
-    if user_input != 'y':
-        print("程序已终止")
-        return
-    
-    # 处理所有数据，支持断点续传
-    X, y, elements, filenames = preprocessor.process_all_data(resume=True)
-    
-    # 检查返回值是否有效
-    if X is None:
-        print("错误: 没有处理到任何有效数据，处理过程可能失败或用户选择跳过数据集划分")
-        return
-    
-    if len(X) == 0:
-        print("错误: 没有处理到任何有效数据，请检查fits文件路径和CSV文件")
-        return
-    
-    # 检查是否已经在process_all_data函数中完成了数据集划分
-    # 如果没有full_dataset.npz文件，说明用户选择了划分数据集
-    full_dataset_path = os.path.join(preprocessor.output_dir, 'full_dataset.npz')
-    if not os.path.exists(full_dataset_path):
-        # 用户选择了数据集划分
-        print("用户已选择分割数据集为训练集、验证集和测试集")
+    # 处理命令
+    if args.clean_cache:
+        preprocessor.clean_cache()
+    elif args.visualize:
+        if args.element:
+            preprocessor.visualize_example_spectra(element=args.element)
+        else:
+            preprocessor.visualize_example_spectra()
+    elif args.check_sources:
+        preprocessor.check_data_sources()
     else:
-        # 用户选择不分割，使用完整数据集
-        print("用户选择不分割数据集，使用完整数据集")
-    
-    # 可视化部分不再主动询问，因为在process_all_data中已经询问并处理
-    
-    print(f"预处理完成，总耗时: {time.time() - start_time:.2f}秒")
-    print(f"处理结果保存在: {os.path.abspath(preprocessor.output_dir)}")
-
-if __name__ == "__main__":
-    try:
-        # 处理Colab环境
-        if IN_COLAB:
-            try:
-                # 使用动态导入避免IDE报错
-                import importlib
-                colab_files = importlib.import_module('google.colab.files')
-                
-                # 询问用户是否需要上传文件
-                if input("是否需要上传CSV文件? (y/n): ").lower() == 'y':
-                    print("请上传C_FE.csv, MG_FE.csv, CA_FE.csv文件...")
-                    uploaded = colab_files.upload()
-                    print("上传的文件:", list(uploaded.keys()))
-
-                # 询问用户是否需要上传FITS文件
-                if input("是否需要上传FITS文件? (y/n): ").lower() == 'y':
-                    # 如果FITS文件是打包的，上传并解压
-                    print("请上传包含FITS文件的压缩包...")
-                    fits_archive = colab_files.upload()
-                    archive_name = list(fits_archive.keys())[0]
-
-                    # 创建fits目录
-                    os.makedirs('fits', exist_ok=True)
-
-                    # 解压缩文件到fits目录
-                    if archive_name.endswith('.zip'):
-                        print(f"正在解压 {archive_name}...")
-                        with zipfile.ZipFile(archive_name, 'r') as zip_ref:
-                            zip_ref.extractall('fits/')
-                        print(f"已将{archive_name}解压到fits目录")
-                        
-                        # 检查解压后的目录结构
-                        fits_files = []
-                        for root, dirs, files in os.walk('fits'):
-                            for file in files:
-                                if any(file.endswith(ext) for ext in ['.fits', '.fits.gz', '.fit', '.fit.gz']):
-                                    fits_files.append(os.path.join(root, file))
-                        
-                        print(f"解压后找到 {len(fits_files)} 个FITS文件")
-                        
-                        # 检查是否有嵌套目录
-                        nested_dirs = set()
-                        for file in fits_files:
-                            rel_dir = os.path.relpath(os.path.dirname(file), 'fits')
-                            if rel_dir != '.':
-                                nested_dirs.add(rel_dir)
-                        
-                        if nested_dirs:
-                            print(f"发现嵌套目录结构: {', '.join(list(nested_dirs)[:3])}")
-                            move_files = input("是否将所有FITS文件移动到fits根目录? (y/n): ").lower() == 'y'
-                            
-                            if move_files:
-                                # 移动文件到根目录
-                                for file in fits_files:
-                                    if os.path.dirname(file) != 'fits':
-                                        target = os.path.join('fits', os.path.basename(file))
-                                        print(f"移动 {os.path.basename(file)}")
-                                        # 如果目标文件已存在，先删除
-                                        if os.path.exists(target):
-                                            os.remove(target)
-                                        os.rename(file, target)
-                                print("文件移动完成")
-                    else:
-                        print("不支持的压缩格式，请上传.zip文件")
-            except Exception as e:
-                print(f"Colab环境设置出错: {e}")
-                print("继续使用本地文件...")
-                
-        # 运行主程序
-        main()
+        # 默认行为：处理所有数据
+        preprocessor.process_all_data()
         
-    except KeyboardInterrupt:
-        print("\n程序被用户中断，您可以稍后重新运行继续处理")
-    except Exception as e:
-        print(f"发生错误: {e}")
-        import traceback
-        traceback.print_exc() 
+if __name__ == "__main__":
+    main()
