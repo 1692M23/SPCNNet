@@ -772,62 +772,65 @@ class LAMOSTPreprocessor:
         返回:
             ndarray: 归一化后的光谱强度，范围严格在[0,1]之间
         """
-        if flux is None or len(flux) == 0:
-            print("警告: 归一化失败 - 输入光谱为空")
-            return None
-        
-        # 检查无效值
-        invalid_mask = np.isnan(flux) | np.isinf(flux)
-        if np.all(invalid_mask):
-            print("警告: 归一化失败 - 所有值都是NaN或无穷大")
-            return None
-        
-        # 获取有效数据点
-        valid_mask = ~invalid_mask
-        if not np.any(valid_mask):
-            print("警告: 归一化失败 - 没有有效数据点")
-            return None
-        
-        # 直接从有效数据中计算最小值和最大值
-        valid_flux = flux[valid_mask]
-        min_val = np.min(valid_flux)
-        max_val = np.max(valid_flux)
-        
-        print(f"归一化前数据范围: [{min_val:.6f}, {max_val:.6f}]")
-        
-        # 检查数据范围
-        if max_val == min_val:
-            print(f"警告: 归一化失败 - 所有有效值都相同: {min_val}")
-            # 返回全零数组作为归一化结果
-            normalized_flux = np.zeros_like(flux)
-            normalized_flux[invalid_mask] = np.nan  # 保持无效值为NaN
+        try:
+            # 检查输入数据有效性
+            if flux is None or len(flux) == 0:
+                print("警告: 归一化失败 - 输入光谱为空")
+                return None
+            
+            # 处理无效值
+            valid_mask = ~np.isnan(flux) & ~np.isinf(flux)
+            if not np.any(valid_mask):
+                print("警告: 归一化失败 - 所有值都是NaN或无穷大")
+                return None
+            
+            # 最大最小值归一化
+            flux_min = np.nanmin(flux)
+            flux_max = np.nanmax(flux)
+            
+            print(f"归一化：最小值={flux_min}，最大值={flux_max}")
+            
+            if np.isclose(flux_max, flux_min) or np.isinf(flux_max) or np.isinf(flux_min):
+                print(f"流量范围无效: min={flux_min}, max={flux_max}")
+                return None
+            
+            normalized_flux = (flux - flux_min) / (flux_max - flux_min)
+            
+            # 确保所有值都严格在0-1范围内
+            normalized_flux = np.clip(normalized_flux, 0.0, 1.0)
+            
+            # 检查归一化结果是否有效
+            if np.isnan(normalized_flux).any() or np.isinf(normalized_flux).any():
+                print("归一化后出现无效值(NaN或Inf)")
+                if len(normalized_flux) < 20:
+                    print(f"归一化结果: {normalized_flux}")
+                # 尝试替换无效值
+                normalized_flux = np.nan_to_num(normalized_flux, nan=0.0, posinf=1.0, neginf=0.0)
+            
+            # 验证归一化后的范围
+            valid_norm = normalized_flux[valid_mask]
+            if len(valid_norm) > 0:
+                min_norm = np.min(valid_norm)
+                max_norm = np.max(valid_norm)
+                print(f"归一化后范围: [{min_norm}, {max_norm}]")
+                
+                if min_norm < 0 or max_norm > 1:
+                    print("警告: 归一化结果超出[0,1]范围，进行裁剪")
+                    normalized_flux = np.clip(normalized_flux, 0.0, 1.0)
+            
+            # 记录归一化参数供后续使用
+            self.normalization_params = {
+                'min': float(flux_min),
+                'max': float(flux_max),
+                'wavelength_range': (float(np.min(wavelength)), float(np.max(wavelength))) if wavelength is not None else None
+            }
+            
             return normalized_flux
-        
-        # 执行最大最小归一化
-        normalized_flux = np.zeros_like(flux)
-        normalized_flux[valid_mask] = (valid_flux - min_val) / (max_val - min_val)
-        
-        # 确保值在[0,1]范围内 (处理可能的浮点误差)
-        normalized_flux = np.clip(normalized_flux, 0, 1)
-        
-        # 保持原始的无效值为NaN
-        normalized_flux[invalid_mask] = np.nan
-        
-        # 验证归一化结果
-        valid_normalized = normalized_flux[valid_mask]
-        norm_min = np.min(valid_normalized)
-        norm_max = np.max(valid_normalized)
-        
-        print(f"归一化后数据范围: [{norm_min:.6f}, {norm_max:.6f}]")
-        
-        # 记录归一化参数供后续使用
-        self.normalization_params = {
-            'min': float(min_val),
-            'max': float(max_val),
-            'wavelength_range': (float(np.min(wavelength)), float(np.max(wavelength))) if wavelength is not None else None
-        }
-        
-        return normalized_flux
+        except Exception as e:
+            print(f"归一化失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
     
     def correct_wavelength(self, wavelength, flux):
         """对光谱进行波长标准化校正
@@ -2102,42 +2105,6 @@ class LAMOSTPreprocessor:
         # 第二步：处理所有光谱数据
         print("\n=== 第二步：使用公共波长范围进行完整预处理 ===")
         all_data = self.process_all_elements(elements_list, dataframes, resume)
-        
-        # 第三步：询问是否分割数据集
-        if all_data and input("是否需要划分数据集? (y/n): ").lower() == 'y':
-            print("准备数据用于模型训练")
-            X, y, elements, filenames = self._prepare_arrays(all_data)
-            if X is not None and y is not None:
-                self.split_dataset(X, y, elements)
-        
-        # 第四步：询问是否随机可视化
-        if all_data and input("是否随机可视化几条光谱? (y/n): ").lower() == 'y':
-            n_samples = min(len(all_data), 3)
-            try:
-                samples = random.sample(all_data, n_samples)
-                for sample in samples:
-                    # 安全地获取文件名
-                    filename = None
-                    if isinstance(sample, dict):
-                        if 'filename' in sample:
-                            filename = sample['filename']
-                        elif 'metadata' in sample and isinstance(sample['metadata'], dict) and 'filename' in sample['metadata']:
-                            filename = sample['metadata']['filename']
-                    elif isinstance(sample, str):
-                        # 直接使用字符串作为文件名
-                        filename = sample
-                        
-                    if filename:
-                        print(f"可视化: {filename}")
-                        # 直接传递样本数据，避免重新处理
-                        self.visualize_spectrum(filename, processed=True, save=True, 
-                                               from_all_data=True, sample_data=sample)
-                    else:
-                        print(f"样本中没有文件名信息: {type(sample)}")
-            except Exception as e:
-                print(f"可视化过程中出错: {e}")
-                import traceback
-                traceback.print_exc()
         
         # 最终处理数据
         if all_data:
