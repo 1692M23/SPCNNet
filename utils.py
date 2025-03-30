@@ -293,12 +293,28 @@ class ProgressManager:
             self.pbar.set_description(desc)
 
 def setup_analysis_directories():
-    """创建模型分析相关的目录"""
-    analysis_dirs = [
-        'results/feature_importance',
-        'results/residual_analysis',
-    ]
+    """设置分析结果目录"""
+    dirs = ['plots', 'results', 'fits']
+    for d in dirs:
+        os.makedirs(d, exist_ok=True)
+    return {d: d for d in dirs}
+
+def set_seed(seed=42):
+    """设置随机种子以确保实验的可重复性
     
-    for directory in analysis_dirs:
-        os.makedirs(directory, exist_ok=True)
-        logging.info(f"已创建分析目录: {directory}") 
+    参数:
+        seed (int): 随机种子值，默认为42
+    """
+    import random
+    import numpy as np
+    import torch
+    
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    
+    logger.info(f"已设置随机种子: {seed}") 
