@@ -1193,6 +1193,44 @@ def use_preprocessor(task='train', element='MG_FE', input_file=None, output_dir=
         logger.error(traceback.format_exc())
         return {'success': False, 'error': str(e)}
 
+def calculate_dataset_stats(data_loader):
+    """
+    计算数据集的统计信息
+    
+    参数:
+        data_loader (DataLoader): 数据加载器
+        
+    返回:
+        float: 数据平均值
+    """
+    total_sum = 0.0
+    total_samples = 0
+    
+    for batch in data_loader:
+        # 处理数据加载器可能返回(data, target)或仅data的情况
+        if isinstance(batch, (list, tuple)):
+            data = batch[0]
+        else:
+            data = batch
+        
+        # 计算当前批次的样本数
+        batch_size = data.size(0)
+        
+        # 累加总和
+        total_sum += torch.sum(data).item()
+        
+        # 累加样本数
+        total_samples += batch_size * data.size(1) * data.size(2)
+    
+    # 如果没有数据，返回0
+    if total_samples == 0:
+        return 0.0
+    
+    # 计算平均值
+    mean_value = total_sum / total_samples
+    
+    return mean_value
+
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='恒星光谱元素丰度预测系统')
@@ -1563,9 +1601,153 @@ def main():
     
     if args.mode == 'test' or args.mode == 'all':
         # 测试模型
+        logger.info(f"开始测试元素丰度预测模型: {elements}")
+        
+        # 导入评估工具
+        try:
+            import evaluation_utils
+            logger.info("成功导入评估工具模块")
+            plot_predictions_vs_true = evaluation_utils.plot_predictions_vs_true
+            evaluate_model_simple = evaluation_utils.evaluate_model_simple
+            plot_error_distribution = evaluation_utils.plot_error_distribution
+        except ImportError as e:
+            logger.error(f"无法导入evaluation_utils模块: {str(e)}")
+            logger.info("尝试使用evaluation模块中的函数")
+            
+            # 回退到原有的evaluate_model函数
+            from evaluation import evaluate_model
+            logger.info("成功导入evaluation.evaluate_model")
+        
+        # 开始测试每个元素
+        test_results = {}
         for i, element in enumerate(elements):
-            logger.info(f"测试 {element} 元素丰度预测模型")
-            # 实现测试逻辑
+            logger.info(f"测试 {element} 元素丰度预测模型 ({i+1}/{len(elements)})")
+            
+            try:
+                # 加载训练好的模型
+                model_dir = config.model_config.get('model_dir', 'models')
+                final_model_path = os.path.join(model_dir, f'SpectralResCNN_GCN_{element}.pth')
+                best_model_path = os.path.join(model_dir, f'best_model_{element}.pth')
+                checkpoint_path = os.path.join(model_dir, f'checkpoint_{element}.pth')
+                
+                # 尝试按优先级加载模型
+                model_path = None
+                if os.path.exists(final_model_path):
+                    logger.info(f"加载最终模型: {final_model_path}")
+                    model_path = final_model_path
+                elif os.path.exists(best_model_path):
+                    logger.info(f"加载最佳模型: {best_model_path}")
+                    model_path = best_model_path
+                elif os.path.exists(checkpoint_path):
+                    logger.info(f"加载检查点模型: {checkpoint_path}")
+                    model_path = checkpoint_path
+                else:
+                    logger.error(f"找不到 {element} 的模型文件")
+                    logger.error(f"尝试查找的路径: {final_model_path}, {best_model_path}, {checkpoint_path}")
+                    continue
+                
+                model = load_trained_model(model_path, config.training_config['device'])
+                if model is None:
+                    logger.error(f"无法加载 {element} 的模型，跳过测试")
+                    continue
+                
+                # 设置模型为评估模式
+                model.eval()
+                logger.info(f"模型已设置为评估模式")
+                
+                # 收集测试集上的预测和真实值
+                all_targets = []
+                all_outputs = []
+                
+                logger.info(f"在测试集上评估 {element} 模型中...")
+                with torch.no_grad():
+                    for batch_idx, (data, target) in enumerate(test_loader):
+                        try:
+                            # 将数据移至指定设备
+                            data = data.to(config.training_config['device'])
+                            
+                            # 获取模型预测
+                            outputs = model(data)
+                            
+                            # 收集结果
+                            all_targets.append(target.cpu().numpy())
+                            all_outputs.append(outputs.cpu().numpy())
+                            
+                            # 打印进度
+                            if (batch_idx + 1) % 5 == 0 or batch_idx == 0:
+                                logger.info(f"处理批次: {batch_idx+1}/{len(test_loader)}")
+                                
+                        except Exception as e:
+                            logger.error(f"处理批次 {batch_idx+1} 时出错: {str(e)}")
+                            logger.error(f"Traceback: {traceback.format_exc()}")
+                
+                # 合并结果
+                if all_targets and all_outputs:
+                    all_targets = np.vstack(all_targets)
+                    all_outputs = np.vstack(all_outputs)
+                    
+                    logger.info(f"收集到 {len(all_targets)} 个测试样本")
+                    
+                    # 计算评估指标
+                    if 'evaluate_model_simple' in locals():
+                        test_metrics = evaluate_model_simple(all_outputs, all_targets)
+                    else:
+                        # 回退到原有的evaluate_model
+                        test_metrics = evaluate_model(model, test_loader, config.training_config['device'])
+                    
+                    test_results[element] = test_metrics
+                    
+                    # 输出测试结果
+                    logger.info(f"\n=== {element} 模型测试结果 ===")
+                    logger.info(f"均方误差 (MSE): {test_metrics['mse']:.6f}")
+                    logger.info(f"均方根误差 (RMSE): {test_metrics['rmse']:.6f}")
+                    logger.info(f"平均绝对误差 (MAE): {test_metrics['mae']:.6f}")
+                    logger.info(f"决定系数 (R²): {test_metrics['r2']:.6f}")
+                    if 'r_value' in test_metrics:
+                        logger.info(f"相关系数 (r): {test_metrics['r_value']:.6f}")
+                        logger.info(f"p值: {test_metrics['p_value']:.6f}")
+                    logger.info(f"样本数量: {test_metrics.get('num_samples', len(all_targets))}")
+                    
+                    # 可视化测试结果
+                    try:
+                        results_dir = config.output_config.get('results_dir', 'results')
+                        
+                        # 确保结果目录存在
+                        os.makedirs(results_dir, exist_ok=True)
+                        
+                        # 绘制预测与真实值对比图
+                        plot_path = os.path.join(results_dir, f'{element}_predictions_vs_true.png')
+                        if 'plot_predictions_vs_true' in locals():
+                            plot_predictions_vs_true(all_targets, all_outputs, element, plot_path)
+                            logger.info(f"预测对比图保存至: {plot_path}")
+                        
+                        # 绘制误差分布图
+                        if 'plot_error_distribution' in locals():
+                            error_path = os.path.join(results_dir, f'{element}_error_distribution.png')
+                            plot_error_distribution(all_outputs, all_targets, element, error_path)
+                            logger.info(f"误差分布图保存至: {error_path}")
+                        
+                    except Exception as e:
+                        logger.error(f"绘制图表时出错: {str(e)}")
+                        logger.error(f"Traceback: {traceback.format_exc()}")
+                else:
+                    logger.error(f"没有收集到有效的测试结果")
+                
+            except Exception as e:
+                logger.error(f"测试元素 {element} 时出错: {str(e)}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                continue
+        
+        # 输出所有测试结果的总结
+        if test_results:
+            logger.info("\n=== 测试结果总结 ===")
+            for element, metrics in test_results.items():
+                summary = f"{element}: RMSE={metrics['rmse']:.6f}, R²={metrics['r2']:.6f}"
+                if 'r_value' in metrics:
+                    summary += f", r={metrics['r_value']:.6f}"
+                logger.info(summary)
+        else:
+            logger.warning("没有成功测试任何模型")
     
     if args.mode == 'predict':
         # 预测模式
