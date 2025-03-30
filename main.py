@@ -1248,33 +1248,10 @@ def use_preprocessor(task='train', element='MG_FE', input_file=None, output_dir=
 
 def parse_args():
     """解析命令行参数"""
-    parser = argparse.ArgumentParser(description='光谱数据分析')
-    
-    # 添加随机种子参数
-    parser.add_argument('--seed', type=int, default=42, help='随机种子，用于结果复现')
-    
-    # 其他原有参数...
-    
-    return parser.parse_args()
-
-def main():
-    """程序主入口函数"""
-    # 解析命令行参数
-    args = parse_args()
-    
-    # 设置随机种子
-    if hasattr(args, 'seed') and args.seed is not None:
-        set_seed(args.seed)
-    else:
-        set_seed(42)  # 使用默认种子
-    
-    logger = logging.getLogger('main')
-    logger.info("开始处理命令行参数")
-    
-    import argparse
     parser = argparse.ArgumentParser(description='恒星光谱丰度预测模型')
     
     # 基本参数
+    parser.add_argument('--seed', type=int, default=42, help='随机种子，用于结果复现')
     parser.add_argument('--mode', type=str, choices=['train', 'tune', 'test', 'predict', 'all', 'show_results', 'analyze', 'preprocess'],
                        default='train', help='运行模式')
     parser.add_argument('--data_path', type=str, default=None,
@@ -1355,7 +1332,21 @@ def main():
     parser.add_argument('--no_gcn', action='store_true',
                      help='不使用图卷积网络')
     
-    args = parser.parse_args()
+    return parser.parse_args()
+
+def main():
+    """程序主入口函数"""
+    # 解析命令行参数
+    args = parse_args()
+    
+    # 设置随机种子
+    if hasattr(args, 'seed') and args.seed is not None:
+        set_seed(args.seed)
+    else:
+        set_seed(42)  # 使用默认种子
+    
+    logger = logging.getLogger('main')
+    logger.info("开始处理命令行参数")
     
     # 处理element和elements参数
     if args.element is not None:
@@ -1367,7 +1358,7 @@ def main():
     else:
         # 默认使用配置中的元素
         elements = config.training_config['elements']
-    
+        
     # 使用命令行参数更新配置
     if args.batch_size is not None:
         config.training_config['batch_size'] = args.batch_size
