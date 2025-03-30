@@ -22,8 +22,28 @@ import concurrent.futures
 import json
 import traceback
 import re
-from sklearn.model_selection import KFold, train_test_split
+from sklearn.model_selection import train_test_split
 import random
+
+# GPU加速相关导入
+try:
+    import cupy as cp
+    import cupyx.scipy.signal as cusignal
+    import cupyx.scipy.ndimage as cundimage
+    HAS_GPU = True
+except ImportError:
+    HAS_GPU = False
+    # 创建占位符以避免在后续代码中出现导入错误
+    class DummyModule:
+        def __getattr__(self, name):
+            return None
+    
+    cp = DummyModule()
+    cusignal = DummyModule()
+    cundimage = DummyModule()
+    print("警告: 未找到CuPy库，将使用CPU模式运行")
+    print("要启用GPU加速，请安装CuPy库: pip install cupy-cuda11x (根据您的CUDA版本选择合适的包)")
+
 warnings.filterwarnings('ignore')  # 忽略不必要的警告
 
 # 判断是否在Colab环境中
@@ -37,8 +57,36 @@ def is_in_colab():
     except:
         return False
 
+# 检测是否有可用的GPU
+def check_gpu_available():
+    """检测是否有可用的GPU，并返回设备信息"""
+    if not HAS_GPU:
+        print("未安装CuPy，无法使用GPU")
+        return False
+    
+    try:
+        # 检查CUDA是否可用
+        n_gpus = cp.cuda.runtime.getDeviceCount()
+        if n_gpus > 0:
+            # 打印GPU信息
+            for i in range(n_gpus):
+                device_props = cp.cuda.runtime.getDeviceProperties(i)
+                print(f"找到GPU {i}: {device_props['name']}, 显存: {device_props['totalGlobalMem'] / (1024**3):.2f} GB")
+            
+            # 设置默认使用的GPU
+            cp.cuda.runtime.setDevice(0)
+            print(f"使用GPU: {cp.cuda.runtime.getDevice()}")
+            return True
+        else:
+            print("未检测到可用的GPU")
+            return False
+    except Exception as e:
+        print(f"GPU检测出错: {e}")
+        return False
+
 # 环境设置
 IN_COLAB = is_in_colab()
+USE_GPU = check_gpu_available()
 
 class LAMOSTPreprocessor:
     def __init__(self, csv_files=None, 
@@ -52,8 +100,34 @@ class LAMOSTPreprocessor:
                  max_workers=None,  # 最大工作进程数，None表示自动确定
                  batch_size=20,  # 批处理大小
                  memory_limit=0.7,  # 内存使用限制(占总内存比例)
-                 low_memory_mode=False):  # 低内存模式
+                 low_memory_mode=False,  # 低内存模式
+                 use_gpu=USE_GPU):  # 是否使用GPU
         
+        # 设置GPU使用选项
+        self.use_gpu = use_gpu
+        if self.use_gpu and not HAS_GPU:
+            print("警告: 未找到CuPy库，无法使用GPU模式")
+            self.use_gpu = False
+        
+        if self.use_gpu:
+            print("🚀 已启用GPU加速模式")
+            # 预热GPU，分配少量内存确保GPU已初始化
+            try:
+                temp_array = cp.zeros((100, 100), dtype=cp.float32)
+                cp.sum(temp_array)
+                # 同步GPU，确保操作完成
+                cp.cuda.Stream.null.synchronize()
+                # 释放内存
+                del temp_array
+                cp.get_default_memory_pool().free_all_blocks()
+                print("GPU预热完成")
+            except Exception as e:
+                print(f"GPU预热失败: {e}")
+                print("切换到CPU模式")
+                self.use_gpu = False
+        else:
+            print("使用CPU模式运行")
+            
         # 设置文件路径
         # 默认使用当前目录下所有的CSV文件
         if csv_files is None:
@@ -626,7 +700,25 @@ class LAMOSTPreprocessor:
             
             # 对有效数据进行滤波
             flux_denoised = np.copy(flux)
-            flux_denoised[mask] = signal.savgol_filter(valid_flux, window_length, polyorder)
+            
+            if self.use_gpu:
+                try:
+                    # 使用GPU进行SavGol滤波
+                    # 将数据转移到GPU
+                    d_valid_flux = cp.asarray(valid_flux)
+                    # 使用cupy的滤波算法
+                    d_denoised = cusignal.savgol_filter(d_valid_flux, window_length, polyorder)
+                    # 将结果从GPU拷贝回CPU
+                    flux_denoised[mask] = cp.asnumpy(d_denoised)
+                    # 清理GPU内存
+                    del d_valid_flux, d_denoised
+                    cp.get_default_memory_pool().free_all_blocks()
+                except Exception as e:
+                    print(f"GPU去噪失败，回退到CPU: {e}")
+                    flux_denoised[mask] = signal.savgol_filter(valid_flux, window_length, polyorder)
+            else:
+                # 使用CPU进行滤波
+                flux_denoised[mask] = signal.savgol_filter(valid_flux, window_length, polyorder)
             
             return flux_denoised
         except Exception as e:
@@ -753,10 +845,35 @@ class LAMOSTPreprocessor:
             # 转换回线性空间
             new_wavelength = 10**log_wavelength
             
-            # 使用线性插值
-            interp_func = interpolate.interp1d(wavelength_valid, flux_valid, kind='linear', 
-                                              bounds_error=False, fill_value=np.nan)
-            new_flux = interp_func(new_wavelength)
+            if self.use_gpu:
+                try:
+                    # 将数据转移到GPU
+                    d_wave = cp.asarray(wavelength_valid)
+                    d_flux = cp.asarray(flux_valid)
+                    d_new_wave = cp.asarray(new_wavelength)
+                    
+                    # 使用GPU线性插值
+                    # 由于cupy没有完全等价于scipy.interpolate.interp1d的函数，
+                    # 我们使用cp.interp函数，它类似于np.interp
+                    d_new_flux = cp.interp(d_new_wave, d_wave, d_flux)
+                    
+                    # 将结果转回CPU
+                    new_flux = cp.asnumpy(d_new_flux)
+                    
+                    # 清理GPU内存
+                    del d_wave, d_flux, d_new_wave, d_new_flux
+                    cp.get_default_memory_pool().free_all_blocks()
+                except Exception as e:
+                    print(f"GPU重采样失败，回退到CPU: {e}")
+                    # 使用CPU线性插值
+                    interp_func = interpolate.interp1d(wavelength_valid, flux_valid, kind='linear', 
+                                                     bounds_error=False, fill_value=np.nan)
+                    new_flux = interp_func(new_wavelength)
+            else:
+                # 使用CPU线性插值
+                interp_func = interpolate.interp1d(wavelength_valid, flux_valid, kind='linear', 
+                                                 bounds_error=False, fill_value=np.nan)
+                new_flux = interp_func(new_wavelength)
             
             # 检查结果是否有效
             if np.isnan(new_flux).all():
@@ -803,24 +920,76 @@ class LAMOSTPreprocessor:
                 print("没有有效的流量值，无法归一化")
                 return None
             
-            # 最大最小值归一化
-            flux_min = np.min(valid_flux)
-            flux_max = np.max(valid_flux)
-            
-            print(f"归一化：最小值={flux_min}，最大值={flux_max}")
-            
-            if np.isclose(flux_max, flux_min):
-                print(f"流量范围无效: min={flux_min}, max={flux_max}，设置为0-1范围")
+            if self.use_gpu:
+                try:
+                    # 使用GPU计算最大最小值
+                    d_valid_flux = cp.asarray(valid_flux)
+                    flux_min = float(cp.min(d_valid_flux).get())
+                    flux_max = float(cp.max(d_valid_flux).get())
+                    
+                    print(f"归一化：最小值={flux_min}，最大值={flux_max}")
+                    
+                    if cp.isclose(flux_max, flux_min):
+                        print(f"流量范围无效: min={flux_min}, max={flux_max}，设置为0-1范围")
+                        normalized_flux = np.zeros_like(flux)
+                        normalized_flux[valid_mask] = 0.5  # 所有有效值设为0.5
+                        # 清理GPU内存
+                        del d_valid_flux
+                        cp.get_default_memory_pool().free_all_blocks()
+                        return normalized_flux, {'flux_min': flux_min, 'flux_max': flux_max}
+                    
+                    # 创建归一化后的数组
+                    normalized_flux = np.zeros_like(flux)
+                    
+                    # 在GPU上进行归一化计算
+                    d_normalized = (d_valid_flux - flux_min) / (flux_max - flux_min)
+                    
+                    # 确保所有值都严格在0-1范围内
+                    d_normalized = cp.clip(d_normalized, 0.0, 1.0)
+                    
+                    # 将结果复制回CPU
+                    normalized_flux[valid_mask] = cp.asnumpy(d_normalized)
+                    
+                    # 清理GPU内存
+                    del d_valid_flux, d_normalized
+                    cp.get_default_memory_pool().free_all_blocks()
+                except Exception as e:
+                    print(f"GPU归一化失败，回退到CPU: {e}")
+                    # 退回到CPU计算
+                    flux_min = np.min(valid_flux)
+                    flux_max = np.max(valid_flux)
+                    
+                    print(f"归一化：最小值={flux_min}，最大值={flux_max}")
+                    
+                    if np.isclose(flux_max, flux_min):
+                        print(f"流量范围无效: min={flux_min}, max={flux_max}，设置为0-1范围")
+                        normalized_flux = np.zeros_like(flux)
+                        normalized_flux[valid_mask] = 0.5
+                        return normalized_flux, {'flux_min': flux_min, 'flux_max': flux_max}
+                    
+                    normalized_flux = np.zeros_like(flux)
+                    normalized_flux[valid_mask] = (valid_flux - flux_min) / (flux_max - flux_min)
+                    normalized_flux = np.clip(normalized_flux, 0.0, 1.0)
+            else:
+                # 使用CPU进行计算
+                # 最大最小值归一化
+                flux_min = np.min(valid_flux)
+                flux_max = np.max(valid_flux)
+                
+                print(f"归一化：最小值={flux_min}，最大值={flux_max}")
+                
+                if np.isclose(flux_max, flux_min):
+                    print(f"流量范围无效: min={flux_min}, max={flux_max}，设置为0-1范围")
+                    normalized_flux = np.zeros_like(flux)
+                    normalized_flux[valid_mask] = 0.5  # 所有有效值设为0.5
+                    return normalized_flux, {'flux_min': flux_min, 'flux_max': flux_max}
+                
+                # 创建归一化后的数组
                 normalized_flux = np.zeros_like(flux)
-                normalized_flux[valid_mask] = 0.5  # 所有有效值设为0.5
-                return normalized_flux, {'flux_min': flux_min, 'flux_max': flux_max}
-            
-            # 创建归一化后的数组
-            normalized_flux = np.zeros_like(flux)
-            normalized_flux[valid_mask] = (valid_flux - flux_min) / (flux_max - flux_min)
-            
-            # 确保所有值都严格在0-1范围内
-            normalized_flux = np.clip(normalized_flux, 0.0, 1.0)
+                normalized_flux[valid_mask] = (valid_flux - flux_min) / (flux_max - flux_min)
+                
+                # 确保所有值都严格在0-1范围内
+                normalized_flux = np.clip(normalized_flux, 0.0, 1.0)
             
             # 替换无效值
             normalized_flux[~valid_mask] = 0.0
@@ -942,10 +1111,34 @@ class LAMOSTPreprocessor:
                 
                 # 为每个区段找出可能的连续谱点
                 # 使用中值滤波平滑曲线，识别连续谱的趋势
-                from scipy.signal import medfilt
-                window_size = min(11, len(flux_segment) // 5 * 2 + 1)  # 确保窗口大小为奇数
-                window_size = max(3, window_size)  # 至少使用3点窗口
-                smoothed_flux = medfilt(flux_segment, window_size)
+                
+                # 计算中值滤波
+                if self.use_gpu:
+                    try:
+                        window_size = min(11, len(flux_segment) // 5 * 2 + 1)  # 确保窗口大小为奇数
+                        window_size = max(3, window_size)  # 至少使用3点窗口
+                        
+                        # 将数据转移到GPU
+                        d_flux_segment = cp.asarray(flux_segment)
+                        # 使用GPU计算中值滤波
+                        d_smoothed_flux = cundimage.median_filter(d_flux_segment, size=window_size)
+                        smoothed_flux = cp.asnumpy(d_smoothed_flux)
+                        
+                        # 清理GPU内存
+                        del d_flux_segment, d_smoothed_flux
+                        cp.get_default_memory_pool().free_all_blocks()
+                    except Exception as e:
+                        print(f"GPU中值滤波失败，回退到CPU: {e}")
+                        # 回退到CPU计算
+                        from scipy.signal import medfilt
+                        window_size = min(11, len(flux_segment) // 5 * 2 + 1)
+                        window_size = max(3, window_size)
+                        smoothed_flux = medfilt(flux_segment, window_size)
+                else:
+                    from scipy.signal import medfilt
+                    window_size = min(11, len(flux_segment) // 5 * 2 + 1)  # 确保窗口大小为奇数
+                    window_size = max(3, window_size)  # 至少使用3点窗口
+                    smoothed_flux = medfilt(flux_segment, window_size)
                 
                 # 选择连续谱点的方法
                 if segment_has_oi and has_oi_peak:
@@ -971,21 +1164,68 @@ class LAMOSTPreprocessor:
                 
                 # 多项式拟合
                 try:
-                    continuum_fit = np.polyfit(
-                        wave_segment[continuum_mask], 
-                        flux_segment[continuum_mask], 
-                        poly_order
-                    )
-                    
-                    # 计算当前区间的伪连续谱
-                    # 只在当前区间的波长范围内计算
-                    segment_range = (wave_segment[0], wave_segment[-1])
-                    mask = (wavelength >= segment_range[0]) & (wavelength <= segment_range[1])
-                    
-                    if not np.any(mask):
-                        continue  # 如果没有波长在该区间内，跳过
-                    
-                    pseudo_continuum = np.polyval(continuum_fit, wavelength[mask])
+                    if self.use_gpu:
+                        try:
+                            # 将数据传输到GPU
+                            d_wave = cp.asarray(wave_segment[continuum_mask])
+                            d_flux = cp.asarray(flux_segment[continuum_mask])
+                            
+                            # 使用GPU进行多项式拟合
+                            continuum_fit = cp.polynomial.polynomial.polyfit(
+                                d_wave, d_flux, poly_order
+                            )
+                            
+                            # 计算当前区间的伪连续谱
+                            # 只在当前区间的波长范围内计算
+                            segment_range = (wave_segment[0], wave_segment[-1])
+                            mask = (wavelength >= segment_range[0]) & (wavelength <= segment_range[1])
+                            
+                            if not np.any(mask):
+                                continue  # 如果没有波长在该区间内，跳过
+                            
+                            # 将波长传输到GPU
+                            d_wavelength_mask = cp.asarray(wavelength[mask])
+                            # 计算多项式值
+                            d_pseudo_continuum = cp.polynomial.polynomial.polyval(d_wavelength_mask, continuum_fit)
+                            # 将结果传回CPU
+                            pseudo_continuum = cp.asnumpy(d_pseudo_continuum)
+                            
+                            # 清理GPU内存
+                            del d_wave, d_flux, d_wavelength_mask, d_pseudo_continuum
+                            cp.get_default_memory_pool().free_all_blocks()
+                        except Exception as e:
+                            print(f"GPU多项式拟合失败，回退到CPU: {e}")
+                            # 回退到CPU拟合
+                            continuum_fit = np.polyfit(
+                                wave_segment[continuum_mask], 
+                                flux_segment[continuum_mask], 
+                                poly_order
+                            )
+                            
+                            segment_range = (wave_segment[0], wave_segment[-1])
+                            mask = (wavelength >= segment_range[0]) & (wavelength <= segment_range[1])
+                            
+                            if not np.any(mask):
+                                continue
+                                
+                            pseudo_continuum = np.polyval(continuum_fit, wavelength[mask])
+                    else:
+                        # 使用CPU进行多项式拟合
+                        continuum_fit = np.polyfit(
+                            wave_segment[continuum_mask], 
+                            flux_segment[continuum_mask], 
+                            poly_order
+                        )
+                        
+                        # 计算当前区间的伪连续谱
+                        # 只在当前区间的波长范围内计算
+                        segment_range = (wave_segment[0], wave_segment[-1])
+                        mask = (wavelength >= segment_range[0]) & (wavelength <= segment_range[1])
+                        
+                        if not np.any(mask):
+                            continue  # 如果没有波长在该区间内，跳过
+                        
+                        pseudo_continuum = np.polyval(continuum_fit, wavelength[mask])
                     
                     # 确保伪连续谱为正值且不会过小导致归一化后的峰值过大
                     min_threshold = np.max(flux_segment) * 0.05  # 保持为5%以防止过小的分母
@@ -1104,9 +1344,6 @@ class LAMOSTPreprocessor:
             # 保存原始数据的副本
             flux_denoised = np.copy(flux)
             
-            # 使用SavGol滤波器进行平滑去噪
-            from scipy.signal import savgol_filter
-            
             # 确定窗口大小 - 正常区域和异常区域使用不同的参数
             standard_window = 7  # 默认窗口大小
             oi_window = 15      # OI区域使用更大窗口
@@ -1120,51 +1357,143 @@ class LAMOSTPreprocessor:
             valid_flux = flux[valid_mask]
             valid_wavelength = wavelength[valid_mask]
             
-            # 对一般区域应用滤波
-            try:
-                flux_denoised[valid_mask] = savgol_filter(valid_flux, standard_window, 2)
-                print(f"二次去噪完成，使用窗口长度= {standard_window}")
-            except Exception as e:
-                print(f"SavGol滤波失败: {e}")
-                return flux
+            if self.use_gpu:
+                try:
+                    # 对一般区域应用GPU滤波
+                    d_valid_flux = cp.asarray(valid_flux)
+                    d_flux_denoised = cusignal.savgol_filter(d_valid_flux, standard_window, 2)
+                    flux_denoised[valid_mask] = cp.asnumpy(d_flux_denoised)
+                    print(f"二次去噪完成(GPU)，使用窗口长度= {standard_window}")
+                    
+                    # 如果OI区域有异常，使用更强的滤波参数专门处理
+                    if has_oi_anomaly:
+                        # 找到OI区域的有效数据点
+                        oi_valid_mask = oi_region & valid_mask
+                        if np.sum(oi_valid_mask) > oi_window:  # 确保有足够的点进行滤波
+                            # 对OI区域使用更大窗口和更高阶多项式
+                            oi_indices = np.where(oi_valid_mask)[0]
+                            if len(oi_indices) >= oi_window:
+                                oi_flux_section = flux[oi_valid_mask]
+                                # 使用GPU进行更强平滑
+                                d_oi_flux = cp.asarray(oi_flux_section)
+                                d_oi_smoothed = cusignal.savgol_filter(d_oi_flux, oi_window, 3)
+                                flux_denoised[oi_valid_mask] = cp.asnumpy(d_oi_smoothed)
+                                print(f"OI区域增强去噪完成(GPU)，使用窗口长度= {oi_window}")
+                                # 清理GPU内存
+                                del d_oi_flux, d_oi_smoothed
+                    
+                    # 对特别突出的峰值使用中值滤波
+                    if has_oi_anomaly:
+                        # 寻找异常峰值
+                        flux_mean = np.mean(flux_denoised[valid_mask])
+                        flux_std = np.std(flux_denoised[valid_mask])
+                        spike_threshold = flux_mean + 1.5 * flux_std
+                        
+                        spike_mask = (flux_denoised > spike_threshold) & valid_mask
+                        if np.any(spike_mask):
+                            print(f"检测到{np.sum(spike_mask)}个异常峰值点，进行中值滤波")
+                            
+                            if self.use_gpu and np.sum(spike_mask) > 10:  # 只有当峰值点足够多时才用GPU
+                                try:
+                                    # 将数据转移到GPU
+                                    d_flux_denoised = cp.asarray(flux_denoised)
+                                    # 使用GPU进行中值滤波
+                                    # 由于无法像CPU版本那样针对个别点处理，我们应用全局中值滤波
+                                    # 但注意这会改变所有数据点，而不仅是峰值点
+                                    mask_array = cp.zeros(flux_denoised.shape, dtype=cp.bool_)
+                                    mask_array[spike_mask] = True
+                                    # 执行中值滤波（这里我们对整个数组应用滤波）
+                                    d_filtered = cundimage.median_filter(d_flux_denoised, size=3)
+                                    # 只更新异常点
+                                    d_flux_denoised[mask_array] = d_filtered[mask_array]
+                                    # 复制回CPU
+                                    flux_denoised = cp.asnumpy(d_flux_denoised)
+                                    # 清理GPU内存
+                                    del d_flux_denoised, d_filtered, mask_array
+                                    cp.get_default_memory_pool().free_all_blocks()
+                                except Exception as e:
+                                    print(f"GPU中值滤波失败，回退到CPU: {e}")
+                                    # 回退到CPU处理
+                                    for idx in np.where(spike_mask)[0]:
+                                        start = max(0, idx - 3)
+                                        end = min(len(flux_denoised), idx + 4)
+                                        if end - start >= 3:  # 确保至少有3个点用于中值计算
+                                            neighbors = flux_denoised[start:end]
+                                            flux_denoised[idx] = np.median(neighbors)
+                            else:
+                                # CPU处理
+                                for idx in np.where(spike_mask)[0]:
+                                    start = max(0, idx - 3)
+                                    end = min(len(flux_denoised), idx + 4)
+                                    if end - start >= 3:  # 确保至少有3个点用于中值计算
+                                        neighbors = flux_denoised[start:end]
+                                        flux_denoised[idx] = np.median(neighbors)
+                    
+                    # 清理GPU内存
+                    del d_valid_flux, d_flux_denoised
+                    cp.get_default_memory_pool().free_all_blocks()
+                    
+                except Exception as e:
+                    print(f"GPU二次去噪失败，回退到CPU: {e}")
+                    # 回退到CPU滤波
+                    from scipy.signal import savgol_filter
+                    flux_denoised[valid_mask] = savgol_filter(valid_flux, standard_window, 2)
+                    
+                    # CPU处理OI区域
+                    if has_oi_anomaly:
+                        oi_valid_mask = oi_region & valid_mask
+                        if np.sum(oi_valid_mask) > oi_window:
+                            oi_indices = np.where(oi_valid_mask)[0]
+                            if len(oi_indices) >= oi_window:
+                                oi_flux_section = flux[oi_valid_mask]
+                                oi_smoothed = savgol_filter(oi_flux_section, oi_window, 3)
+                                flux_denoised[oi_valid_mask] = oi_smoothed
+            else:
+                # 使用CPU版本的SavGol滤波器
+                from scipy.signal import savgol_filter
                 
-            # 如果OI区域有异常，使用更强的滤波参数专门处理
-            if has_oi_anomaly:
-                # 找到OI区域的有效数据点
-                oi_valid_mask = oi_region & valid_mask
-                if np.sum(oi_valid_mask) > oi_window:  # 确保有足够的点进行滤波
-                    try:
-                        # 对OI区域使用更大窗口和更高阶多项式
-                        oi_indices = np.where(oi_valid_mask)[0]
-                        if len(oi_indices) >= oi_window:
-                            oi_flux_section = flux[oi_valid_mask]
-                            # 使用更大窗口进行强平滑
-                            oi_smoothed = savgol_filter(oi_flux_section, oi_window, 3)
-                            flux_denoised[oi_valid_mask] = oi_smoothed
-                            print(f"OI区域增强去噪完成，使用窗口长度= {oi_window}")
-                    except Exception as e:
-                        print(f"OI区域特殊去噪失败: {e}")
-            
-            # 还可以额外进行中值滤波以移除尖峰
-            from scipy.signal import medfilt
-            
-            # 对特别突出的峰值使用中值滤波
-            if has_oi_anomaly:
-                # 寻找异常峰值
-                flux_mean = np.mean(flux_denoised[valid_mask])
-                flux_std = np.std(flux_denoised[valid_mask])
-                spike_threshold = flux_mean + 1.5 * flux_std
+                # 对一般区域应用滤波
+                try:
+                    flux_denoised[valid_mask] = savgol_filter(valid_flux, standard_window, 2)
+                    print(f"二次去噪完成，使用窗口长度= {standard_window}")
+                except Exception as e:
+                    print(f"SavGol滤波失败: {e}")
+                    return flux
+                    
+                # 如果OI区域有异常，使用更强的滤波参数专门处理
+                if has_oi_anomaly:
+                    # 找到OI区域的有效数据点
+                    oi_valid_mask = oi_region & valid_mask
+                    if np.sum(oi_valid_mask) > oi_window:  # 确保有足够的点进行滤波
+                        try:
+                            # 对OI区域使用更大窗口和更高阶多项式
+                            oi_indices = np.where(oi_valid_mask)[0]
+                            if len(oi_indices) >= oi_window:
+                                oi_flux_section = flux[oi_valid_mask]
+                                # 使用更大窗口进行强平滑
+                                oi_smoothed = savgol_filter(oi_flux_section, oi_window, 3)
+                                flux_denoised[oi_valid_mask] = oi_smoothed
+                                print(f"OI区域增强去噪完成，使用窗口长度= {oi_window}")
+                        except Exception as e:
+                            print(f"OI区域特殊去噪失败: {e}")
                 
-                spike_mask = (flux_denoised > spike_threshold) & valid_mask
-                if np.any(spike_mask):
-                    print(f"检测到{np.sum(spike_mask)}个异常峰值点，进行中值滤波")
-                    # 将这些点替换为周围7个点的中值
-                    for idx in np.where(spike_mask)[0]:
-                        start = max(0, idx - 3)
-                        end = min(len(flux_denoised), idx + 4)
-                        if end - start >= 3:  # 确保至少有3个点用于中值计算
-                            neighbors = flux_denoised[start:end]
-                            flux_denoised[idx] = np.median(neighbors)
+                # 对特别突出的峰值使用中值滤波
+                if has_oi_anomaly:
+                    # 寻找异常峰值
+                    flux_mean = np.mean(flux_denoised[valid_mask])
+                    flux_std = np.std(flux_denoised[valid_mask])
+                    spike_threshold = flux_mean + 1.5 * flux_std
+                    
+                    spike_mask = (flux_denoised > spike_threshold) & valid_mask
+                    if np.any(spike_mask):
+                        print(f"检测到{np.sum(spike_mask)}个异常峰值点，进行中值滤波")
+                        # 将这些点替换为周围7个点的中值
+                        for idx in np.where(spike_mask)[0]:
+                            start = max(0, idx - 3)
+                            end = min(len(flux_denoised), idx + 4)
+                            if end - start >= 3:  # 确保至少有3个点用于中值计算
+                                neighbors = flux_denoised[start:end]
+                                flux_denoised[idx] = np.median(neighbors)
             
             # 最后确保没有NaN值
             flux_denoised = np.nan_to_num(flux_denoised, nan=np.median(flux_denoised[valid_mask]))
@@ -3236,6 +3565,10 @@ def main():
                       help='仅处理指定元素的CSV文件，例如: C_FE')
     parser.add_argument('--low_memory_mode', action='store_true', 
                       help='启用低内存模式，减少内存使用但速度变慢')
+    parser.add_argument('--use_gpu', action='store_true',
+                      help='使用GPU加速计算(需要安装CuPy库)')
+    parser.add_argument('--no_gpu', action='store_false', dest='use_gpu',
+                      help='禁用GPU加速，强制使用CPU')
     
     args = parser.parse_args()
     
@@ -3256,6 +3589,22 @@ def main():
         print("检测到系统内存不足，自动启用低内存模式")
         user_choice = input("是否启用低内存模式? 这将减少内存使用但处理速度会变慢 (y/n): ").lower()
         low_memory_mode = user_choice == 'y'
+    
+    # 检查GPU支持
+    use_gpu = args.use_gpu
+    if use_gpu:
+        if not HAS_GPU:
+            print("警告: 要求使用GPU但未找到CuPy库，将使用CPU模式")
+            print("要使用GPU，请安装CuPy库: pip install cupy-cuda11x (根据您的CUDA版本选择合适的包)")
+            use_gpu = False
+        else:
+            # 检查GPU是否可用
+            gpu_available = check_gpu_available()
+            if not gpu_available:
+                print("警告: 未检测到可用的GPU设备，将使用CPU模式")
+                use_gpu = False
+            else:
+                print("🚀 将使用GPU加速计算")
     
     # 设置CSV文件路径
     if args.csv_files is None:
@@ -3370,15 +3719,15 @@ def main():
         csv_files=args.csv_files,
         fits_dir=fits_dir,
         output_dir=output_dir,
-        wavelength_range=None,  # 修改为None，表示将使用最大公有波长范围
-        n_points=None,  # 修改为None，点数将根据波长范围和步长自动计算
-        log_step=0.0001,  # 新增：对数空间中的重采样步长（dex）
-        compute_common_range=True,  # 新增：是否计算最大公有波长范围
- 
-        max_workers=1 if low_memory_mode else 2,  # 低内存模式使用单线程
-        batch_size=5 if low_memory_mode else 20,   # 低内存模式减小批次大小
-        memory_limit=0.7,  # 内存使用阈值
-        low_memory_mode=low_memory_mode  # 低内存模式标志
+        wavelength_range=wavelength_range,  # 使用命令行参数指定的波长范围
+        n_points=args.n_points,
+        log_step=args.log_step,
+        compute_common_range=True,
+        max_workers=args.max_workers if args.max_workers is not None else (1 if low_memory_mode else 2),
+        batch_size=5 if low_memory_mode else args.batch_size,
+        memory_limit=args.memory_limit,
+        low_memory_mode=low_memory_mode,
+        use_gpu=use_gpu  # 添加GPU支持
     )
     
     # 检查数据源
@@ -3397,43 +3746,23 @@ def main():
         return
     
     # 处理所有数据，支持断点续传
-    X, y, elements, filenames = preprocessor.process_all_data(resume=True)
+    X, y, filenames, elements = preprocessor.process_all_data(resume=not args.no_resume)
     
-    if len(X) == 0:
+    if X is None or len(X) == 0:
         print("错误: 没有处理到任何有效数据，请检查fits文件路径和CSV文件")
         return
-    
+        
     # 分割数据集
-    train_dataset, val_dataset, test_dataset = preprocessor.split_dataset(X, y, elements)
+    preprocessor.split_dataset(X, y, elements)
     
-    # 检查用户是否选择了分割数据集
-    if len(val_dataset[0]) == 0:  # 空验证集表示用户选择不分割
-        print("用户选择不分割数据集，使用完整数据集")
-    else:
-        print(f"用户选择分割数据集为训练集、验证集和测试集")
+    # 清理缓存文件查找记录
+    preprocessor._save_files_cache()
     
-    # 可视化几个示例光谱(可选)
-    if len(filenames) > 0 and not low_memory_mode and input("是否可视化示例光谱? (y/n): ").lower() == 'y':
-        print("正在可视化示例光谱...")
-        
-        # 询问用户是否想要通过元素名称可视化
-        vis_by_element = input("是否按元素可视化示例光谱? (y/n): ").lower() == 'y'
-        
-        if vis_by_element:
-            # 用户可以输入特定元素或使用所有元素
-            element_input = input("请输入元素名称(C_FE/MG_FE/CA_FE)，直接回车则处理所有元素: ").strip().upper()
-            element = element_input if element_input in ['C_FE', 'MG_FE', 'CA_FE'] else None
-            
-            # 使用新方法按元素可视化
-            preprocessor.visualize_example_spectra(element)
-        else:
-            # 使用原有方法随机选择样本可视化
-            sample_indices = random.sample(range(len(filenames)), min(3, len(filenames)))
-        for i in sample_indices:
-            preprocessor.visualize_spectrum(filenames[i])
-    
-    print(f"预处理完成，总耗时: {time.time() - start_time:.2f}秒")
-    print(f"处理结果保存在: {os.path.abspath(preprocessor.output_dir)}")
+    # 计算并显示总耗时
+    elapsed_time = time.time() - start_time
+    hours, remainder = divmod(elapsed_time, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    print(f"\n处理完成! 总耗时: {int(hours)}小时 {int(minutes)}分钟 {int(seconds)}秒")
 
 if __name__ == "__main__":
     try:
