@@ -371,7 +371,7 @@ def _save_checkpoint(model, optimizer, scheduler, epoch, loss, element, config):
         'loss': loss,
     }, model_path)
 
-def train(model, train_loader, val_loader, config, device, element):
+def train(model, train_loader, val_loader, num_epochs=50, patience=10, device=None, element=None, config=None):
     """训练模型"""
     logger = logging.getLogger('model')
     
@@ -675,8 +675,23 @@ def train(model, train_loader, val_loader, config, device, element):
     save_training_state(element, 2, config['training']['num_epochs']-1, best_val_loss, 0, True, True)
     
     # 训练结束，保存最终模型
-    # 使用标准命名约定保存最终模型，避免找不到模型文件的问题
-    final_model_path = os.path.join(config.model_config['model_dir'], f'SpectralResCNN_GCN_{element}.pth')
+    # 处理config参数可能是字典或对象的情况
+    if config is not None:
+        if isinstance(config, dict):
+            # config是字典
+            model_dir = config.get('model_config', {}).get('model_dir', 'models')
+        else:
+            # config是对象
+            model_dir = getattr(config, 'model_config', {}).get('model_dir', 'models')
+    else:
+        # 默认目录
+        model_dir = 'models'
+    
+    # 确保目录存在
+    os.makedirs(model_dir, exist_ok=True)
+    
+    # 保存最终模型
+    final_model_path = os.path.join(model_dir, f'SpectralResCNN_GCN_{element}.pth')
     
     # 保存整个模型的state_dict
     try:
@@ -686,14 +701,32 @@ def train(model, train_loader, val_loader, config, device, element):
         logger.error(f"保存最终模型失败: {str(e)}")
         # 尝试备用保存方式
         try:
-            backup_path = os.path.join(config.model_config['model_dir'], f'{element}_model.pth')
+            backup_path = os.path.join(model_dir, f'{element}_model.pth')
             torch.save(model.state_dict(), backup_path)
             logger.info(f"成功保存备用最终模型: {backup_path}")
         except Exception as e2:
             logger.error(f"保存备用最终模型也失败: {str(e2)}")
     
     # 同时保存检查点格式的模型以备后续使用
-    save_checkpoint(model, optimizer, scheduler, epoch, best_val_loss, element, 'best_model')
+    if isinstance(config, dict):
+        checkpoint_dir = config.get('model_config', {}).get('model_dir', 'models')
+    else:
+        checkpoint_dir = getattr(config, 'model_config', {}).get('model_dir', 'models')
+        
+    checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_{element}.pth')
+    
+    try:
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict() if optimizer else None,
+            'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+            'loss': best_val_loss
+        }
+        torch.save(checkpoint, checkpoint_path)
+        logger.info(f"成功保存检查点: {checkpoint_path}")
+    except Exception as e:
+        logger.error(f"保存检查点失败: {str(e)}")
     
     return train_losses, val_losses
 
