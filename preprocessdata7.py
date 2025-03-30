@@ -782,77 +782,52 @@ class LAMOSTPreprocessor:
             print("警告: 归一化失败 - 所有值都是NaN或无穷大")
             return None
         
-        # 将无效值替换为0以便计算
-        flux_valid = flux.copy()
-        flux_valid[invalid_mask] = 0
+        # 获取有效数据点
+        valid_mask = ~invalid_mask
+        if not np.any(valid_mask):
+            print("警告: 归一化失败 - 没有有效数据点")
+            return None
         
-        # 记录归一化前的统计信息
-        flux_min_orig = np.min(flux_valid)
-        flux_max_orig = np.max(flux_valid)
+        # 直接从有效数据中计算最小值和最大值
+        valid_flux = flux[valid_mask]
+        min_val = np.min(valid_flux)
+        max_val = np.max(valid_flux)
         
-        # 如果最大值和最小值相同，则返回全0数组
-        if flux_max_orig == flux_min_orig:
-            print(f"警告: 归一化失败 - 最大值和最小值相同: {flux_max_orig}")
-            return np.zeros_like(flux)
+        print(f"归一化前数据范围: [{min_val:.6f}, {max_val:.6f}]")
         
-        # 进行最大最小归一化 - 确保所有值都在0到1之间
-        flux_norm = (flux_valid - flux_min_orig) / (flux_max_orig - flux_min_orig)
+        # 检查数据范围
+        if max_val == min_val:
+            print(f"警告: 归一化失败 - 所有有效值都相同: {min_val}")
+            # 返回全零数组作为归一化结果
+            normalized_flux = np.zeros_like(flux)
+            normalized_flux[invalid_mask] = np.nan  # 保持无效值为NaN
+            return normalized_flux
         
-        # 记录归一化后的统计信息
-        norm_min = np.min(flux_norm[~invalid_mask])
-        norm_max = np.max(flux_norm[~invalid_mask])
+        # 执行最大最小归一化
+        normalized_flux = np.zeros_like(flux)
+        normalized_flux[valid_mask] = (valid_flux - min_val) / (max_val - min_val)
         
-        # 验证归一化效果
-        if norm_min < 0 or norm_max > 1:
-            print(f"警告: 归一化后范围异常 [{norm_min:.6f}, {norm_max:.6f}]，进行调整")
-            # 重新执行归一化以确保正确
-            flux_norm = np.clip((flux_valid - flux_min_orig) / (flux_max_orig - flux_min_orig), 0, 1)
-            # 再次验证
-            norm_min_fixed = np.min(flux_norm[~invalid_mask])
-            norm_max_fixed = np.max(flux_norm[~invalid_mask])
-            print(f"调整后范围: [{norm_min_fixed:.6f}, {norm_max_fixed:.6f}]")
+        # 确保值在[0,1]范围内 (处理可能的浮点误差)
+        normalized_flux = np.clip(normalized_flux, 0, 1)
         
-        # 确保所有值严格在[0,1]范围内（处理浮点误差）
-        flux_norm = np.clip(flux_norm, 0, 1)
+        # 保持原始的无效值为NaN
+        normalized_flux[invalid_mask] = np.nan
         
-        # 最终验证，确保归一化结果正确
-        final_min = np.min(flux_norm[~invalid_mask])
-        final_max = np.max(flux_norm[~invalid_mask])
+        # 验证归一化结果
+        valid_normalized = normalized_flux[valid_mask]
+        norm_min = np.min(valid_normalized)
+        norm_max = np.max(valid_normalized)
         
-        # 如果结果仍然有问题，使用更直接的方法
-        if final_min < 0 or final_max > 1 or np.isnan(final_min) or np.isnan(final_max):
-            print(f"警告: 归一化仍有问题，使用更直接的方法 [{final_min:.6f}, {final_max:.6f}]")
-            # 直接线性映射到[0,1]范围
-            valid_flux = flux[~invalid_mask]
-            min_val = np.min(valid_flux)
-            max_val = np.max(valid_flux)
-            if max_val > min_val:
-                flux_norm = np.zeros_like(flux)
-                flux_norm[~invalid_mask] = (valid_flux - min_val) / (max_val - min_val)
-                flux_norm = np.clip(flux_norm, 0, 1)
-                print(f"直接线性映射后范围: [{np.min(flux_norm[~invalid_mask]):.6f}, {np.max(flux_norm[~invalid_mask]):.6f}]")
-            else:
-                print(f"无法归一化，有效值范围: [{min_val}, {max_val}]")
-                flux_norm = np.zeros_like(flux)
-        
-        # 恢复无效值为NaN
-        flux_norm[invalid_mask] = np.nan
+        print(f"归一化后数据范围: [{norm_min:.6f}, {norm_max:.6f}]")
         
         # 记录归一化参数供后续使用
         self.normalization_params = {
-            'min': float(flux_min_orig),
-            'max': float(flux_max_orig),
+            'min': float(min_val),
+            'max': float(max_val),
             'wavelength_range': (float(np.min(wavelength)), float(np.max(wavelength))) if wavelength is not None else None
         }
         
-        # 根据详细程度控制输出
-        if self.verbose >= 1:
-            print(f"归一化统计: 原始范围[{flux_min_orig:.6f}, {flux_max_orig:.6f}] → 归一化范围[{final_min:.6f}, {final_max:.6f}]")
-            if wavelength is not None:
-                w_min, w_max = np.min(wavelength), np.max(wavelength)
-                print(f"波长范围: [{w_min:.2f}, {w_max:.2f}]")
-        
-        return flux_norm
+        return normalized_flux
     
     def correct_wavelength(self, wavelength, flux):
         """对光谱进行波长标准化校正
@@ -1348,31 +1323,7 @@ class LAMOSTPreprocessor:
                 print(f"归一化{spec_file}失败")
                 return None
             
-            # 验证归一化结果是否正确
-            valid_mask = ~np.isnan(flux_normalized) & ~np.isinf(flux_normalized)
-            if np.any(valid_mask):
-                actual_min = np.min(flux_normalized[valid_mask])
-                actual_max = np.max(flux_normalized[valid_mask])
-                print(f"最终归一化结果范围: [{actual_min:.6f}, {actual_max:.6f}]")
-                
-                # 如果结果不在[0,1]范围内，再次执行最大最小归一化
-                if actual_min < 0 or actual_max > 1 or abs(actual_min - 0) > 1e-6 or abs(actual_max - 1) > 1e-6:
-                    print("检测到归一化结果不在[0,1]范围内，再次执行归一化")
-                    # 直接使用更简单的方法
-                    flux_normalized_fixed = np.zeros_like(flux_normalized)
-                    flux_normalized_fixed[valid_mask] = (flux_normalized[valid_mask] - actual_min) / (actual_max - actual_min)
-                    flux_normalized = flux_normalized_fixed
-                    # 确保严格在[0,1]范围内
-                    flux_normalized = np.clip(flux_normalized, 0, 1)
-                    
-                    # 再次验证
-                    final_min = np.min(flux_normalized[valid_mask])
-                    final_max = np.max(flux_normalized[valid_mask])
-                    print(f"修正后归一化结果范围: [{final_min:.6f}, {final_max:.6f}]")
-                    
-                    if final_min < 0 or final_max > 1:
-                        print("警告: 尝试所有方法后，归一化结果仍有问题")
-
+            # 不再需要额外的归一化验证，normalize_spectrum已经完成了完整的验证
             print(f"成功处理光谱: {spec_file}")
             
             # 记录标准化参数
@@ -1993,7 +1944,8 @@ class LAMOSTPreprocessor:
                                 print(f"重新计算点数: {self.n_points}")
                         
                         # 如果用户要求，随机可视化几条光谱
-                        if input("是否随机可视化几条光谱? (y/n): ").lower() == 'y':
+                        visualize_choice = input("是否随机可视化几条光谱? (y/n): ").lower()
+                        if visualize_choice == 'y':
                             n_samples = min(len(all_data), 3)
                             try:
                                 samples = random.sample(all_data, n_samples)
@@ -2024,20 +1976,41 @@ class LAMOSTPreprocessor:
                                 traceback.print_exc()
                         
                         # 询问是否需要分割数据集
-                        if input("是否需要划分数据集? (y/n): ").lower() == 'y':
+                        split_choice = input("是否需要划分数据集? (y/n): ").lower()
+                        if split_choice == 'y':
                             print("准备数据用于模型训练")
                             X, y, elements, filenames = self._prepare_arrays(all_data)
                             if X is not None and y is not None:
                                 print(f"准备完成，特征数据形状: {X.shape}, 标签数据形状: {y.shape}")
                                 self.split_dataset(X, y, elements)
+                            return X, y, elements, filenames
                         else:
                             # 即使不划分数据集，也需要准备数组以便返回
                             print("准备数据但不划分数据集")
                             X, y, elements, filenames = self._prepare_arrays(all_data)
                             if X is not None and y is not None:
                                 print(f"准备完成，特征数据形状: {X.shape}, 标签数据形状: {y.shape}")
-                        
-                        return X, y, elements, filenames
+                            
+                            # 用户选择不划分后，跳过main函数中的第二次询问
+                            # 保存完整数据集到单一文件
+                            if X is not None and y is not None:
+                                output_dir = self.output_dir
+                                if not os.path.exists(output_dir):
+                                    os.makedirs(output_dir, exist_ok=True)
+                                
+                                full_dataset_path = os.path.join(output_dir, 'full_dataset.npz')
+                                np.savez(full_dataset_path, spectra=X, abundance=y, elements=elements)
+                                print(f"完整数据集保存完成: {X.shape[0]}条记录，保存到{full_dataset_path}")
+                            
+                            # 如果用户选择不划分数据集但想要可视化示例，在此处理
+                            if visualize_choice != 'y' and input("是否可视化示例光谱? (y/n): ").lower() == 'y':
+                                if filenames is not None and len(filenames) > 0:
+                                    print("正在可视化示例光谱...")
+                                    sample_indices = random.sample(range(len(filenames)), min(3, len(filenames)))
+                                    for i in sample_indices:
+                                        self.visualize_spectrum(filenames[i], processed=True, save=True)
+                            
+                            return X, y, elements, filenames
                     else:
                         print("不使用缓存，重新处理数据")
             except Exception as e:
@@ -2425,130 +2398,110 @@ class LAMOSTPreprocessor:
             from_all_data: 是否来自已处理的总数据
             sample_data: 直接传入的样本数据（如果有）
         """
-        if processed:
-            # 如果有直接传入的样本数据，优先使用
-            if sample_data is not None:
-                print(f"使用传入的处理数据进行可视化: {spec_file}")
-                
-                # 检查sample_data是否为字符串类型（不是预期的字典类型）
-                if isinstance(sample_data, str):
-                    print(f"警告: 传入的sample_data是字符串 '{sample_data}' 而不是预期的字典")
-                    # 检查是否有缓存
-                    cache_key = f"processed_{spec_file.replace('/', '_')}"
-                    cached_data = self.cache_manager.get_cache(cache_key)
-                    if cached_data is not None:
-                        print(f"找到缓存数据，使用缓存代替字符串值")
-                        processed_data = cached_data
-                    else:
-                        # 如果没有缓存，单独处理这个光谱
-                        print(f"没有找到缓存，尝试单独处理该光谱: {spec_file}")
-                        processed_data = self.process_single_spectrum(spec_file, 0.0)  # 使用占位符标签
-                        if processed_data is None:
-                            print(f"无法处理文件: {spec_file}")
-                            return
-                else:
-                    processed_data = sample_data
+        print(f"开始可视化光谱: {spec_file}")
+        
+        # 处理缓存键
+        spec_file_base = os.path.basename(spec_file) if spec_file else "unknown"
+        cache_key = f"processed_{spec_file_base.replace('/', '_')}"
+        
+        processed_data = None
+        
+        # 尝试获取处理数据的顺序:
+        # 1. 使用传入的样本数据(如果是字典类型)
+        # 2. 从缓存获取
+        # 3. 处理新的光谱
+        
+        if sample_data is not None and isinstance(sample_data, dict):
+            print(f"使用传入的字典类型样本数据")
+            processed_data = sample_data
+        elif sample_data is not None and isinstance(sample_data, str):
+            print(f"传入的样本数据是字符串类型: '{sample_data}'，将尝试从缓存查找")
+            # 对于字符串类型的样本，我们只使用它作为文件名查找缓存
+            spec_file = sample_data
+            cache_key = f"processed_{spec_file.replace('/', '_')}"
+        
+        # 如果没有有效的处理数据，尝试从缓存获取
+        if processed_data is None:
+            print(f"尝试从缓存获取光谱数据: {cache_key}")
+            cached_data = self.cache_manager.get_cache(cache_key)
+            
+            if cached_data is not None:
+                print(f"成功从缓存加载光谱数据")
+                processed_data = cached_data
             else:
-                # 检查是否有缓存
-                cache_key = f"processed_{spec_file.replace('/', '_')}"
-                cached_data = self.cache_manager.get_cache(cache_key)
+                # 如果没找到直接匹配的缓存，尝试列出所有可能匹配的缓存文件
+                print(f"没有找到精确匹配的光谱缓存")
+                matching_files = []
                 
-                # 如果没找到缓存，尝试列出所有可能匹配的缓存文件
-                if cached_data is None:
-                    print(f"没有找到光谱缓存: {cache_key}")
-                    # 列出cache目录中的文件，找到可能的匹配项
-                    if os.path.exists(self.cache_dir):
-                        cache_files = [os.path.basename(f) for f in glob.glob(os.path.join(self.cache_dir, "*.pkl"))]
-                        print(f"缓存目录中有 {len(cache_files)} 个文件")
-                        matching_files = [f for f in cache_files if spec_file.replace('/', '_') in f]
-                        if matching_files:
-                            print(f"找到可能匹配的缓存文件: {matching_files}")
+                if os.path.exists(self.cache_dir):
+                    cache_files = [os.path.basename(f) for f in glob.glob(os.path.join(self.cache_dir, "*.pkl"))]
+                    print(f"缓存目录中有 {len(cache_files)} 个文件")
                     
-                    # 如果没有缓存，单独处理这个光谱而不影响整体处理流程
-                    print(f"没有找到处理后的光谱缓存，只处理该光谱用于可视化: {spec_file}")
-                    processed_data = self.process_single_spectrum(spec_file, 0.0)  # 使用占位符标签
-                    if processed_data is None:
-                        print(f"无法处理文件: {spec_file}")
-                        return
-                else:
-                    print(f"成功加载光谱缓存: {cache_key}")
-                    processed_data = cached_data
-            
-            # 检查processed_data是否是字典类型
-            if not isinstance(processed_data, dict):
-                print(f"错误: processed_data不是字典类型，而是 {type(processed_data)}")
-                return
+                    # 尝试两种匹配方式
+                    spec_key = spec_file.replace('/', '_')
+                    matching_files = [f for f in cache_files if spec_key in f]
+                    
+                    if not matching_files and '.' in spec_key:
+                        # 尝试不带扩展名匹配
+                        spec_key_no_ext = spec_key.split('.')[0]
+                        matching_files = [f for f in cache_files if spec_key_no_ext in f]
+                    
+                    if matching_files:
+                        print(f"找到可能匹配的缓存文件: {matching_files}")
+                        
+                        # 尝试加载第一个匹配的文件
+                        try:
+                            best_match = matching_files[0]
+                            cache_path = os.path.join(self.cache_dir, best_match)
+                            with open(cache_path, 'rb') as f:
+                                processed_data = pickle.load(f)
+                            print(f"成功加载匹配的缓存文件: {best_match}")
+                        except Exception as e:
+                            print(f"加载匹配的缓存文件失败: {e}")
                 
-            # 提取数据，支持新旧缓存结构
-            if 'metadata' in processed_data:
-                metadata = processed_data['metadata']
-                original_wavelength = metadata.get('original_wavelength')
-                original_flux = metadata.get('original_flux')
-                wavelength_calibrated = metadata.get('wavelength_calibrated')
-                wavelength_corrected = metadata.get('wavelength_corrected')
-                wavelength_rest = metadata.get('wavelength_rest')
-                denoised_flux = metadata.get('denoised_flux')
-                wavelength_resampled = metadata.get('wavelength_resampled')
-                flux_resampled = metadata.get('flux_resampled')
-                flux_continuum = metadata.get('flux_continuum')
-                flux_denoised_second = metadata.get('flux_denoised_second')
-                z = metadata.get('z', 0)
-                spectrum = processed_data.get('data')
-            else:
-                # 兼容旧格式
-                original_wavelength = processed_data.get('original_wavelength')
-                original_flux = processed_data.get('original_flux')
-                wavelength_calibrated = processed_data.get('wavelength_calibrated')
-                wavelength_corrected = processed_data.get('wavelength_corrected')
-                wavelength_rest = processed_data.get('wavelength_rest')
-                denoised_flux = processed_data.get('denoised_flux')
-                wavelength_resampled = processed_data.get('wavelength_resampled')
-                flux_resampled = processed_data.get('flux_resampled')
-                flux_continuum = processed_data.get('flux_continuum')
-                flux_denoised_second = processed_data.get('flux_denoised_second')
-                z = processed_data.get('z', 0)
-                spectrum = processed_data.get('spectrum') or processed_data.get('data')
-        else:
-            # 如果没有请求处理后光谱，则使用原始光谱进行处理并显示，但不影响整体处理流程
+        # 如果仍然没有处理数据，尝试处理光谱
+        if processed_data is None:
+            print(f"没有找到缓存数据，处理光谱: {spec_file}")
             processed_data = self.process_single_spectrum(spec_file, 0.0)  # 使用占位符标签
-            if processed_data is None:
-                print(f"无法处理文件: {spec_file}")
-                return
             
-            # 检查processed_data是否是字典类型
-            if not isinstance(processed_data, dict):
-                print(f"错误: processed_data不是字典类型，而是 {type(processed_data)}")
+            if processed_data is None:
+                print(f"处理光谱失败: {spec_file}")
                 return
+        
+        # 检查processed_data是否是字典类型
+        if not isinstance(processed_data, dict):
+            print(f"错误: processed_data不是字典类型，而是 {type(processed_data)}")
+            return
                 
-            # 提取数据    
-            if 'metadata' in processed_data:
-                metadata = processed_data['metadata']
-                original_wavelength = metadata.get('original_wavelength')
-                original_flux = metadata.get('original_flux')
-                wavelength_calibrated = metadata.get('wavelength_calibrated')
-                wavelength_corrected = metadata.get('wavelength_corrected')
-                wavelength_rest = metadata.get('wavelength_rest')
-                denoised_flux = metadata.get('denoised_flux')
-                wavelength_resampled = metadata.get('wavelength_resampled')
-                flux_resampled = metadata.get('flux_resampled')
-                flux_continuum = metadata.get('flux_continuum')
-                flux_denoised_second = metadata.get('flux_denoised_second')
-                z = metadata.get('z', 0)
-                spectrum = processed_data.get('data')
-            else:
-                # 兼容旧格式
-                original_wavelength = processed_data.get('original_wavelength')
-                original_flux = processed_data.get('original_flux')
-                wavelength_calibrated = processed_data.get('wavelength_calibrated')
-                wavelength_corrected = processed_data.get('wavelength_corrected')
-                wavelength_rest = processed_data.get('wavelength_rest')
-                denoised_flux = processed_data.get('denoised_flux')
-                wavelength_resampled = processed_data.get('wavelength_resampled')
-                flux_resampled = processed_data.get('flux_resampled')
-                flux_continuum = processed_data.get('flux_continuum')
-                flux_denoised_second = processed_data.get('flux_denoised_second')
-                z = processed_data.get('z', 0)
-                spectrum = processed_data.get('spectrum') or processed_data.get('data')
+        # 提取数据，支持新旧缓存结构
+        if 'metadata' in processed_data:
+            metadata = processed_data['metadata']
+            original_wavelength = metadata.get('original_wavelength')
+            original_flux = metadata.get('original_flux')
+            wavelength_calibrated = metadata.get('wavelength_calibrated')
+            wavelength_corrected = metadata.get('wavelength_corrected')
+            wavelength_rest = metadata.get('wavelength_rest')
+            denoised_flux = metadata.get('denoised_flux')
+            wavelength_resampled = metadata.get('wavelength_resampled')
+            flux_resampled = metadata.get('flux_resampled')
+            flux_continuum = metadata.get('flux_continuum')
+            flux_denoised_second = metadata.get('flux_denoised_second')
+            z = metadata.get('z', 0)
+            spectrum = processed_data.get('data')
+        else:
+            # 兼容旧格式
+            original_wavelength = processed_data.get('original_wavelength')
+            original_flux = processed_data.get('original_flux')
+            wavelength_calibrated = processed_data.get('wavelength_calibrated')
+            wavelength_corrected = processed_data.get('wavelength_corrected')
+            wavelength_rest = processed_data.get('wavelength_rest')
+            denoised_flux = processed_data.get('denoised_flux')
+            wavelength_resampled = processed_data.get('wavelength_resampled')
+            flux_resampled = processed_data.get('flux_resampled')
+            flux_continuum = processed_data.get('flux_continuum')
+            flux_denoised_second = processed_data.get('flux_denoised_second')
+            z = processed_data.get('z', 0)
+            spectrum = processed_data.get('spectrum') or processed_data.get('data')
         
         # 设置字体和图形样式
         plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial']
@@ -2867,31 +2820,7 @@ class LAMOSTPreprocessor:
                 print(f"归一化{spec_file}失败")
                 return None
             
-            # 验证归一化结果是否正确
-            valid_mask = ~np.isnan(flux_normalized) & ~np.isinf(flux_normalized)
-            if np.any(valid_mask):
-                actual_min = np.min(flux_normalized[valid_mask])
-                actual_max = np.max(flux_normalized[valid_mask])
-                print(f"最终归一化结果范围: [{actual_min:.6f}, {actual_max:.6f}]")
-                
-                # 如果结果不在[0,1]范围内，再次执行最大最小归一化
-                if actual_min < 0 or actual_max > 1 or abs(actual_min - 0) > 1e-6 or abs(actual_max - 1) > 1e-6:
-                    print("检测到归一化结果不在[0,1]范围内，再次执行归一化")
-                    # 直接使用更简单的方法
-                    flux_normalized_fixed = np.zeros_like(flux_normalized)
-                    flux_normalized_fixed[valid_mask] = (flux_normalized[valid_mask] - actual_min) / (actual_max - actual_min)
-                    flux_normalized = flux_normalized_fixed
-                    # 确保严格在[0,1]范围内
-                    flux_normalized = np.clip(flux_normalized, 0, 1)
-                    
-                    # 再次验证
-                    final_min = np.min(flux_normalized[valid_mask])
-                    final_max = np.max(flux_normalized[valid_mask])
-                    print(f"修正后归一化结果范围: [{final_min:.6f}, {final_max:.6f}]")
-                    
-                    if final_min < 0 or final_max > 1:
-                        print("警告: 尝试所有方法后，归一化结果仍有问题")
-
+            # 不再需要额外的归一化验证，normalize_spectrum已经完成了完整的验证
             print(f"成功处理光谱: {spec_file}")
             
             spectrum = flux_normalized
@@ -3535,25 +3464,17 @@ def main():
         print("错误: 没有处理到任何有效数据，请检查fits文件路径和CSV文件")
         return
     
-    # 分割数据集
-    # 只有当X, y, elements都有效时才进行划分
-    if X is not None and y is not None and elements is not None:
-        train_dataset, val_dataset, test_dataset = preprocessor.split_dataset(X, y, elements)
-        
-        # 检查用户是否选择了分割数据集
-        if val_dataset[0].size == 0:  # 空验证集表示用户选择不分割
-            print("用户选择不分割数据集，使用完整数据集")
-        else:
-            print(f"用户选择分割数据集为训练集、验证集和测试集")
+    # 检查是否已经在process_all_data函数中完成了数据集划分
+    # 如果没有full_dataset.npz文件，说明用户选择了划分数据集
+    full_dataset_path = os.path.join(preprocessor.output_dir, 'full_dataset.npz')
+    if not os.path.exists(full_dataset_path):
+        # 用户选择了数据集划分
+        print("用户已选择分割数据集为训练集、验证集和测试集")
     else:
-        print("数据无效，跳过数据集划分")
+        # 用户选择不分割，使用完整数据集
+        print("用户选择不分割数据集，使用完整数据集")
     
-    # 可视化几个示例光谱(可选)
-    if filenames is not None and len(filenames) > 0 and not low_memory_mode and input("是否可视化示例光谱? (y/n): ").lower() == 'y':
-        print("正在可视化示例光谱...")
-        sample_indices = random.sample(range(len(filenames)), min(3, len(filenames)))
-        for i in sample_indices:
-            preprocessor.visualize_spectrum(filenames[i])
+    # 可视化部分不再主动询问，因为在process_all_data中已经询问并处理
     
     print(f"预处理完成，总耗时: {time.time() - start_time:.2f}秒")
     print(f"处理结果保存在: {os.path.abspath(preprocessor.output_dir)}")
