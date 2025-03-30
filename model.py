@@ -1693,9 +1693,9 @@ class SpectralResCNN_GCN(nn.Module):
         # 特征提取层
         self.feature_extractor = nn.Sequential(
             nn.Conv1d(1, 64, kernel_size=7, padding=3),
-            nn.BatchNorm1d(64, momentum=0.1),  # 更大的动量
+            nn.BatchNorm1d(64, momentum=0.01),  
             nn.ReLU(),
-            nn.Dropout(0.1),  # 添加小的dropout
+            nn.Dropout(0.2),  # 添加dropout
             nn.MaxPool1d(2)
         )
         
