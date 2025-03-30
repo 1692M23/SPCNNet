@@ -1049,11 +1049,7 @@ def load_processed_data(element, data_type='train', use_main_dataset=False, data
     else:
         try:
             # 尝试加载特定元素的数据
-            data_file = os.path.join('processed_data', f'{data_type}_dataset_{element}.npz')
-            
-            # 如果特定元素数据不存在，尝试加载通用数据
-            if not os.path.exists(data_file):
-                data_file = os.path.join('processed_data', f'{data_type}_dataset.npz')
+            data_file = os.path.join('processed_data', f'{data_type}_dataset.npz')
             
             if not os.path.exists(data_file):
                 logger.error(f"找不到数据文件: {data_file}")
@@ -1062,9 +1058,40 @@ def load_processed_data(element, data_type='train', use_main_dataset=False, data
             data = np.load(data_file)
             
             # 提取特征和标签
-            if 'spectra' in data and element in data:
+            if 'spectra' in data:
                 X = data['spectra']
-                y = data[element]
+                # 如果abundance字段存在
+                if 'abundance' in data:
+                    # 检查abundance是多维还是一维
+                    if len(data['abundance'].shape) > 1:
+                        # 如果是多维，尝试从elements中获取索引
+                        if 'elements' in data and element in str(data['elements']):
+                            elements_dict = {e: i for i, e in enumerate(data['elements'])}
+                            if element in elements_dict:
+                                y = data['abundance'][:, elements_dict[element]]
+                            else:
+                                # 尝试直接按元素名称查找列
+                                try:
+                                    y = data[element]
+                                except:
+                                    logger.error(f"找不到元素 {element} 的丰度数据")
+                                    return None, None
+                        else:
+                            # 尝试直接使用abundance的第一列
+                            y = data['abundance'][:, 0]
+                            logger.warning(f"使用丰度数据的第一列作为 {element} 的丰度")
+                    else:
+                        # 一维，直接使用
+                        y = data['abundance']
+                elif element in data:
+                    # 如果元素字段存在
+                    y = data[element]
+                else:
+                    # 尝试使用 'y' 字段
+                    y = data['y'] if 'y' in data else None
+                    if y is None:
+                        logger.error(f"找不到 {element} 的相关数据")
+                        return None, None
             elif 'X' in data and 'y' in data:
                 X = data['X']
                 y = data['y']
@@ -1175,7 +1202,7 @@ def main():
     
     parser = argparse.ArgumentParser(description='基线模型训练与评估')
     parser.add_argument('--element', type=str, required=True,
-                       help='元素名称，如C_FE')
+                       help='元素名称，如CA_FE')
     parser.add_argument('--model', type=str, default='xgboost',
                       choices=['xgboost', 'lightgbm', 'both'],
                       help='模型类型，默认为xgboost')
@@ -1205,6 +1232,28 @@ def main():
                       help='数据集路径，{type}会被替换为train/val/test')
     parser.add_argument('--device', type=str, default=None,
                        help='计算设备，可选值: cpu, cuda, tpu')
+    
+    # 添加直接设置超参数的命令行参数
+    parser.add_argument('--lr', type=float, default=None,
+                       help='学习率')
+    parser.add_argument('--weight_decay', type=float, default=None,
+                       help='权重衰减')
+    parser.add_argument('--max_depth', type=int, default=None,
+                       help='XGBoost/LightGBM的最大树深度')
+    parser.add_argument('--n_estimators', type=int, default=None,
+                       help='XGBoost/LightGBM的树数量')
+    parser.add_argument('--subsample', type=float, default=None,
+                       help='XGBoost/LightGBM的样本抽样比例')
+    parser.add_argument('--colsample_bytree', type=float, default=None,
+                       help='XGBoost/LightGBM的特征抽样比例')
+    parser.add_argument('--early_stopping_rounds', type=int, default=None,
+                       help='XGBoost/LightGBM的早停轮数')
+    parser.add_argument('--min_child_weight', type=int, default=None,
+                       help='XGBoost的最小子节点权重')
+    parser.add_argument('--num_leaves', type=int, default=None,
+                       help='LightGBM的叶子节点数')
+    parser.add_argument('--seed', type=int, default=None,
+                       help='随机种子')
     
     args = parser.parse_args()
     
@@ -1238,9 +1287,61 @@ def main():
                 device = 'cpu'
         else:
             device = args.device
+    
+    # 设置通过命令行指定的超参数
+    xgb_params = {}
+    lgb_params = {}
+    
+    if args.lr is not None:
+        xgb_params['learning_rate'] = args.lr
+        lgb_params['learning_rate'] = args.lr
+    
+    if args.weight_decay is not None:
+        xgb_params['reg_lambda'] = args.weight_decay * 1000
+        lgb_params['reg_lambda'] = args.weight_decay * 1000
+    
+    if args.max_depth is not None:
+        xgb_params['max_depth'] = args.max_depth
+        # LightGBM中-1表示无限制
+        lgb_params['max_depth'] = args.max_depth
+    
+    if args.n_estimators is not None:
+        xgb_params['n_estimators'] = args.n_estimators
+        lgb_params['n_estimators'] = args.n_estimators
+    
+    if args.subsample is not None:
+        xgb_params['subsample'] = args.subsample
+        lgb_params['subsample'] = args.subsample
+    
+    if args.colsample_bytree is not None:
+        xgb_params['colsample_bytree'] = args.colsample_bytree
+        lgb_params['colsample_bytree'] = args.colsample_bytree
+    
+    if args.early_stopping_rounds is not None:
+        xgb_params['early_stopping_rounds'] = args.early_stopping_rounds
+        lgb_params['early_stopping_rounds'] = args.early_stopping_rounds
+    
+    if args.min_child_weight is not None:
+        xgb_params['min_child_weight'] = args.min_child_weight
+    
+    if args.num_leaves is not None:
+        lgb_params['num_leaves'] = args.num_leaves
+    
+    if args.seed is not None:
+        xgb_params['seed'] = args.seed
+        lgb_params['seed'] = args.seed
+    
+    # 如果有命令行参数，则更新模型参数
+    if xgb_params:
+        logger.info(f"使用命令行指定的XGBoost参数: {xgb_params}")
+        XGBoostModel.params.update(xgb_params)
+    
+    if lgb_params:
+        logger.info(f"使用命令行指定的LightGBM参数: {lgb_params}")
+        LightGBMModel.params.update(lgb_params)
             
-    # 加载最优超参数
-    if args.use_optimal_params:
+    # 加载最优超参数（只有在未通过命令行指定参数时才使用最优参数）
+    if args.use_optimal_params and not xgb_params and not lgb_params:
         params_file = args.optimal_params_file.replace('{element}', args.element)
         if os.path.exists(params_file):
             with open(params_file, 'r') as f:
