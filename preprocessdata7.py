@@ -2428,12 +2428,14 @@ class LAMOSTPreprocessor:
                 
                 plt.tight_layout()
                 if save:
-                    output_dir = os.path.join('output', 'visualizations')
-                    os.makedirs(output_dir, exist_ok=True)
-                    plt.savefig(os.path.join(output_dir, f'{os.path.basename(filename)}_processed.png'))
+                    # 直接保存到self.output_dir目录下
+                    output_file = os.path.join(self.output_dir, f"{os.path.basename(filename)}_visualization.png")
+                    plt.savefig(output_file, dpi=150)
+                    print(f"图像已保存到: {output_file}")
+                    plt.close()
                 else:
                     plt.show()
-                plt.close()
+                    plt.close()
                 return True
             except Exception as e:
                 print(f"从样本数据可视化时出错: {e}")
