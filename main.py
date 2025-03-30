@@ -22,7 +22,7 @@ import traceback
 import config
 from model import SpectralResCNN, SpectralResCNN_GCN, SpectralResCNNEnsemble, train, evaluate_model, load_trained_model
 from evaluation import evaluate_all_elements, plot_predictions_vs_true, plot_metrics_comparison
-from utils import CacheManager, ProgressManager, ask_clear_cache, setup_analysis_directories
+from utils import CacheManager, ProgressManager, ask_clear_cache, setup_analysis_directories, set_seed
 from multi_element_processor import MultiElementProcessor
 from fits_cache import FITSCache
 from hyperparameter_tuning_replacement import hyperparameter_tuning
@@ -1246,8 +1246,28 @@ def use_preprocessor(task='train', element='MG_FE', input_file=None, output_dir=
         logger.error(traceback.format_exc())
         return {'success': False, 'error': str(e)}
 
+def parse_args():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(description='光谱数据分析')
+    
+    # 添加随机种子参数
+    parser.add_argument('--seed', type=int, default=42, help='随机种子，用于结果复现')
+    
+    # 其他原有参数...
+    
+    return parser.parse_args()
+
 def main():
-    """主函数：处理命令行参数并执行相应操作"""
+    """程序主入口函数"""
+    # 解析命令行参数
+    args = parse_args()
+    
+    # 设置随机种子
+    if hasattr(args, 'seed') and args.seed is not None:
+        set_seed(args.seed)
+    else:
+        set_seed(42)  # 使用默认种子
+    
     logger = logging.getLogger('main')
     logger.info("开始处理命令行参数")
     

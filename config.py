@@ -187,7 +187,7 @@ tuning_config = {
         'batch_size': [32, 64, 128],
         'weight_decay': [1e-6, 1e-5, 1e-4]
     },
-    'early_stopping_patience': 15,     # 调优时的早停耐心值
+    'early_stopping_patience': 20,     # 调优时的早停耐心值
     
     # 两阶段优化配置
     'two_stage': {
