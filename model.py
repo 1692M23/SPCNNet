@@ -469,7 +469,23 @@ def train(model, train_loader, val_loader, num_epochs=50, patience=10, device=No
     optimizer = optim.Adam(model.parameters(), 
                           lr=config['training']['lr'],
                           weight_decay=config['training']['weight_decay'])
-    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
+    
+    # 在train函数中修改创建scheduler的代码部分
+    if 'scheduler' in config['training'] and config['training']['scheduler'] == 'cosine':
+        scheduler_params = config['training'].get('scheduler_params', {})
+        T_0 = scheduler_params.get('T_0', 5)
+        T_mult = scheduler_params.get('T_mult', 1)
+        eta_min = scheduler_params.get('eta_min', 1e-6)
+        
+        scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, 
+            T_0=T_0,
+            T_mult=T_mult,
+            eta_min=eta_min
+        )
+    else:
+        # 默认调度器
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
     
     # 如果恢复训练，尝试加载模型和优化器状态
     if resume_training:
@@ -485,7 +501,7 @@ def train(model, train_loader, val_loader, num_epochs=50, patience=10, device=No
                 logger.warning(f"加载模型和优化器状态失败: {str(e)}")
     
     # 设置损失函数
-    criterion = nn.MSELoss()
+    criterion = nn.SmoothL1Loss(beta=0.1)  # 使用Huber Loss
     
     # 训练记录
     train_losses = []
@@ -1677,8 +1693,9 @@ class SpectralResCNN_GCN(nn.Module):
         # 特征提取层
         self.feature_extractor = nn.Sequential(
             nn.Conv1d(1, 64, kernel_size=7, padding=3),
-            nn.BatchNorm1d(64),
+            nn.BatchNorm1d(64, momentum=0.01),  # 降低动量，使统计更稳定
             nn.ReLU(),
+            nn.Dropout(0.2),  # 添加dropout
             nn.MaxPool1d(2)
         )
         

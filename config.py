@@ -12,6 +12,7 @@ import logging
 import json
 import time
 import pickle
+import torch.optim as optim
 
 # 处理torch_xla导入问题
 try:
@@ -169,7 +170,12 @@ training_config = {
         'use_xla_compilation': True,  # 是否使用XLA编译加速
         'use_dynamic_shapes': False,  # 是否使用动态形状（某些操作在TPU上需要固定形状）
     },
-    'scheduler': 'cosine',  # 余弦退火学习率
+    'scheduler': 'cosine',  # 调度器类型
+    'scheduler_params': {
+        'T_0': 5,          # 初始周期长度
+        'T_mult': 1,       # 周期倍增因子
+        'eta_min': 5e-6    # 最小学习率
+    },
     'lr_min': 1e-6  # 最小学习率
 }
 
@@ -181,7 +187,7 @@ tuning_config = {
         'batch_size': [32, 64, 128],
         'weight_decay': [1e-6, 1e-5, 1e-4]
     },
-    'early_stopping_patience': 10,     # 调优时的早停耐心值
+    'early_stopping_patience': 15,     # 调优时的早停耐心值
     
     # 两阶段优化配置
     'two_stage': {
@@ -473,3 +479,11 @@ class Config:
 
     # 第一阶段保持0.0005
     # 第二阶段降低到0.00005 
+
+# 替换为调度器参数配置:
+scheduler_config = {
+    'type': 'cosine',
+    'T_0': 10,        # 初始周期长度
+    'T_mult': 1,     # 周期倍增因子
+    'eta_min': 5e-6  # 最小学习率
+} 
