@@ -316,6 +316,22 @@ def train_and_evaluate_model(train_loader, val_loader, test_loader, element, con
         )
         logger.info(f"{element}模型性能分析完成, 结果保存在results目录")
     
+    # 添加数据集规范化一致性检查
+    try:
+        train_mean = calculate_dataset_stats(train_loader)
+        val_mean = calculate_dataset_stats(val_loader)
+        test_mean = calculate_dataset_stats(test_loader)
+        
+        logger.info(f"训练集平均值: {train_mean:.4f}")
+        logger.info(f"验证集平均值: {val_mean:.4f}")
+        logger.info(f"测试集平均值: {test_mean:.4f}")
+        
+        # 检查数据集分布是否存在显著差异
+        if abs(train_mean - test_mean) > 0.5:
+            logger.warning(f"训练集和测试集分布存在显著差异！")
+    except Exception as e:
+        logger.warning(f"检查数据集统计信息时出错: {e}")
+    
     return best_model, best_val_loss, test_metrics
 
 def hyperparameter_tuning(element, train_loader, val_loader, grid=None, device=None):
@@ -590,8 +606,8 @@ class TrainingStateManager:
         
         checkpoint = {
             'epoch': epoch,
-            'model_state_dict': model.state_dict(),  # 只保存权重
-            'optimizer_state_dict': optimizer.state_dict() if optimizer else None,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
             'loss': loss
         }
@@ -1585,71 +1601,6 @@ def main():
         # 使用训练好的模型进行预测
         for element in elements:
             logger.info(f"使用 {element} 模型进行预测")
-
-def save_checkpoint(model, optimizer, scheduler, epoch, loss, element, checkpoint_type='checkpoint'):
-    """保存训练检查点，修复递归深度问题"""
-    # 确保模型目录存在
-    os.makedirs(config.model_config['model_dir'], exist_ok=True)
-    checkpoint_path = os.path.join(config.model_config['model_dir'], f'{checkpoint_type}_{element}.pth')
-    
-    # 只保存状态字典，而不是整个模型实例
-    checkpoint = {
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),  # 只保存权重
-        'optimizer_state_dict': optimizer.state_dict() if optimizer else None,
-        'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
-        'loss': loss
-    }
-    
-    try:
-        torch.save(checkpoint, checkpoint_path)
-        logger.info(f"成功保存检查点: {checkpoint_path}")
-        return True
-    except Exception as e:
-        logger.error(f"保存检查点失败: {str(e)}")
-        return False
-
-def load_checkpoint(model, optimizer, scheduler, element, checkpoint_type='checkpoint'):
-    """加载训练检查点，兼容新旧格式"""
-    checkpoint_path = os.path.join(config.model_config['model_dir'], f'{checkpoint_type}_{element}.pth')
-    
-    if not os.path.exists(checkpoint_path):
-        logger.warning(f"找不到检查点文件: {checkpoint_path}")
-        return None, None, None, 0, float('inf')
-    
-    try:
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        
-        # 处理新格式检查点（包含state_dict）
-        if 'model_state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['model_state_dict'])
-            
-            if optimizer is not None and 'optimizer_state_dict' in checkpoint:
-                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                
-            if scheduler is not None and 'scheduler_state_dict' in checkpoint:
-                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-                
-            epoch = checkpoint.get('epoch', 0)
-            loss = checkpoint.get('loss', float('inf'))
-        # 处理旧格式检查点（保存整个模型）
-        elif 'model' in checkpoint:
-            logger.warning("加载旧格式检查点，可能会出现问题")
-            model = checkpoint['model']
-            optimizer = checkpoint.get('optimizer')
-            scheduler = checkpoint.get('scheduler')
-            epoch = checkpoint.get('epoch', 0)
-            loss = checkpoint.get('loss', float('inf'))
-        else:
-            logger.error("未知的检查点格式")
-            return model, optimizer, scheduler, 0, float('inf')
-        
-        logger.info(f"成功加载检查点 (轮次 {epoch}): {checkpoint_path}")
-        return model, optimizer, scheduler, epoch, loss
-        
-    except Exception as e:
-        logger.error(f"加载检查点失败: {str(e)}")
-        return model, optimizer, scheduler, 0, float('inf')
 
 if __name__ == '__main__':
     main() 
