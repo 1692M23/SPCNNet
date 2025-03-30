@@ -763,14 +763,14 @@ class LAMOSTPreprocessor:
     
     def normalize_spectrum(self, wavelength, flux):
         """
-        对光谱进行最大最小归一化处理
+        对光谱进行最大最小归一化处理，确保结果严格在[0,1]范围内
         
         参数:
             wavelength (ndarray): 波长数组
             flux (ndarray): 原始光谱强度
             
         返回:
-            ndarray: 归一化后的光谱强度
+            ndarray: 归一化后的光谱强度，范围严格在[0,1]之间
         """
         if flux is None or len(flux) == 0:
             print("警告: 归一化失败 - 输入光谱为空")
@@ -795,10 +795,20 @@ class LAMOSTPreprocessor:
             print(f"警告: 归一化失败 - 最大值和最小值相同: {flux_max_orig}")
             return np.zeros_like(flux)
         
-        # 进行最大最小归一化
+        # 进行最大最小归一化 - 确保所有值都在0到1之间
         flux_norm = (flux_valid - flux_min_orig) / (flux_max_orig - flux_min_orig)
         
-        # 确保归一化后的值在[0,1]范围内
+        # 记录归一化后的统计信息
+        norm_min = np.min(flux_norm[~invalid_mask])
+        norm_max = np.max(flux_norm[~invalid_mask])
+        
+        # 验证归一化效果
+        if norm_min < 0 or norm_max > 1:
+            print(f"警告: 归一化后范围异常 [{norm_min:.4f}, {norm_max:.4f}]，进行调整")
+            # 重新执行归一化以确保正确
+            flux_norm = (flux_valid - flux_min_orig) / (flux_max_orig - flux_min_orig)
+        
+        # 确保所有值严格在[0,1]范围内（处理浮点误差）
         flux_norm = np.clip(flux_norm, 0, 1)
         
         # 恢复无效值为NaN
@@ -813,7 +823,7 @@ class LAMOSTPreprocessor:
         
         # 根据详细程度控制输出
         if self.verbose >= 1:
-            print(f"归一化统计: 原始范围[{flux_min_orig:.4f}, {flux_max_orig:.4f}]")
+            print(f"归一化统计: 原始范围[{flux_min_orig:.4f}, {flux_max_orig:.4f}] → 归一化范围[{norm_min:.4f}, {norm_max:.4f}]")
         
         return flux_norm
     
@@ -1311,6 +1321,20 @@ class LAMOSTPreprocessor:
                 print(f"归一化{spec_file}失败")
                 return None
             
+            # 验证归一化结果是否正确
+            valid_mask = ~np.isnan(flux_normalized) & ~np.isinf(flux_normalized)
+            if np.any(valid_mask):
+                actual_min = np.min(flux_normalized[valid_mask])
+                actual_max = np.max(flux_normalized[valid_mask])
+                print(f"最终归一化结果范围: [{actual_min:.4f}, {actual_max:.4f}]")
+                
+                # 如果结果不在[0,1]范围内，再次执行最大最小归一化
+                if abs(actual_min - 0) > 1e-6 or abs(actual_max - 1) > 1e-6:
+                    print("检测到归一化结果不在[0,1]范围内，再次执行归一化")
+                    flux_normalized = (flux_normalized - actual_min) / (actual_max - actual_min)
+                    # 确保严格在[0,1]范围内
+                    flux_normalized = np.clip(flux_normalized, 0, 1)
+
             print(f"成功处理光谱: {spec_file}")
             
             # 记录标准化参数
@@ -1896,7 +1920,9 @@ class LAMOSTPreprocessor:
                                         
                                     if filename:
                                         print(f"可视化: {filename}")
-                                        self.visualize_spectrum(filename, processed=True, save=True)
+                                        # 直接传递样本数据，避免重新处理
+                                        self.visualize_spectrum(filename, processed=True, save=True, 
+                                                               from_all_data=True, sample_data=sample)
                                     else:
                                         print(f"样本中没有文件名信息: {type(sample)}")
                             except Exception as e:
@@ -2031,7 +2057,9 @@ class LAMOSTPreprocessor:
                         
                     if filename:
                         print(f"可视化: {filename}")
-                        self.visualize_spectrum(filename, processed=True, save=True)
+                        # 直接传递样本数据，避免重新处理
+                        self.visualize_spectrum(filename, processed=True, save=True, 
+                                               from_all_data=True, sample_data=sample)
                     else:
                         print(f"样本中没有文件名信息: {type(sample)}")
             except Exception as e:
@@ -2288,33 +2316,46 @@ class LAMOSTPreprocessor:
             print(f"预测时出错: {e}")
             return None
     
-    def visualize_spectrum(self, spec_file, processed=True, save=True):
-        """可视化单个光谱，原始光谱或处理后的光谱"""
+    def visualize_spectrum(self, spec_file, processed=True, save=True, from_all_data=False, sample_data=None):
+        """可视化单个光谱，原始光谱或处理后的光谱
+        
+        参数:
+            spec_file: 光谱文件名
+            processed: 是否显示处理后光谱
+            save: 是否保存图像
+            from_all_data: 是否来自已处理的总数据
+            sample_data: 直接传入的样本数据（如果有）
+        """
         if processed:
-            # 检查是否有缓存
-            cache_key = f"processed_{spec_file.replace('/', '_')}"
-            cached_data = self.cache_manager.get_cache(cache_key)
-            
-            # 如果没找到缓存，尝试列出所有可能匹配的缓存文件
-            if cached_data is None:
-                print(f"没有找到光谱缓存: {cache_key}")
-                # 列出cache目录中的文件，找到可能的匹配项
-                if os.path.exists(self.cache_dir):
-                    cache_files = [os.path.basename(f) for f in glob.glob(os.path.join(self.cache_dir, "*.pkl"))]
-                    print(f"缓存目录中有 {len(cache_files)} 个文件")
-                    matching_files = [f for f in cache_files if spec_file.replace('/', '_') in f]
-                    if matching_files:
-                        print(f"找到可能匹配的缓存文件: {matching_files}")
-                
-                # 如果没有缓存，处理光谱
-                print(f"没有找到处理后的光谱缓存，重新处理: {spec_file}")
-                processed_data = self.process_single_spectrum(spec_file, 0.0)  # 使用占位符标签
-                if processed_data is None:
-                    print(f"无法处理文件: {spec_file}")
-                    return
+            # 如果有直接传入的样本数据，优先使用
+            if sample_data is not None:
+                print(f"使用传入的处理数据进行可视化: {spec_file}")
+                processed_data = sample_data
             else:
-                print(f"成功加载光谱缓存: {cache_key}")
-                processed_data = cached_data
+                # 检查是否有缓存
+                cache_key = f"processed_{spec_file.replace('/', '_')}"
+                cached_data = self.cache_manager.get_cache(cache_key)
+                
+                # 如果没找到缓存，尝试列出所有可能匹配的缓存文件
+                if cached_data is None:
+                    print(f"没有找到光谱缓存: {cache_key}")
+                    # 列出cache目录中的文件，找到可能的匹配项
+                    if os.path.exists(self.cache_dir):
+                        cache_files = [os.path.basename(f) for f in glob.glob(os.path.join(self.cache_dir, "*.pkl"))]
+                        print(f"缓存目录中有 {len(cache_files)} 个文件")
+                        matching_files = [f for f in cache_files if spec_file.replace('/', '_') in f]
+                        if matching_files:
+                            print(f"找到可能匹配的缓存文件: {matching_files}")
+                    
+                    # 如果没有缓存，单独处理这个光谱而不影响整体处理流程
+                    print(f"没有找到处理后的光谱缓存，只处理该光谱用于可视化: {spec_file}")
+                    processed_data = self.process_single_spectrum(spec_file, 0.0)  # 使用占位符标签
+                    if processed_data is None:
+                        print(f"无法处理文件: {spec_file}")
+                        return
+                else:
+                    print(f"成功加载光谱缓存: {cache_key}")
+                    processed_data = cached_data
             
             # 提取数据，支持新旧缓存结构
             if 'metadata' in processed_data:
@@ -2346,7 +2387,7 @@ class LAMOSTPreprocessor:
                 z = processed_data.get('z', 0)
                 spectrum = processed_data.get('spectrum') or processed_data.get('data')
         else:
-            # 如果没有请求处理后光谱，则使用原始光谱进行处理并显示
+            # 如果没有请求处理后光谱，则使用原始光谱进行处理并显示，但不影响整体处理流程
             processed_data = self.process_single_spectrum(spec_file, 0.0)  # 使用占位符标签
             if processed_data is None:
                 print(f"无法处理文件: {spec_file}")
@@ -2698,6 +2739,22 @@ class LAMOSTPreprocessor:
             if flux_normalized is None:
                 print(f"归一化{spec_file}失败")
                 return None
+            
+            # 验证归一化结果是否正确
+            valid_mask = ~np.isnan(flux_normalized) & ~np.isinf(flux_normalized)
+            if np.any(valid_mask):
+                actual_min = np.min(flux_normalized[valid_mask])
+                actual_max = np.max(flux_normalized[valid_mask])
+                print(f"最终归一化结果范围: [{actual_min:.4f}, {actual_max:.4f}]")
+                
+                # 如果结果不在[0,1]范围内，再次执行最大最小归一化
+                if abs(actual_min - 0) > 1e-6 or abs(actual_max - 1) > 1e-6:
+                    print("检测到归一化结果不在[0,1]范围内，再次执行归一化")
+                    flux_normalized = (flux_normalized - actual_min) / (actual_max - actual_min)
+                    # 确保严格在[0,1]范围内
+                    flux_normalized = np.clip(flux_normalized, 0, 1)
+
+            print(f"成功处理光谱: {spec_file}")
             
             spectrum = flux_normalized
             
