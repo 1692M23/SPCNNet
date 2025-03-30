@@ -656,16 +656,16 @@ class LAMOSTPreprocessor:
                 # 获取默认范围
                 default_min, default_max = (3690, 9100)  # 默认波长范围
                 
-                # 确保计算的范围在默认范围内
-                # 如果计算出的最小值小于默认最小值，使用默认最小值
+                # 修正：只有当计算出的范围超出默认范围时，才使用默认范围作为约束
+                # 如果计算出的最小值比默认最小值还小，则保留计算出的值
                 if common_min < default_min:
+                    print(f"计算的最小波长({common_min:.2f})小于默认范围，使用默认最小值: {default_min:.2f}")
                     common_min = default_min
-                    print(f"计算的最小波长小于默认范围，使用默认最小值: {default_min:.2f}")
                     
-                # 如果计算出的最大值大于默认最大值，使用默认最大值
+                # 如果计算出的最大值比默认最大值还大，则保留计算出的值
                 if common_max > default_max:
+                    print(f"计算的最大波长({common_max:.2f})大于默认范围，使用默认最大值: {default_max:.2f}")
                     common_max = default_max
-                    print(f"计算的最大波长大于默认范围，使用默认最大值: {default_max:.2f}")
                 
                 # 仅当修正后的范围有效时更新
                 if common_min < common_max:
@@ -804,12 +804,36 @@ class LAMOSTPreprocessor:
         
         # 验证归一化效果
         if norm_min < 0 or norm_max > 1:
-            print(f"警告: 归一化后范围异常 [{norm_min:.4f}, {norm_max:.4f}]，进行调整")
+            print(f"警告: 归一化后范围异常 [{norm_min:.6f}, {norm_max:.6f}]，进行调整")
             # 重新执行归一化以确保正确
-            flux_norm = (flux_valid - flux_min_orig) / (flux_max_orig - flux_min_orig)
+            flux_norm = np.clip((flux_valid - flux_min_orig) / (flux_max_orig - flux_min_orig), 0, 1)
+            # 再次验证
+            norm_min_fixed = np.min(flux_norm[~invalid_mask])
+            norm_max_fixed = np.max(flux_norm[~invalid_mask])
+            print(f"调整后范围: [{norm_min_fixed:.6f}, {norm_max_fixed:.6f}]")
         
         # 确保所有值严格在[0,1]范围内（处理浮点误差）
         flux_norm = np.clip(flux_norm, 0, 1)
+        
+        # 最终验证，确保归一化结果正确
+        final_min = np.min(flux_norm[~invalid_mask])
+        final_max = np.max(flux_norm[~invalid_mask])
+        
+        # 如果结果仍然有问题，使用更直接的方法
+        if final_min < 0 or final_max > 1 or np.isnan(final_min) or np.isnan(final_max):
+            print(f"警告: 归一化仍有问题，使用更直接的方法 [{final_min:.6f}, {final_max:.6f}]")
+            # 直接线性映射到[0,1]范围
+            valid_flux = flux[~invalid_mask]
+            min_val = np.min(valid_flux)
+            max_val = np.max(valid_flux)
+            if max_val > min_val:
+                flux_norm = np.zeros_like(flux)
+                flux_norm[~invalid_mask] = (valid_flux - min_val) / (max_val - min_val)
+                flux_norm = np.clip(flux_norm, 0, 1)
+                print(f"直接线性映射后范围: [{np.min(flux_norm[~invalid_mask]):.6f}, {np.max(flux_norm[~invalid_mask]):.6f}]")
+            else:
+                print(f"无法归一化，有效值范围: [{min_val}, {max_val}]")
+                flux_norm = np.zeros_like(flux)
         
         # 恢复无效值为NaN
         flux_norm[invalid_mask] = np.nan
@@ -823,7 +847,10 @@ class LAMOSTPreprocessor:
         
         # 根据详细程度控制输出
         if self.verbose >= 1:
-            print(f"归一化统计: 原始范围[{flux_min_orig:.4f}, {flux_max_orig:.4f}] → 归一化范围[{norm_min:.4f}, {norm_max:.4f}]")
+            print(f"归一化统计: 原始范围[{flux_min_orig:.6f}, {flux_max_orig:.6f}] → 归一化范围[{final_min:.6f}, {final_max:.6f}]")
+            if wavelength is not None:
+                w_min, w_max = np.min(wavelength), np.max(wavelength)
+                print(f"波长范围: [{w_min:.2f}, {w_max:.2f}]")
         
         return flux_norm
     
@@ -1326,14 +1353,25 @@ class LAMOSTPreprocessor:
             if np.any(valid_mask):
                 actual_min = np.min(flux_normalized[valid_mask])
                 actual_max = np.max(flux_normalized[valid_mask])
-                print(f"最终归一化结果范围: [{actual_min:.4f}, {actual_max:.4f}]")
+                print(f"最终归一化结果范围: [{actual_min:.6f}, {actual_max:.6f}]")
                 
                 # 如果结果不在[0,1]范围内，再次执行最大最小归一化
-                if abs(actual_min - 0) > 1e-6 or abs(actual_max - 1) > 1e-6:
+                if actual_min < 0 or actual_max > 1 or abs(actual_min - 0) > 1e-6 or abs(actual_max - 1) > 1e-6:
                     print("检测到归一化结果不在[0,1]范围内，再次执行归一化")
-                    flux_normalized = (flux_normalized - actual_min) / (actual_max - actual_min)
+                    # 直接使用更简单的方法
+                    flux_normalized_fixed = np.zeros_like(flux_normalized)
+                    flux_normalized_fixed[valid_mask] = (flux_normalized[valid_mask] - actual_min) / (actual_max - actual_min)
+                    flux_normalized = flux_normalized_fixed
                     # 确保严格在[0,1]范围内
                     flux_normalized = np.clip(flux_normalized, 0, 1)
+                    
+                    # 再次验证
+                    final_min = np.min(flux_normalized[valid_mask])
+                    final_max = np.max(flux_normalized[valid_mask])
+                    print(f"修正后归一化结果范围: [{final_min:.6f}, {final_max:.6f}]")
+                    
+                    if final_min < 0 or final_max > 1:
+                        print("警告: 尝试所有方法后，归一化结果仍有问题")
 
             print(f"成功处理光谱: {spec_file}")
             
@@ -1809,8 +1847,37 @@ class LAMOSTPreprocessor:
                                 all_data.extend(element_results)
                             except Exception as e:
                                 print(f"加载元素 {element_name} 缓存时出错: {e}")
-                            
-                        print(f"已从元素缓存中恢复共 {len(all_data)} 条记录")
+                        
+                        # 更直接地加载单独的处理文件缓存
+                        print("尝试从独立的处理文件缓存中加载数据...")
+                        cache_files = glob.glob(os.path.join(self.cache_dir, "processed_*.pkl"))
+                        print(f"找到 {len(cache_files)} 个独立缓存文件")
+                        
+                        loaded_count = 0
+                        # 从每个缓存文件加载处理结果
+                        for cache_file in cache_files:
+                            try:
+                                with open(cache_file, 'rb') as f:
+                                    processed_data = pickle.load(f)
+                                
+                                # 检查数据格式
+                                if isinstance(processed_data, dict):
+                                    # 将缓存文件名添加到元数据中，以便跟踪来源
+                                    filename = os.path.basename(cache_file).replace("processed_", "").replace(".pkl", "")
+                                    if 'metadata' not in processed_data:
+                                        processed_data['metadata'] = {'filename': filename}
+                                    else:
+                                        processed_data['metadata']['filename'] = filename
+                                    
+                                    # 添加到总数据中
+                                    all_data.append(processed_data)
+                                    loaded_count += 1
+                            except Exception as e:
+                                print(f"加载缓存文件 {cache_file} 时出错: {e}")
+                        
+                        print(f"从独立缓存文件中成功加载了 {loaded_count} 条记录")
+                        
+                        print(f"已从所有缓存中恢复共 {len(all_data)} 条记录")
                         
                         # 保存恢复后的总缓存
                         if all_data:
@@ -1851,7 +1918,31 @@ class LAMOSTPreprocessor:
                                                 print(f"从 {element_name} 恢复了 {len(element_data)} 条记录")
                                         except Exception as e:
                                             print(f"恢复元素 {element_name} 失败: {e}")
-                                        
+                                    
+                                    # 手动恢复独立处理结果
+                                    print("尝试手动恢复独立的处理文件缓存...")
+                                    cache_files = glob.glob(os.path.join(self.cache_dir, "processed_*.pkl"))
+                                    loaded_count = 0
+                                    
+                                    for cache_file in cache_files:
+                                        try:
+                                            with open(cache_file, 'rb') as f:
+                                                processed_data = pickle.load(f)
+                                            
+                                            # 检查数据格式
+                                            if isinstance(processed_data, dict):
+                                                filename = os.path.basename(cache_file).replace("processed_", "").replace(".pkl", "")
+                                                if 'metadata' not in processed_data:
+                                                    processed_data['metadata'] = {'filename': filename}
+                                                else:
+                                                    processed_data['metadata']['filename'] = filename
+                                                
+                                                all_data.append(processed_data)
+                                                loaded_count += 1
+                                        except Exception as e:
+                                            print(f"手动恢复缓存文件 {cache_file} 时出错: {e}")
+                                    
+                                    print(f"手动从独立缓存文件中恢复了 {loaded_count} 条记录")                                    
                                     print(f"手动恢复完成，共恢复 {len(all_data)} 条记录")
                                 except Exception as e:
                                     print(f"手动恢复过程出错: {e}")
@@ -2745,14 +2836,25 @@ class LAMOSTPreprocessor:
             if np.any(valid_mask):
                 actual_min = np.min(flux_normalized[valid_mask])
                 actual_max = np.max(flux_normalized[valid_mask])
-                print(f"最终归一化结果范围: [{actual_min:.4f}, {actual_max:.4f}]")
+                print(f"最终归一化结果范围: [{actual_min:.6f}, {actual_max:.6f}]")
                 
                 # 如果结果不在[0,1]范围内，再次执行最大最小归一化
-                if abs(actual_min - 0) > 1e-6 or abs(actual_max - 1) > 1e-6:
+                if actual_min < 0 or actual_max > 1 or abs(actual_min - 0) > 1e-6 or abs(actual_max - 1) > 1e-6:
                     print("检测到归一化结果不在[0,1]范围内，再次执行归一化")
-                    flux_normalized = (flux_normalized - actual_min) / (actual_max - actual_min)
+                    # 直接使用更简单的方法
+                    flux_normalized_fixed = np.zeros_like(flux_normalized)
+                    flux_normalized_fixed[valid_mask] = (flux_normalized[valid_mask] - actual_min) / (actual_max - actual_min)
+                    flux_normalized = flux_normalized_fixed
                     # 确保严格在[0,1]范围内
                     flux_normalized = np.clip(flux_normalized, 0, 1)
+                    
+                    # 再次验证
+                    final_min = np.min(flux_normalized[valid_mask])
+                    final_max = np.max(flux_normalized[valid_mask])
+                    print(f"修正后归一化结果范围: [{final_min:.6f}, {final_max:.6f}]")
+                    
+                    if final_min < 0 or final_max > 1:
+                        print("警告: 尝试所有方法后，归一化结果仍有问题")
 
             print(f"成功处理光谱: {spec_file}")
             
