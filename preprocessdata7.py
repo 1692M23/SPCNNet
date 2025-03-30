@@ -651,11 +651,30 @@ class LAMOSTPreprocessor:
             common_min = max(r[0] for r in self.processed_ranges)
             common_max = min(r[1] for r in self.processed_ranges)
             
+            # 检查计算出的公共范围是否有效
             if common_min < common_max:
-                self.wavelength_range = (common_min, common_max)
-                print(f"更新最大公有波长范围: {common_min:.2f}~{common_max:.2f}")
+                # 获取默认范围
+                default_min, default_max = (3690, 9100)  # 默认波长范围
+                
+                # 确保计算的范围在默认范围内
+                # 如果计算出的最小值小于默认最小值，使用默认最小值
+                if common_min < default_min:
+                    common_min = default_min
+                    print(f"计算的最小波长小于默认范围，使用默认最小值: {default_min:.2f}")
+                    
+                # 如果计算出的最大值大于默认最大值，使用默认最大值
+                if common_max > default_max:
+                    common_max = default_max
+                    print(f"计算的最大波长大于默认范围，使用默认最大值: {default_max:.2f}")
+                
+                # 仅当修正后的范围有效时更新
+                if common_min < common_max:
+                    self.wavelength_range = (common_min, common_max)
+                    print(f"更新最大公有波长范围: {common_min:.2f}~{common_max:.2f}")
+                else:
+                    print(f"警告: 修正后的波长范围无效 ({common_min:.2f}~{common_max:.2f})，保持原有范围")
             else:
-                print(f"警告: 无法更新公有波长范围，当前范围不重叠")
+                print(f"警告: 无法更新公有波长范围，当前范围不重叠 ({common_min:.2f}~{common_max:.2f})")
     
     def resample_spectrum(self, wavelength, flux):
         """对光谱进行重采样，支持对数空间重采样"""
@@ -1694,6 +1713,22 @@ class LAMOSTPreprocessor:
         if not dataframes:
             print("错误: 没有找到有效的CSV文件")
             return None, None, None, None
+        
+        # 显示各元素数据情况
+        print("\n=== CSV文件数据统计 ===")
+        total_rows = 0
+        for i, (element, df) in enumerate(zip(elements_list, dataframes)):
+            num_rows = len(df)
+            total_rows += num_rows
+            print(f"{i+1}. 元素 {element}: {num_rows} 行数据")
+            # 如果行数为0，显示警告
+            if num_rows == 0:
+                print(f"   警告: {element} 元素没有数据")
+            # 如果行数过少，显示前几行
+            elif num_rows < 10:
+                print(f"   数据过少，显示全部数据:")
+                print(df.head(num_rows))
+        print(f"总计: {total_rows} 行数据\n")
         
         # 检查是否从缓存加载
         all_progress_file = os.path.join(self.progress_dir, "all_progress.pkl")
