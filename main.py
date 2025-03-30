@@ -286,8 +286,8 @@ def train_and_evaluate_model(train_loader, val_loader, test_loader, element, con
     actual_input_size = X.shape[1] if len(X.shape) == 2 else X.shape[2]
 
     # 获取GRU和GCN使用设置
-    use_gru = config.get('use_gru', True)
-    use_gcn = config.get('use_gcn', True)
+    use_gru = getattr(config, 'use_gru', True)
+    use_gcn = getattr(config, 'use_gcn', True)
     
     # 创建模型时传入实际尺寸和GRU/GCN控制参数
     model = SpectralResCNN_GCN(

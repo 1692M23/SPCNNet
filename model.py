@@ -1228,8 +1228,8 @@ def load_trained_model_compat(input_size_or_path, element_or_device=None, config
     device = config.training_config['device']
     
     # 获取GRU和GCN设置
-    use_gru = config.get('use_gru', True)
-    use_gcn = config.get('use_gcn', True)
+    use_gru = getattr(config, 'use_gru', True)
+    use_gcn = getattr(config, 'use_gcn', True)
     logger.info(f"从配置获取GRU/GCN设置: 使用GRU={use_gru}, 使用GCN={use_gcn}")
     
     # 尝试找到模型路径
