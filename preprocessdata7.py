@@ -773,6 +773,12 @@ class LAMOSTPreprocessor:
             ndarray: 归一化后的光谱强度，范围严格在[0,1]之间
         """
         try:
+            # 连续谱归一化 (简单的最大值归一化)
+            valid_flux = flux[~np.isnan(flux)]
+            if len(valid_flux) == 0:
+                print("所有流量值都是NaN，无法归一化")
+                return None
+            
             # 检查输入数据有效性
             if flux is None or len(flux) == 0:
                 print("警告: 归一化失败 - 输入光谱为空")
@@ -2398,22 +2404,35 @@ class LAMOSTPreprocessor:
             print(f"预测时出错: {e}")
             return None
     
-    def visualize_spectrum(self, spec_file, processed=True, save=True):
-        """可视化单个光谱，原始光谱或处理后的光谱"""
+    def visualize_spectrum(self, spec_file, processed=True, save=True, from_all_data=False, sample_data=None):
+        """可视化光谱数据
+
+        Args:
+            spec_file (str): 光谱文件名
+            processed (bool, optional): 是否使用处理后的数据. Defaults to True.
+            save (bool, optional): 是否保存图像. Defaults to True.
+            from_all_data (bool, optional): 是否来自process_all_data方法调用. Defaults to False.
+            sample_data (dict, optional): 处理好的样本数据，避免重复处理. Defaults to None.
+        """
         if processed:
-            # 检查是否有缓存
-            cache_key = f"processed_{spec_file.replace('/', '_')}"
-            cached_data = self.cache_manager.get_cache(cache_key)
-            
-            if cached_data is None:
-                # 如果没有缓存，处理光谱
-                print(f"没有找到处理后的光谱缓存，重新处理: {spec_file}")
-                processed_data = self.process_single_spectrum(spec_file, 0.0)  # 使用占位符标签
-                if processed_data is None:
-                    print(f"无法处理文件: {spec_file}")
-                    return
+            # 首先检查是否提供了sample_data参数
+            if sample_data is not None:
+                processed_data = sample_data
+                print(f"使用提供的样本数据: {spec_file}")
             else:
-                processed_data = cached_data
+                # 检查是否有缓存
+                cache_key = f"processed_{spec_file.replace('/', '_')}"
+                cached_data = self.cache_manager.get_cache(cache_key)
+                
+                if cached_data is None:
+                    # 如果没有缓存，处理光谱
+                    print(f"没有找到处理后的光谱缓存，重新处理: {spec_file}")
+                    processed_data = self.process_single_spectrum(spec_file, 0.0)  # 使用占位符标签
+                    if processed_data is None:
+                        print(f"无法处理文件: {spec_file}")
+                        return
+                else:
+                    processed_data = cached_data
                 
             # 提取数据，支持新旧缓存结构
             if 'metadata' in processed_data:
