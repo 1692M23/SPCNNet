@@ -92,10 +92,10 @@ class LAMOSTPreprocessor:
     def __init__(self, csv_files=None, 
                  fits_dir='fits', 
                  output_dir='processed_data',
-                 wavelength_range=None,  # 修改为None，表示将使用最大公有波长范围
-                 n_points=None,  # 修改为None，点数将根据波长范围和步长自动计算
-                 log_step=0.0001,  # 新增：对数空间中的重采样步长（dex）
-                 compute_common_range=True,  # 新增：是否计算最大公有波长范围
+                 wavelength_range=(3690, 9100),  # 设置固定的默认范围
+                 n_points=None,
+                 log_step=0.0001,
+                 compute_common_range=False,  # 默认不计算公共范围
                  n_splits=5,     # 交叉验证折数
                  max_workers=None,  # 最大工作进程数，None表示自动确定
                  batch_size=20,  # 批处理大小
@@ -166,7 +166,7 @@ class LAMOSTPreprocessor:
         print("正在加载文件查找缓存...")
         self._load_files_cache()
         
-        self.wavelength_range = wavelength_range if wavelength_range else (2690, 9100)  # 默认范围
+        self.wavelength_range = wavelength_range  # 使用固定范围
         self.n_points = n_points
         self.log_step = log_step
         self.compute_common_range = compute_common_range
@@ -789,6 +789,41 @@ class LAMOSTPreprocessor:
             else:
                 print(f"警告: 无法更新公有波长范围，当前范围不重叠")
     
+    def _gpu_interp(self, x, y, xnew):
+        """在GPU上进行线性插值
+        
+        参数:
+            x: 原始x坐标
+            y: 原始y值
+            xnew: 新的x坐标
+            
+        返回:
+            插值后的y值
+        """
+        import cupy as cp
+        
+        # 确保x是单调递增的
+        if not cp.all(cp.diff(x) > 0):
+            # 排序x和y
+            sort_indices = cp.argsort(x)
+            x = x[sort_indices]
+            y = y[sort_indices]
+        
+        # 找到xnew中每个点在x中的位置
+        indices = cp.searchsorted(x, xnew) - 1
+        
+        # 处理边界情况
+        indices = cp.clip(indices, 0, len(x) - 2)
+        
+        # 计算权重
+        interval_width = x[indices + 1] - x[indices]
+        weights = (xnew - x[indices]) / interval_width
+        
+        # 线性插值
+        ynew = y[indices] * (1 - weights) + y[indices + 1] * weights
+        
+        return ynew
+    
     def resample_spectrum(self, wavelength, flux):
         """对光谱进行重采样，支持对数空间重采样"""
         try:
@@ -805,96 +840,59 @@ class LAMOSTPreprocessor:
                 print(f"有效数据点数太少({len(wavelength_valid)})，无法进行插值")
                 return None, None
             
-            # 更新最大公有波长范围
-            self.update_common_wavelength_range(wavelength_valid)
-            
-            # 获取波长范围
-            w_min, w_max = self.wavelength_range
-            
-            # 检查数据范围是否覆盖目标范围
-            if w_min < wavelength_valid.min() or w_max > wavelength_valid.max():
-                print(f"目标波长范围({w_min:.2f}~{w_max:.2f})超出有效数据范围({wavelength_valid.min():.2f}~{wavelength_valid.max():.2f})")
-                # 调整为有效范围的交集
-                w_min_valid = max(w_min, wavelength_valid.min())
-                w_max_valid = min(w_max, wavelength_valid.max())
-                
-                if w_min_valid >= w_max_valid:
-                    print("重采样范围无效：最小值大于或等于最大值")
-                    return None, None
-                
-                print(f"调整波长范围为有效数据的交集: {w_min_valid:.2f}~{w_max_valid:.2f}")
-                w_min, w_max = w_min_valid, w_max_valid
+            # 使用固定的波长范围，不再计算公共范围
+            # 即使设置了compute_common_range，也忽略它
+            w_min, w_max = 3690, 9100  # 强制使用固定范围
             
             # 在对数空间中进行重采样
             log_w_min = np.log10(w_min)
             log_w_max = np.log10(w_max)
             
-            # 根据步长计算点数（如果未指定点数）
+            # 根据步长计算点数
             if self.n_points is None:
                 n_points = int((log_w_max - log_w_min) / self.log_step) + 1
-                print(f"根据对数步长{self.log_step} dex计算重采样点数: {n_points}")
             else:
                 n_points = self.n_points
-                # 如果指定了点数，计算实际使用的步长
-                self.log_step = (log_w_max - log_w_min) / (n_points - 1)
-                print(f"使用指定点数{n_points}，对数步长为: {self.log_step} dex")
+                
+            # 创建对数等间隔的波长点
+            log_wavelength_new = np.linspace(log_w_min, log_w_max, n_points)
+            wavelength_new = 10 ** log_wavelength_new
             
-            # 在对数空间中创建等间隔网格
-            log_wavelength = np.linspace(log_w_min, log_w_max, n_points)
-            
-            # 转换回线性空间
-            new_wavelength = 10**log_wavelength
-            
-            if self.use_gpu:
+            # 使用CPU或GPU进行插值
+            if self.use_gpu and self.cupy_available:
+                import cupy as cp
                 try:
-                    # 将数据转移到GPU
-                    d_wave = cp.asarray(wavelength_valid)
-                    d_flux = cp.asarray(flux_valid)
-                    d_new_wave = cp.asarray(new_wavelength)
+                    # 将数据传输到GPU
+                    wavelength_valid_cp = cp.array(wavelength_valid)
+                    flux_valid_cp = cp.array(flux_valid)
+                    wavelength_new_cp = cp.array(wavelength_new)
                     
-                    # 使用GPU线性插值
-                    # 由于cupy没有完全等价于scipy.interpolate.interp1d的函数，
-                    # 我们使用cp.interp函数，它类似于np.interp
-                    d_new_flux = cp.interp(d_new_wave, d_wave, d_flux)
+                    # 在GPU上进行插值
+                    # cupy没有直接的interp函数，使用线性近似
+                    flux_new_cp = self._gpu_interp(wavelength_valid_cp, flux_valid_cp, wavelength_new_cp)
                     
-                    # 将结果转回CPU
-                    new_flux = cp.asnumpy(d_new_flux)
+                    # 将结果传回CPU
+                    flux_new = cp.asnumpy(flux_new_cp)
                     
                     # 清理GPU内存
-                    del d_wave, d_flux, d_new_wave, d_new_flux
+                    del wavelength_valid_cp, flux_valid_cp, wavelength_new_cp, flux_new_cp
                     cp.get_default_memory_pool().free_all_blocks()
+                    
                 except Exception as e:
-                    print(f"GPU重采样失败，回退到CPU: {e}")
-                    # 使用CPU线性插值
-                    interp_func = interpolate.interp1d(wavelength_valid, flux_valid, kind='linear', 
-                                                     bounds_error=False, fill_value=np.nan)
-                    new_flux = interp_func(new_wavelength)
+                    if self.disable_gpu_warnings:
+                        # 发生错误时切换到CPU处理
+                        flux_new = np.interp(wavelength_new, wavelength_valid, flux_valid)
+                    else:
+                        print(f"GPU插值失败，切换到CPU: {e}")
+                        flux_new = np.interp(wavelength_new, wavelength_valid, flux_valid)
             else:
-                # 使用CPU线性插值
-                interp_func = interpolate.interp1d(wavelength_valid, flux_valid, kind='linear', 
-                                                 bounds_error=False, fill_value=np.nan)
-                new_flux = interp_func(new_wavelength)
+                # 在CPU上进行线性插值
+                flux_new = np.interp(wavelength_new, wavelength_valid, flux_valid)
             
-            # 检查结果是否有效
-            if np.isnan(new_flux).all():
-                print("重采样后所有数据都是NaN")
-                return None, None
-                
-            # 替换NaN值
-            if np.isnan(new_flux).any():
-                n_nan = np.isnan(new_flux).sum()
-                print(f"重采样后有{n_nan}/{len(new_flux)}个点是NaN，将替换为0")
-                new_flux = np.nan_to_num(new_flux, nan=0.0, posinf=0.0, neginf=0.0)
-                
-            # 额外检查是否存在无限值
-            if np.isinf(new_flux).any():
-                n_inf = np.isinf(new_flux).sum()
-                print(f"重采样后有{n_inf}/{len(new_flux)}个点是无限值，将替换为0")
-                new_flux = np.nan_to_num(new_flux, nan=0.0, posinf=0.0, neginf=0.0)
-                
-            return new_wavelength, new_flux
+            return wavelength_new, flux_new
+            
         except Exception as e:
-            print(f"重采样失败: {e}")
+            print(f"重采样时出错: {e}")
             import traceback
             traceback.print_exc()
             return None, None
@@ -3533,6 +3531,42 @@ class LAMOSTPreprocessor:
         print("\n===== 示例光谱可视化完成 =====")
         print(f"图像保存在: {os.path.abspath(self.output_dir)}")
 
+    # 在LAMOSTPreprocessor类内添加GPU插值函数
+    def _gpu_interp(self, x, y, xnew):
+        """在GPU上进行线性插值
+        
+        参数:
+            x: 原始x坐标
+            y: 原始y值
+            xnew: 新的x坐标
+            
+        返回:
+            插值后的y值
+        """
+        import cupy as cp
+        
+        # 确保x是单调递增的
+        if not cp.all(cp.diff(x) > 0):
+            # 排序x和y
+            sort_indices = cp.argsort(x)
+            x = x[sort_indices]
+            y = y[sort_indices]
+        
+        # 找到xnew中每个点在x中的位置
+        indices = cp.searchsorted(x, xnew) - 1
+        
+        # 处理边界情况
+        indices = cp.clip(indices, 0, len(x) - 2)
+        
+        # 计算权重
+        interval_width = x[indices + 1] - x[indices]
+        weights = (xnew - x[indices]) / interval_width
+        
+        # 线性插值
+        ynew = y[indices] * (1 - weights) + y[indices + 1] * weights
+        
+        return ynew
+
 def main():
     """主函数"""
     start_time = time.time()
@@ -3719,10 +3753,10 @@ def main():
         csv_files=args.csv_files,
         fits_dir=fits_dir,
         output_dir=output_dir,
-        wavelength_range=wavelength_range,  # 使用命令行参数指定的波长范围
-        n_points=args.n_points,
-        log_step=args.log_step,
-        compute_common_range=True,
+        wavelength_range=(3690, 9100),  # 使用固定范围
+        n_points=None,  # 使用步长自动计算点数
+        log_step=0.0001,
+        compute_common_range=False,  # 强制不计算公共范围
         max_workers=args.max_workers if args.max_workers is not None else (1 if low_memory_mode else 2),
         batch_size=5 if low_memory_mode else args.batch_size,
         memory_limit=args.memory_limit,
