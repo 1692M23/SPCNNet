@@ -1078,26 +1078,82 @@ def predict(model, data_loader, device=None):
         return np.array([])
 
 # =============== 4. 工具函数 ===============
-def load_trained_model(model_path, device=None):
-    """加载训练好的模型，确保正确处理状态字典"""
+def load_trained_model(model_path, device=None, use_gru=True, use_gcn=True):
+    """
+    加载训练好的模型，确保正确处理状态字典
+    
+    参数:
+        model_path: 模型文件路径
+        device: 设备（CPU或GPU）
+        use_gru: 是否使用双向GRU网络
+        use_gcn: 是否使用图卷积网络
+    """
     try:
         if os.path.exists(model_path):
             # 创建模型实例
             input_size = 3921  # 默认输入大小
-            model = SpectralResCNN_GCN(input_size)
+            model = SpectralResCNN_GCN(input_size, device=device, use_gru=use_gru, use_gcn=use_gcn)
+            logger.info(f"创建模型实例，使用GRU={use_gru}, 使用GCN={use_gcn}")
             
             # 加载状态字典
             try:
                 # 首先尝试使用map_location避免设备不匹配问题
                 checkpoint = torch.load(model_path, map_location='cpu')
                 
-                # 检查是否是状态字典格式
+                # 检查状态字典中是否包含GRU和GCN配置
+                if isinstance(checkpoint, dict):
+                    # 尝试从检查点获取GRU和GCN设置
+                    if 'use_gru' in checkpoint:
+                        use_gru = checkpoint['use_gru']
+                        logger.info(f"从检查点获取GRU设置: {use_gru}")
+                    if 'use_gcn' in checkpoint:
+                        use_gcn = checkpoint['use_gcn']
+                        logger.info(f"从检查点获取GCN设置: {use_gcn}")
+                        
+                    # 如果检查点中的设置与传入的不同，重新创建模型
+                    if ('use_gru' in checkpoint and checkpoint['use_gru'] != use_gru) or \
+                       ('use_gcn' in checkpoint and checkpoint['use_gcn'] != use_gcn):
+                        logger.info(f"检查点中的GRU/GCN设置与请求不同，重新创建模型")
+                        model = SpectralResCNN_GCN(input_size, device=device, 
+                                                 use_gru=use_gru, use_gcn=use_gcn)
+                
+                # 加载模型状态
                 if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                    model.load_state_dict(checkpoint['model_state_dict'])
-                    logger.info(f"从检查点的model_state_dict加载模型状态")
+                    # 尝试加载状态字典
+                    try:
+                        model.load_state_dict(checkpoint['model_state_dict'])
+                        logger.info(f"从检查点的model_state_dict加载模型状态")
+                    except Exception as e:
+                        logger.warning(f"加载状态字典时出现不匹配，尝试部分加载: {str(e)}")
+                        # 尝试部分加载状态字典
+                        state_dict = checkpoint['model_state_dict']
+                        model_dict = model.state_dict()
+                        
+                        # 过滤掉不匹配的键
+                        state_dict = {k: v for k, v in state_dict.items() if k in model_dict and model_dict[k].shape == v.shape}
+                        
+                        # 更新模型字典并加载
+                        model_dict.update(state_dict)
+                        model.load_state_dict(model_dict)
+                        logger.info(f"部分加载模型状态字典成功")
                 elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
-                    model.load_state_dict(checkpoint['state_dict'])
-                    logger.info(f"从检查点的state_dict加载模型状态")
+                    # 尝试加载状态字典
+                    try:
+                        model.load_state_dict(checkpoint['state_dict'])
+                        logger.info(f"从检查点的state_dict加载模型状态")
+                    except Exception as e:
+                        logger.warning(f"加载状态字典时出现不匹配，尝试部分加载: {str(e)}")
+                        # 尝试部分加载状态字典
+                        state_dict = checkpoint['state_dict']
+                        model_dict = model.state_dict()
+                        
+                        # 过滤掉不匹配的键
+                        state_dict = {k: v for k, v in state_dict.items() if k in model_dict and model_dict[k].shape == v.shape}
+                        
+                        # 更新模型字典并加载
+                        model_dict.update(state_dict)
+                        model.load_state_dict(model_dict)
+                        logger.info(f"部分加载模型状态字典成功")
                 else:
                     # 尝试直接加载，假设是状态字典
                     try:
@@ -1129,7 +1185,7 @@ def load_trained_model(model_path, device=None):
         else:
             logger.error(f"模型文件不存在: {model_path}")
             # 创建新模型作为备选
-            model = SpectralResCNN_GCN(3921)
+            model = SpectralResCNN_GCN(3921, device=device, use_gru=use_gru, use_gcn=use_gcn)
             if device:
                 model = model.to(device)
             model.eval()
@@ -1138,164 +1194,12 @@ def load_trained_model(model_path, device=None):
     except Exception as e:
         logger.error(f"加载模型失败: {str(e)}")
         # 创建新模型作为备选
-        model = SpectralResCNN_GCN(3921)
+        model = SpectralResCNN_GCN(3921, device=device, use_gru=use_gru, use_gcn=use_gcn)
         if device:
             model = model.to(device)
         model.eval()
         logger.warning(f"加载失败，使用未训练的新模型作为备选")
         return model
-
-# 在模型训练完成后添加
-def analyze_model_performance(self, element, train_loader, val_loader, test_loader):
-    """对训练好的模型进行全面性能分析"""
-    # 创建结果目录
-    os.makedirs("results/feature_importance", exist_ok=True)
-    os.makedirs("results/residual_analysis", exist_ok=True)
-    
-    logger.info(f"Starting feature importance analysis for {element} model...")
-    self.analyze_feature_importance(self.model, val_loader, self.device, element)
-    
-    logger.info(f"Starting residual analysis for {element} model...")
-    self.analyze_residuals(self.model, test_loader, self.device, element)
-    
-    logger.info(f"{element} model analysis completed, results saved in results directory")
-
-"""
-关键超参数调优指南：
-
-1. 模型架构参数：
-   - 输入卷积层：
-     * kernel_size: [5, 7, 9]  # 建议从7开始
-     * 输出通道数: [16, 32, 64]  # 建议从32开始
-   
-   - 残差块：
-     * 每个组的残差块数量: [1, 2, 3]  # 建议从2开始
-     * 通道数变化: [32->64, 64->128, 128->256]  # 建议保持当前设置
-     * kernel_size: [3, 5]  # 建议从5开始
-   
-   - 全连接层：
-     * 隐藏层大小: [256, 512, 1024]  # 建议从512开始
-     * Dropout率: [0.3, 0.5, 0.7]  # 建议从0.5开始
-
-2. 训练参数：
-   - 学习率: [1e-4, 5e-4, 1e-3]  # 建议从5e-4开始
-   - 批次大小: [32, 64, 128]  # 建议从64开始
-   - 权重衰减: [1e-4, 5e-4, 1e-5]  # 建议从1e-4开始
-   - 早停耐心值: [10, 15, 20]  # 建议从15开始
-
-调参建议：
-1. 首先固定模型架构，只调整训练参数
-2. 使用网格搜索，但范围要小：
-   - 学习率: [5e-4, 1e-3]
-   - 批次大小: [64, 128]
-   - 权重衰减: [1e-4, 5e-4]
-3. 如果效果不理想，再考虑调整模型架构参数
-4. 建议的实验顺序：
-   a. 基准实验：使用当前参数设置
-   b. 学习率实验：调整学习率
-   c. 批次大小实验：调整批次大小
-   d. 正则化实验：调整权重衰减
-   e. 模型深度实验：调整残差块数量
-   f. 特征维度实验：调整通道数
-"""
-
-# 从main中复制train_and_evaluate_model函数定义
-def train_and_evaluate_model(train_loader, val_loader, test_loader, element, config):
-    """
-    训练和评估模型的主函数
-    """
-    # 获取设备
-    device = config.training_config.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-    logger.info(f"使用设备: {device}")
-    
-    # 创建模型 - 根据配置选择模型类型
-    use_gcn = config.model_config.get('use_gcn', True)
-    input_size = config.model_config.get('input_size')
-    
-    if use_gcn:
-        logger.info(f"使用SpectralResCNN_GCN模型，输入大小: {input_size}")
-        model = SpectralResCNN_GCN(
-            input_size=input_size, 
-            device=device
-        )
-    else:
-        logger.info(f"使用SpectralResCNN模型，输入大小: {input_size}")
-        model = SpectralResCNN(
-            input_size=input_size
-        ).to(device)
-    
-    # 设置超参数
-    hyperparams = {
-        'lr': config.training_config.get('lr', 0.001),
-        'weight_decay': config.training_config.get('weight_decay', 1e-5),
-        'epochs': config.training_config.get('num_epochs', 100),
-        'patience': config.training_config.get('early_stopping_patience', 15)
-    }
-    
-    logger.info(f"训练 {element} 模型，超参数: {hyperparams}")
-    
-    # 训练模型
-    train_losses, val_losses = train(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        config={
-            'training': {
-                'lr': hyperparams['lr'],
-                'weight_decay': hyperparams['weight_decay'],
-                'num_epochs': hyperparams['epochs'],
-                'early_stopping_patience': hyperparams['patience'],
-                'device': device
-            },
-            'model_config': {
-                'model_dir': config.model_config.get('model_dir', 'models'),
-                'use_gcn': use_gcn  # 传递模型类型
-            }
-        },
-        device=device,
-        element=element
-    )
-    
-    # 获取最佳验证损失
-    best_val_loss = min(val_losses) if val_losses else float('inf')
-    
-    # 加载最佳模型
-    model_path = os.path.join(config.model_config.get('model_dir', 'models'), f'best_model_{element}.pth')
-    if os.path.exists(model_path):
-        best_model = load_trained_model(model_path, device)
-    else:
-        logger.warning(f"找不到最佳模型文件: {model_path}，使用当前模型代替")
-        best_model = model
-    
-    # 在测试集上评估
-    logger.info(f"在测试集上评估 {element} 模型")
-    test_metrics = evaluate_model(best_model, test_loader, device)
-    
-    # 分析模型性能（特征重要性和残差）
-    if hasattr(config, 'analysis_config') and config.analysis_config.get('enabled', False):
-        logger.info(f"开始 {element} 模型性能分析...")
-        
-        # 获取分析配置
-        batch_size = config.analysis_config.get('batch_size', 32)
-        save_batch_results = config.analysis_config.get('batch_results', {}).get('save_batch_results', True)
-        
-        try:
-            from model_analysis import analyze_model_performance
-            analysis_results = analyze_model_performance(
-                best_model,
-                element,
-                train_loader,
-                val_loader,
-                test_loader,
-                device,
-                batch_size=batch_size,
-                save_batch_results=save_batch_results
-            )
-            logger.info(f"{element} 模型性能分析完成，结果已保存到results目录")
-        except ImportError:
-            logger.warning("找不到model_analysis模块，跳过性能分析")
-    
-    return best_model, best_val_loss, test_metrics
 
 # 添加一个兼容性包装函数，支持旧版本的调用方式
 def load_trained_model_compat(input_size_or_path, element_or_device=None, config=None):
@@ -1308,12 +1212,25 @@ def load_trained_model_compat(input_size_or_path, element_or_device=None, config
     # 检测调用方式
     if isinstance(input_size_or_path, str) and (element_or_device is None or isinstance(element_or_device, (str, torch.device))):
         # 新方式: load_trained_model(model_path, device=None)
-        return load_trained_model_core(input_size_or_path, element_or_device)
+        device = element_or_device
+        # 尝试从全局config获取GRU和GCN设置
+        use_gru = True
+        use_gcn = True
+        if hasattr(config, 'use_gru'):
+            use_gru = config.use_gru
+        if hasattr(config, 'use_gcn'):
+            use_gcn = config.use_gcn
+        return load_trained_model_core(input_size_or_path, device, use_gru, use_gcn)
     
     # 旧方式: load_trained_model(input_size, element, config)
     input_size = input_size_or_path
     element = element_or_device
     device = config.training_config['device']
+    
+    # 获取GRU和GCN设置
+    use_gru = config.get('use_gru', True)
+    use_gcn = config.get('use_gcn', True)
+    logger.info(f"从配置获取GRU/GCN设置: 使用GRU={use_gru}, 使用GCN={use_gcn}")
     
     # 尝试找到模型路径
     try:
@@ -1351,19 +1268,19 @@ def load_trained_model_compat(input_size_or_path, element_or_device=None, config
         if model_path is None:
             logger.error(f"找不到元素 {element} 的模型文件")
             # 创建一个空模型作为后备选择
-            backup_model = SpectralResCNN_GCN(input_size)
+            backup_model = SpectralResCNN_GCN(input_size, device=device, use_gru=use_gru, use_gcn=use_gcn)
             backup_model.to(device)
             backup_model.eval()
             logger.warning(f"使用未训练的模型作为后备")
             return backup_model
         
         # 找到模型文件，加载它
-        return load_trained_model_core(model_path, device)
+        return load_trained_model_core(model_path, device, use_gru, use_gcn)
         
     except Exception as e:
         logger.error(f"Error loading model: {str(e)}")
         # 创建一个空模型作为后备选择
-        backup_model = SpectralResCNN_GCN(input_size)
+        backup_model = SpectralResCNN_GCN(input_size, device=device, use_gru=use_gru, use_gcn=use_gcn)
         backup_model.to(device)
         backup_model.eval()
         logger.warning(f"Using untrained model as backup")
@@ -1378,6 +1295,14 @@ def save_model(model, optimizer, scheduler, epoch_val, val_loss, model_dir, elem
     os.makedirs(model_dir, exist_ok=True)
     model_path = os.path.join(model_dir, f'best_model_{element}.pth')
     
+    # 获取GRU和GCN设置（如果模型是SpectralResCNN_GCN类型）
+    use_gru = True
+    use_gcn = True
+    if isinstance(model, SpectralResCNN_GCN):
+        use_gru = model.use_gru
+        use_gcn = model.use_gcn
+        logger.info(f"保存模型设置: 使用GRU={use_gru}, 使用GCN={use_gcn}")
+    
     # 只保存状态字典
     checkpoint = {
         'epoch': epoch_val,
@@ -1385,6 +1310,8 @@ def save_model(model, optimizer, scheduler, epoch_val, val_loss, model_dir, elem
         'optimizer_state_dict': optimizer.state_dict() if optimizer else None,
         'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
         'val_loss': val_loss,
+        'use_gru': use_gru,  # 保存GRU设置
+        'use_gcn': use_gcn,  # 保存GCN设置
     }
     
     try:
@@ -1664,11 +1591,16 @@ class SpectralResCNN_GCN(nn.Module):
     
     结合残差CNN和图卷积网络处理光谱数据
     """
-    def __init__(self, input_size=None, device=None):
+    def __init__(self, input_size=None, device=None, use_gru=True, use_gcn=True):
         super(SpectralResCNN_GCN, self).__init__()
         
         # 记录输入大小，可能为None表示自动适应
         self.input_size = input_size
+        
+        # 记录是否使用GRU和GCN
+        self.use_gru = use_gru
+        self.use_gcn = use_gcn
+        logger.info(f"初始化SpectralResCNN_GCN模型，使用GRU: {use_gru}, 使用GCN: {use_gcn}")
         
         # 设置设备，支持CPU、GPU和TPU
         if device is None:
@@ -1705,28 +1637,44 @@ class SpectralResCNN_GCN(nn.Module):
         ])
         
         # 循环模块 - 跨波段信念增强
-        self.gru = nn.GRU(64, 64, bidirectional=True, batch_first=True)
+        if self.use_gru:
+            self.gru = nn.GRU(64, 64, bidirectional=True, batch_first=True)
         
         # 光谱注意力机制 - 捕获波长关系
-        self.spectral_attention = SpectralAttention(128)
+        gru_output_size = 128 if self.use_gru else 64
+        self.spectral_attention = SpectralAttention(gru_output_size)
         
         # GCN模块 - 建模波长点之间的关系
         # 注意：这里无需指定具体的序列长度，将在forward中动态适应
-        self.gcn_layers = nn.ModuleList([
-            GraphConvLayer(128, 128),
-            GraphConvLayer(128, 128)
-        ])
+        if self.use_gcn:
+            self.gcn_layers = nn.ModuleList([
+                GraphConvLayer(gru_output_size, gru_output_size),
+                GraphConvLayer(gru_output_size, gru_output_size)
+            ])
+            
+            # GCN输出处理
+            self.gcn_process = nn.Sequential(
+                nn.Linear(gru_output_size, 64),
+                nn.ReLU(),
+                nn.Dropout(0.3)
+            )
         
-        # GCN输出处理
-        self.gcn_process = nn.Sequential(
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Dropout(0.3)
-        )
-        
-        # 信息融合层 (CNN特征 + GCN特征)
+        # 信息融合层
+        if self.use_gru and self.use_gcn:
+            # CNN + GRU + GCN
+            fusion_input_size = 64 + gru_output_size + 64  # 256
+        elif self.use_gru:
+            # CNN + GRU
+            fusion_input_size = 64 + gru_output_size  # 192
+        elif self.use_gcn:
+            # CNN + GCN
+            fusion_input_size = 64 + 64  # 128
+        else:
+            # 只有CNN
+            fusion_input_size = 64
+            
         self.fusion = nn.Sequential(
-            nn.Conv1d(256, 64, kernel_size=1),  # 256 = 64(CNN) + 128(GRU) + 64(GCN)
+            nn.Conv1d(fusion_input_size, 64, kernel_size=1),
             nn.BatchNorm1d(64),
             nn.ReLU()
         )
@@ -1771,33 +1719,47 @@ class SpectralResCNN_GCN(nn.Module):
         res_features = x
         for res_block in self.res_blocks:
             res_features = res_block(res_features)
+        
+        # 初始化特征列表，用于后续融合
+        features_to_combine = [res_features]
             
-        # 循环特征提取
-        rec_features = x.permute(0, 2, 1)  # [batch, length, channels]
-        rec_features, _ = self.gru(rec_features)
-        rec_features = rec_features.permute(0, 2, 1)  # [batch, channels*2, length]
-        
-        # 应用光谱注意力
-        attention_features = self.spectral_attention(rec_features)
-        
+        # 循环特征提取 (GRU)
+        if self.use_gru:
+            rec_features = x.permute(0, 2, 1)  # [batch, length, channels]
+            rec_features, _ = self.gru(rec_features)
+            rec_features = rec_features.permute(0, 2, 1)  # [batch, channels*2, length]
+            
+            # 应用光谱注意力
+            attention_features = self.spectral_attention(rec_features)
+            features_to_combine.append(attention_features)
+        else:
+            # 如果不使用GRU，直接使用CNN特征
+            attention_features = x
+            
         # TPU同步点 - 多次重形状操作后
         if str(self.device).startswith('xla'):
             sync_device(self.device)
         
-        # GCN处理 - 首先需要转置数据
-        gcn_features = attention_features.permute(0, 2, 1)  # [batch, length, channels]
-        for gcn_layer in self.gcn_layers:
-            gcn_features = gcn_layer(gcn_features)
-            gcn_features = F.relu(gcn_features)
+        # GCN处理
+        if self.use_gcn:
+            # 确定GCN的输入
+            gcn_input = attention_features if self.use_gru else x
+            
+            # 转置数据
+            gcn_features = gcn_input.permute(0, 2, 1)  # [batch, length, channels]
+            for gcn_layer in self.gcn_layers:
+                gcn_features = gcn_layer(gcn_features)
+                gcn_features = F.relu(gcn_features)
+            
+            # 处理GCN输出
+            gcn_features = self.gcn_process(gcn_features)
+            
+            # 将GCN特征转回原始格式
+            gcn_features = gcn_features.permute(0, 2, 1)  # [batch, channels, length]
+            features_to_combine.append(gcn_features)
         
-        # 处理GCN输出
-        gcn_features = self.gcn_process(gcn_features)
-        
-        # 将GCN特征转回原始格式
-        gcn_features = gcn_features.permute(0, 2, 1)  # [batch, channels, length]
-        
-        # 特征融合 (CNN + GRU + GCN)
-        combined_features = torch.cat([res_features, attention_features, gcn_features], dim=1)
+        # 特征融合
+        combined_features = torch.cat(features_to_combine, dim=1)
         x = self.fusion(combined_features)
         
         # 使用自适应池化层将特征图压缩为固定大小
@@ -1822,7 +1784,7 @@ class SpectralResCNN_GCN(nn.Module):
         else:
             x = self.fc(x)
         
-        return x 
+        return x
 
 def load_checkpoint(model, optimizer, scheduler, element, checkpoint_type='checkpoint'):
     """加载训练检查点，兼容新旧格式"""

@@ -5,7 +5,7 @@ import torch
 from sklearn.model_selection import ParameterGrid
 from utils import ProgressManager
 import config
-from model import train_and_evaluate_model, SpectralResCNN_GCN
+from model import SpectralResCNN_GCN
 import json
 import time
 import numpy as np
@@ -46,6 +46,7 @@ def hyperparameter_tuning(element, X_train, y_train, X_val, y_val, param_grid=No
             'batch_size': [32, 64, 128],
             'dropout_rate': [0.3, 0.5, 0.7],
             'weight_decay': [1e-4, 1e-5, 1e-6],
+            'use_gru': [True, False],
             'use_gcn': [True, False]
         }
     
@@ -174,12 +175,13 @@ def hyperparameter_tuning(element, X_train, y_train, X_val, y_val, param_grid=No
         
         input_size = X_train.shape[2]  # 假设形状为 [batch, channel, length]
         
+        use_gru = params.get('use_gru', True)
         use_gcn = params.get('use_gcn', True)
         dropout_rate = params.get('dropout_rate', 0.5)
         
         # 创建模型
         if use_gcn:
-            model = SpectralResCNN_GCN(input_size=input_size, device=device)
+            model = SpectralResCNN_GCN(input_size=input_size, device=device, use_gru=use_gru, use_gcn=use_gcn)
             # 设置dropout率
             for module in model.modules():
                 if isinstance(module, torch.nn.Dropout):
@@ -212,6 +214,7 @@ def hyperparameter_tuning(element, X_train, y_train, X_val, y_val, param_grid=No
                 },
                 'model_config': {
                     'model_dir': os.path.join(results_dir, 'models'),
+                    'use_gru': use_gru,
                     'use_gcn': use_gcn
                 }
             }

@@ -704,26 +704,8 @@ def process_element(element, model_type, input_size, use_gpu=True):
     logger.info(f"正在处理元素: {element}")
     
     # 获取命令行参数中的GRU和GCN设置
-    import sys
-    use_gru = True  # 默认使用GRU
-    use_gcn = True  # 默认使用GCN
-    
-    # 解析命令行参数
-    for i, arg in enumerate(sys.argv):
-        if arg == '--use_gru':
-            use_gru = True
-        elif arg == '--no_gru':
-            use_gru = False
-        elif arg == '--use_gcn':
-            use_gcn = True
-        elif arg == '--no_gcn':
-            use_gcn = False
-    
-    # 优先级规则：--no_X 参数优先于 --use_X 参数
-    if '--no_gru' in sys.argv:
-        use_gru = False
-    if '--no_gcn' in sys.argv:
-        use_gcn = False
+    use_gru = getattr(config, 'use_gru', True)  # 默认使用GRU
+    use_gcn = getattr(config, 'use_gcn', True)  # 默认使用GCN
     
     logger.info(f"模型配置: 使用GRU={use_gru}, 使用GCN={use_gcn}")
     
@@ -1266,58 +1248,71 @@ def use_preprocessor(task='train', element='MG_FE', input_file=None, output_dir=
 
 def main():
     """主函数：处理命令行参数并执行相应操作"""
-    
+    logger = logging.getLogger('main')
     logger.info("开始处理命令行参数")
     
-    # 命令行参数解析
-    parser = argparse.ArgumentParser(description='恒星光谱元素丰度预测')
-    parser.add_argument('--mode', type=str, choices=['train', 'tune', 'test', 'all', 'analyze', 'show_results', 'preprocess'], 
-                      default='train', help='程序模式：训练/调优/测试/全部/分析/显示结果/预处理')
-    parser.add_argument('--data_path', nargs='*', default=None,
-                      help='数据文件路径列表，默认为processed_data目录下的train_dataset.npz、val_dataset.npz和test_dataset.npz')
+    import argparse
+    parser = argparse.ArgumentParser(description='恒星光谱丰度预测模型')
+    
+    # 基本参数
+    parser.add_argument('--mode', type=str, choices=['train', 'tune', 'test', 'predict', 'all', 'show_results', 'analyze', 'preprocess'],
+                       default='train', help='运行模式')
+    parser.add_argument('--data_path', type=str, default=None,
+                       help='数据文件路径，可以是.npz格式的预处理数据或CSV格式的原始数据')
     parser.add_argument('--train_data_path', type=str, default=None,
-                      help='训练数据文件路径，优先级高于data_path')
+                       help='训练数据文件路径，优先级高于data_path')
     parser.add_argument('--val_data_path', type=str, default=None,
-                      help='验证数据文件路径，优先级高于data_path')
+                       help='验证数据文件路径，优先级高于data_path')
     parser.add_argument('--test_data_path', type=str, default=None,
-                      help='测试数据文件路径，优先级高于data_path')
+                       help='测试数据文件路径，优先级高于data_path')
+    
+    # 元素参数
+    parser.add_argument('--elements', nargs='+', default=None,
+                       help='要处理的元素列表')
     parser.add_argument('--element', type=str, default=None,
-                      help='要预测的元素（单元素模式），不指定时使用elements参数')
-    parser.add_argument('--elements', nargs='*', default=None,
-                      help='要预测的元素列表（多元素模式），优先级低于element参数')
+                       help='要处理的单个元素，与--elements互斥')
+    
+    # 训练参数
     parser.add_argument('--batch_size', type=int, default=None,
-                      help='批量大小，默认使用配置文件中的设置')
+                       help='批次大小')
     parser.add_argument('--learning_rate', type=float, default=None,
-                      help='学习率，默认使用配置文件中的设置')
+                       help='学习率')
     parser.add_argument('--epochs', type=int, default=None,
-                      help='训练轮数，默认使用配置文件中的设置')
+                       help='训练轮数')
     parser.add_argument('--early_stopping', type=int, default=None,
-                      help='早停耐心值，默认使用配置文件中的设置')
+                       help='早停轮数')
     parser.add_argument('--device', type=str, default=None,
-                      help='计算设备，默认使用配置文件中的设置')
-    parser.add_argument('--batch_size_hyperopt', type=int, default=1000,
-                       help='超参数优化的批量数据大小')
-    parser.add_argument('--batches_per_round', type=int, default=2,
-                       help='超参数优化每轮处理的批次数')
+                       help='计算设备，可选值：cpu, cuda, tpu')
+    
+    # 超参数调优参数
+    parser.add_argument('--batch_size_hyperopt', type=int, default=None,
+                       help='超参数调优时的批次大小')
+    parser.add_argument('--batches_per_round', type=int, default=None,
+                       help='每轮评估的批次数')
     parser.add_argument('--tune_hyperparams', action='store_true',
                        help='是否进行超参数调优')
-    parser.add_argument('--result_type', type=str, choices=['training', 'evaluation', 'prediction', 'analysis'], 
-                        default='training', help='要显示的结果类型')
+    
+    # 结果和分析参数
+    parser.add_argument('--result_type', type=str,
+                       choices=['training', 'evaluation', 'prediction', 'analysis'],
+                       default='training', help='结果类型')
     parser.add_argument('--perform_analysis', action='store_true',
-                       help='是否执行模型性能分析（特征重要性和残差分析）')
-    parser.add_argument('--analysis_type', type=str, choices=['feature_importance', 'residual_analysis', 'both'], 
-                        default='both', help='要执行的分析类型')
+                       help='进行模型分析')
+    parser.add_argument('--analysis_type', type=str,
+                       choices=['feature_importance', 'residual_analysis', 'both'],
+                       default='both', help='分析类型')
     parser.add_argument('--analysis_batch_size', type=int, default=None,
-                       help='模型分析批处理大小')
+                       help='分析时的批次大小')
     parser.add_argument('--save_batch_results', action='store_true',
-                       help='是否保存批处理结果')
-    # 添加preprocessdata7相关参数
+                       help='是否保存每个批次的结果')
+    
+    # 预处理参数
     parser.add_argument('--use_preprocessor', action='store_true',
-                       help='使用preprocessdata7.py作为预处理器')
-    parser.add_argument('--csv_files', nargs='+', default=['C_FE.csv', 'MG_FE.csv', 'CA_FE.csv'],
-                      help='preprocessdata7使用的CSV文件列表')
+                       help='使用preprocessdata7预处理数据')
+    parser.add_argument('--csv_files', nargs='+', default=None,
+                     help='preprocessdata7使用的CSV数据文件列表')
     parser.add_argument('--fits_dir', type=str, default='fits',
-                      help='preprocessdata7使用的FITS文件目录')
+                       help='preprocessdata7使用的FITS文件目录')
     parser.add_argument('--output_dir', type=str, default='processed_data',
                       help='preprocessdata7处理后的输出目录')
     parser.add_argument('--log_step', type=float, default=0.0001,
