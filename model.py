@@ -699,9 +699,19 @@ def train(model, train_loader, val_loader, num_epochs=50, patience=10, device=No
     # 保存最终模型
     final_model_path = os.path.join(model_dir, f'SpectralResCNN_GCN_{element}.pth')
     
-    # 只保存状态字典
-    torch.save(model.state_dict(), final_model_path)
-    logger.info(f"成功保存最终模型: {final_model_path}")
+    try:
+        # 只保存状态字典
+        torch.save(model.state_dict(), final_model_path)
+        logger.info(f"成功保存最终模型: {final_model_path}")
+    except Exception as e:
+        logger.error(f"保存最终模型失败: {str(e)}")
+        # 尝试备用保存方式
+        try:
+            backup_path = os.path.join(model_dir, f'{element}_model.pth')
+            torch.save(model.state_dict(), backup_path)
+            logger.info(f"成功保存备用最终模型: {backup_path}")
+        except Exception as e2:
+            logger.error(f"保存备用最终模型也失败: {str(e2)}")
     
     # 同时保存检查点格式的模型以备后续使用
     if isinstance(config, dict):
@@ -1737,7 +1747,7 @@ def load_checkpoint(model, optimizer, scheduler, element, checkpoint_type='check
     
     if not os.path.exists(checkpoint_path):
         logger.warning(f"找不到检查点文件: {checkpoint_path}")
-        return None, None, None, 0, float('inf')
+        return model, optimizer, scheduler, 0, float('inf')
     
     try:
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
@@ -1757,20 +1767,23 @@ def load_checkpoint(model, optimizer, scheduler, element, checkpoint_type='check
         # 处理旧格式检查点（保存整个模型）
         elif 'model' in checkpoint:
             logger.warning("检测到旧格式检查点，尝试提取状态字典")
-            if hasattr(checkpoint['model'], 'state_dict'):
+            try:
                 # 提取状态字典而不是整个模型
-                model_state_dict = checkpoint['model'].state_dict()
-                model.load_state_dict(model_state_dict)
-            else:
-                logger.error("无法从检查点中提取模型状态字典")
-            
-            # 对优化器和调度器同样处理
-            if optimizer is not None and 'optimizer' in checkpoint and hasattr(checkpoint['optimizer'], 'state_dict'):
-                optimizer.load_state_dict(checkpoint['optimizer'].state_dict())
-            
-            if scheduler is not None and 'scheduler' in checkpoint and hasattr(checkpoint['scheduler'], 'state_dict'):
-                scheduler.load_state_dict(checkpoint['scheduler'].state_dict())
-            
+                if hasattr(checkpoint['model'], 'state_dict'):
+                    model_state_dict = checkpoint['model'].state_dict()
+                    model.load_state_dict(model_state_dict)
+                else:
+                    logger.error("无法从检查点中提取模型状态字典")
+                
+                # 对优化器和调度器同样处理
+                if optimizer is not None and 'optimizer' in checkpoint and hasattr(checkpoint['optimizer'], 'state_dict'):
+                    optimizer.load_state_dict(checkpoint['optimizer'].state_dict())
+                
+                if scheduler is not None and 'scheduler' in checkpoint and hasattr(checkpoint['scheduler'], 'state_dict'):
+                    scheduler.load_state_dict(checkpoint['scheduler'].state_dict())
+            except Exception as e:
+                logger.error(f"从旧格式检查点加载状态字典失败: {str(e)}")
+                
             epoch = checkpoint.get('epoch', 0)
             loss = checkpoint.get('loss', float('inf'))
         else:
@@ -1784,7 +1797,7 @@ def load_checkpoint(model, optimizer, scheduler, element, checkpoint_type='check
         logger.error(f"加载检查点失败: {str(e)}")
         return model, optimizer, scheduler, 0, float('inf')
 
-def save_checkpoint(model, optimizer, scheduler, epoch, loss, element, checkpoint_type='checkpoint'):
+def save_checkpoint(model, optimizer, scheduler, epoch_val, loss, element, checkpoint_type='checkpoint'):
     """保存训练检查点"""
     if isinstance(config, dict):
         model_dir = config.get('model_config', {}).get('model_dir', 'models')
@@ -1799,7 +1812,7 @@ def save_checkpoint(model, optimizer, scheduler, epoch, loss, element, checkpoin
     
     # 只保存状态字典，不保存整个模型对象
     checkpoint = {
-        'epoch': epoch,
+        'epoch': epoch_val,  # 使用传入的epoch_val参数，避免使用未定义的epoch
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict() if optimizer else None,
         'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
