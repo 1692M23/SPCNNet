@@ -28,6 +28,11 @@ import config
 from utils import CacheManager, ProgressManager, ask_clear_cache
 from config import Config
 
+# 确保输出目录配置完整
+if 'log_dir' not in config.output_config:
+    config.output_config['log_dir'] = os.path.join('logs')
+    os.makedirs(config.output_config['log_dir'], exist_ok=True)
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
@@ -38,6 +43,19 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger('baseline_models')
+
+# 确保其他输出目录配置完整
+if 'model_dir' not in config.output_config:
+    config.output_config['model_dir'] = os.path.join('models', 'baseline')
+    logger.info(f"添加默认model_dir配置: {config.output_config['model_dir']}")
+
+if 'results_dir' not in config.output_config:
+    config.output_config['results_dir'] = os.path.join('results', 'baseline')
+    logger.info(f"添加默认results_dir配置: {config.output_config['results_dir']}")
+
+if 'cache_dir' not in config.output_config:
+    config.output_config['cache_dir'] = os.path.join('cache', 'baseline')
+    logger.info(f"添加默认cache_dir配置: {config.output_config['cache_dir']}")
 
 # 创建缓存管理器
 cache_manager = CacheManager(cache_dir=os.path.join(config.output_config['cache_dir'], 'baseline_models'))
