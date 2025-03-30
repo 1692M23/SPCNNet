@@ -6,6 +6,7 @@ import numpy as np
 import logging
 from model import SpectralResCNN, SpectralResCNN_GCN, train, evaluate_model
 from utils import set_seed
+import matplotlib.pyplot as plt
 
 # 设置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -104,6 +105,23 @@ def train_ensemble(element, train_loader, val_loader, test_loader, num_models=5,
     
     logger.info(f"集成模型测试集性能: RMSE={rmse:.4f}, R²={r2:.4f}")
     logger.info(f"预测不确定性标准差: {np.mean(ensemble_uncertainties):.4f}")
+    
+    # 保存预测结果
+    results = {
+        'true_values': all_targets,
+        'ensemble_predictions': ensemble_predictions,
+        'uncertainties': ensemble_uncertainties
+    }
+    np.savez(f'results/ensemble_{element}_predictions.npz', **results)
+
+    # 可视化结果
+    plt.figure(figsize=(10, 6))
+    plt.scatter(all_targets, ensemble_predictions, alpha=0.5)
+    plt.plot([all_targets.min(), all_targets.max()], [all_targets.min(), all_targets.max()], 'r--')
+    plt.xlabel('真实值')
+    plt.ylabel('预测值')
+    plt.title(f'{element} 集成模型预测 vs 真实值')
+    plt.savefig(f'plots/{element}_ensemble_predictions.png')
     
     return models
 
