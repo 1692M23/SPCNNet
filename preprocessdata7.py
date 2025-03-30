@@ -2028,6 +2028,12 @@ class LAMOSTPreprocessor:
                             if X is not None and y is not None:
                                 print(f"准备完成，特征数据形状: {X.shape}, 标签数据形状: {y.shape}")
                                 self.split_dataset(X, y, elements)
+                        else:
+                            # 即使不划分数据集，也需要准备数组以便返回
+                            print("准备数据但不划分数据集")
+                            X, y, elements, filenames = self._prepare_arrays(all_data)
+                            if X is not None and y is not None:
+                                print(f"准备完成，特征数据形状: {X.shape}, 标签数据形状: {y.shape}")
                         
                         return X, y, elements, filenames
                     else:
@@ -3490,21 +3496,30 @@ def main():
     # 处理所有数据，支持断点续传
     X, y, elements, filenames = preprocessor.process_all_data(resume=True)
     
+    # 检查返回值是否有效
+    if X is None:
+        print("错误: 没有处理到任何有效数据，处理过程可能失败或用户选择跳过数据集划分")
+        return
+    
     if len(X) == 0:
         print("错误: 没有处理到任何有效数据，请检查fits文件路径和CSV文件")
         return
     
     # 分割数据集
-    train_dataset, val_dataset, test_dataset = preprocessor.split_dataset(X, y, elements)
-    
-    # 检查用户是否选择了分割数据集
-    if len(val_dataset[0]) == 0:  # 空验证集表示用户选择不分割
-        print("用户选择不分割数据集，使用完整数据集")
+    # 只有当X, y, elements都有效时才进行划分
+    if X is not None and y is not None and elements is not None:
+        train_dataset, val_dataset, test_dataset = preprocessor.split_dataset(X, y, elements)
+        
+        # 检查用户是否选择了分割数据集
+        if val_dataset[0].size == 0:  # 空验证集表示用户选择不分割
+            print("用户选择不分割数据集，使用完整数据集")
+        else:
+            print(f"用户选择分割数据集为训练集、验证集和测试集")
     else:
-        print(f"用户选择分割数据集为训练集、验证集和测试集")
+        print("数据无效，跳过数据集划分")
     
     # 可视化几个示例光谱(可选)
-    if len(filenames) > 0 and not low_memory_mode and input("是否可视化示例光谱? (y/n): ").lower() == 'y':
+    if filenames is not None and len(filenames) > 0 and not low_memory_mode and input("是否可视化示例光谱? (y/n): ").lower() == 'y':
         print("正在可视化示例光谱...")
         sample_indices = random.sample(range(len(filenames)), min(3, len(filenames)))
         for i in sample_indices:
