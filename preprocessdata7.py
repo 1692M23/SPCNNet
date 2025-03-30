@@ -2006,8 +2006,10 @@ class LAMOSTPreprocessor:
                                         elif 'metadata' in sample and isinstance(sample['metadata'], dict) and 'filename' in sample['metadata']:
                                             filename = sample['metadata']['filename']
                                     elif isinstance(sample, str):
-                                        # 直接使用字符串作为文件名
+                                        # 直接使用字符串作为文件名，但不将其作为sample_data传递
                                         filename = sample
+                                        sample = None
+                                        print(f"警告: 样本是字符串 '{filename}'，将作为文件名使用但不会传递该字符串作为样本数据")
                                         
                                     if filename:
                                         print(f"可视化: {filename}")
@@ -2427,7 +2429,25 @@ class LAMOSTPreprocessor:
             # 如果有直接传入的样本数据，优先使用
             if sample_data is not None:
                 print(f"使用传入的处理数据进行可视化: {spec_file}")
-                processed_data = sample_data
+                
+                # 检查sample_data是否为字符串类型（不是预期的字典类型）
+                if isinstance(sample_data, str):
+                    print(f"警告: 传入的sample_data是字符串 '{sample_data}' 而不是预期的字典")
+                    # 检查是否有缓存
+                    cache_key = f"processed_{spec_file.replace('/', '_')}"
+                    cached_data = self.cache_manager.get_cache(cache_key)
+                    if cached_data is not None:
+                        print(f"找到缓存数据，使用缓存代替字符串值")
+                        processed_data = cached_data
+                    else:
+                        # 如果没有缓存，单独处理这个光谱
+                        print(f"没有找到缓存，尝试单独处理该光谱: {spec_file}")
+                        processed_data = self.process_single_spectrum(spec_file, 0.0)  # 使用占位符标签
+                        if processed_data is None:
+                            print(f"无法处理文件: {spec_file}")
+                            return
+                else:
+                    processed_data = sample_data
             else:
                 # 检查是否有缓存
                 cache_key = f"processed_{spec_file.replace('/', '_')}"
@@ -2454,6 +2474,11 @@ class LAMOSTPreprocessor:
                     print(f"成功加载光谱缓存: {cache_key}")
                     processed_data = cached_data
             
+            # 检查processed_data是否是字典类型
+            if not isinstance(processed_data, dict):
+                print(f"错误: processed_data不是字典类型，而是 {type(processed_data)}")
+                return
+                
             # 提取数据，支持新旧缓存结构
             if 'metadata' in processed_data:
                 metadata = processed_data['metadata']
@@ -2488,6 +2513,11 @@ class LAMOSTPreprocessor:
             processed_data = self.process_single_spectrum(spec_file, 0.0)  # 使用占位符标签
             if processed_data is None:
                 print(f"无法处理文件: {spec_file}")
+                return
+            
+            # 检查processed_data是否是字典类型
+            if not isinstance(processed_data, dict):
+                print(f"错误: processed_data不是字典类型，而是 {type(processed_data)}")
                 return
                 
             # 提取数据    
