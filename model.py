@@ -501,7 +501,7 @@ def train(model, train_loader, val_loader, num_epochs=50, patience=10, device=No
                 logger.warning(f"加载模型和优化器状态失败: {str(e)}")
     
     # 设置损失函数
-    criterion = nn.SmoothL1Loss(beta=0.1)  # 使用Huber Loss
+    criterion = WeightedMSELoss(threshold=0.2, high_weight=2.0)  # 使用自定义损失函数
     
     # 训练记录
     train_losses = []
@@ -1887,3 +1887,15 @@ def save_checkpoint(model, optimizer, scheduler, epoch_val, loss, element, check
     except Exception as e:
         logger.error(f"保存检查点失败: {str(e)}")
         return False
+
+# 在model.py中添加自定义损失函数类
+class WeightedMSELoss(nn.Module):
+    def __init__(self, threshold=0.2, high_weight=2.0):
+        super().__init__()
+        self.threshold = threshold
+        self.high_weight = high_weight
+        
+    def forward(self, pred, target):
+        weights = torch.ones_like(target)
+        weights[target > self.threshold] = self.high_weight
+        return torch.mean(weights * (pred - target) ** 2)
