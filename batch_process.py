@@ -1,61 +1,7 @@
 import numpy as np
 import os
-import pandas as pd
 from tqdm import tqdm
 import argparse
-
-def process_csv_batch(csv_file, element, batch_size=10000, output_dir="processed_data/batches"):
-    """
-    处理CSV文件并按批次生成NPZ文件
-    
-    参数:
-        csv_file: 输入CSV文件路径
-        element: 要处理的元素名称
-        batch_size: 每批处理的数据条数
-        output_dir: 输出目录
-    
-    返回:
-        生成的NPZ文件路径列表
-    """
-    # 确保输出目录存在
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # 读取CSV文件
-    print(f"正在读取CSV文件: {csv_file}")
-    df = pd.read_csv(csv_file)
-    total_rows = len(df)
-    print(f"共加载 {total_rows} 条数据")
-    
-    # 计算批次数量
-    num_batches = (total_rows + batch_size - 1) // batch_size
-    print(f"将分成 {num_batches} 个批次处理")
-    
-    npz_files = []
-    
-    # 按批次处理数据
-    for i in tqdm(range(num_batches), desc="处理批次"):
-        start_idx = i * batch_size
-        end_idx = min((i + 1) * batch_size, total_rows)
-        
-        # 获取当前批次数据
-        batch_df = df.iloc[start_idx:end_idx]
-        
-        # 处理数据 - 这里应根据实际预处理逻辑修改
-        # 假设我们从现有代码中调用预处理函数
-        from main import preprocess_data
-        X_batch, y_batch, elements_batch = preprocess_data(batch_df, element)
-        
-        # 保存为NPZ文件
-        batch_file = os.path.join(output_dir, f"{element}_batch_{i+1}.npz")
-        np.savez(batch_file, 
-                X=X_batch, 
-                y=y_batch, 
-                elements=elements_batch)
-        
-        npz_files.append(batch_file)
-        print(f"已保存批次 {i+1}/{num_batches} 到 {batch_file}")
-    
-    return npz_files
 
 def merge_npz_files(input_files, output_file, is_train_data=True):
     """
@@ -138,58 +84,23 @@ def merge_npz_files(input_files, output_file, is_train_data=True):
     print(f"y形状: {y_merged.shape}")
     if len(elements_merged) > 0:
         print(f"elements形状: {elements_merged.shape}")
-
-def process_and_merge(csv_files, element, batch_size=10000, output_dir="processed_data", is_train=True):
-    """
-    处理多个CSV文件并将结果合并
     
-    参数:
-        csv_files: 输入CSV文件路径列表
-        element: 要处理的元素名称
-        batch_size: 每批处理的数据条数
-        output_dir: 输出目录
-        is_train: 是否为训练数据
-    
-    返回:
-        最终合并后的NPZ文件路径
-    """
-    batch_dir = os.path.join(output_dir, "batches", element)
-    os.makedirs(batch_dir, exist_ok=True)
-    
-    all_npz_files = []
-    
-    # 处理每个CSV文件
-    for csv_file in csv_files:
-        print(f"\n开始处理文件: {csv_file}")
-        npz_files = process_csv_batch(csv_file, element, batch_size, batch_dir)
-        all_npz_files.extend(npz_files)
-    
-    # 合并所有NPZ文件
-    if is_train:
-        final_output = os.path.join(output_dir, "train_dataset.npz")
-    else:
-        final_output = os.path.join(output_dir, "test_dataset.npz")
-    
-    merge_npz_files(all_npz_files, final_output, is_train_data=is_train)
-    
-    return final_output
+    return output_file
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='分批处理光谱数据并合并NPZ文件')
-    parser.add_argument('--csv_files', nargs='+', required=True, help='输入CSV文件路径列表')
-    parser.add_argument('--element', required=True, help='要处理的元素名称')
-    parser.add_argument('--batch_size', type=int, default=10000, help='每批处理的数据条数')
-    parser.add_argument('--output_dir', default="processed_data", help='输出目录')
-    parser.add_argument('--is_train', action='store_true', help='是否为训练数据')
+    parser = argparse.ArgumentParser(description='合并多个NPZ文件')
+    parser.add_argument('--input_files', nargs='+', required=True, help='输入NPZ文件路径列表')
+    parser.add_argument('--output_file', required=True, help='输出文件路径')
+    parser.add_argument('--is_train', action='store_true', help='是否为训练数据（如果是，将拆分为训练集和验证集）')
+    parser.add_argument('--test_split', action='store_true', help='是否拆分测试集（将不再拆分验证集）')
     
     args = parser.parse_args()
     
-    final_file = process_and_merge(
-        args.csv_files, 
-        args.element, 
-        args.batch_size, 
-        args.output_dir, 
-        args.is_train
-    )
+    if args.test_split:
+        # 直接保存为test文件
+        merged_file = merge_npz_files(args.input_files, args.output_file, is_train_data=False)
+    else:
+        # 正常处理
+        merged_file = merge_npz_files(args.input_files, args.output_file, is_train_data=args.is_train)
     
-    print(f"处理完成! 最终文件: {final_file}")
+    print(f"处理完成! 最终文件: {merged_file}")
