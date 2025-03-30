@@ -71,7 +71,7 @@ class XGBoostModel:
     """
     def __init__(self, config=None):
         if config is None:
-            config = config.CONFIG
+            config = Config  # 使用直接导入的Config而非config.CONFIG
             
         self.params = {
             'objective': 'reg:squarederror',
@@ -518,7 +518,7 @@ class LightGBMModel:
     """
     def __init__(self, config=None):
         if config is None:
-            config = config.CONFIG
+            config = Config  # 使用直接导入的Config而非config.CONFIG
             
         self.params = {
             'objective': 'regression',
@@ -1089,17 +1089,6 @@ def train_and_evaluate_baseline(element, model_type='xgboost',
                                batch_size=Config.BASELINE_BATCH_SIZE, batches_per_round=Config.BASELINE_BATCHES_PER_ROUND, val_size=0.2,
                                force_retrain=False, evaluate_only=False, device=None):
     """添加device参数支持不同计算设备"""
-    # XGBoost和LightGBM配置中添加设备支持
-    if device and 'cuda' in str(device):
-        # GPU支持
-        if model_type.lower() == 'xgboost':
-            model.params.update({'tree_method': 'gpu_hist', 'gpu_id': 0})
-        elif model_type.lower() == 'lightgbm':
-            model.params.update({'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0})
-    elif device and 'xla' in str(device):
-        # TPU目前不直接支持这些库，可以考虑用TensorFlow版本替代
-        logger.warning("TPU不直接支持XGBoost/LightGBM，将使用CPU")
-    
     # 创建模型
     if model_type.lower() == 'xgboost':
         model = XGBoostModel()
@@ -1110,6 +1099,17 @@ def train_and_evaluate_baseline(element, model_type='xgboost',
     else:
         logger.error(f"不支持的模型类型: {model_type}")
         return None
+    
+    # XGBoost和LightGBM配置中添加设备支持 - 将设备配置移到模型创建之后
+    if device and 'cuda' in str(device):
+        # GPU支持
+        if model_type.lower() == 'xgboost':
+            model.params.update({'tree_method': 'gpu_hist', 'gpu_id': 0})
+        elif model_type.lower() == 'lightgbm':
+            model.params.update({'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0})
+    elif device and 'xla' in str(device):
+        # TPU目前不直接支持这些库，可以考虑用TensorFlow版本替代
+        logger.warning("TPU不直接支持XGBoost/LightGBM，将使用CPU")
     
     # 如果仅评估且可以加载模型，则加载模型
     if evaluate_only and not force_retrain:
