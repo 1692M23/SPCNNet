@@ -285,9 +285,20 @@ def train_and_evaluate_model(train_loader, val_loader, test_loader, element, con
     X, y, _ = load_data(os.path.join('processed_data', 'train_dataset.npz'), element)
     actual_input_size = X.shape[1] if len(X.shape) == 2 else X.shape[2]
 
-    # 创建模型时传入实际尺寸
-    model = SpectralResCNN_GCN(actual_input_size).to(config.training_config['device'])
+    # 获取GRU和GCN使用设置
+    use_gru = config.get('use_gru', True)
+    use_gcn = config.get('use_gcn', True)
+    
+    # 创建模型时传入实际尺寸和GRU/GCN控制参数
+    model = SpectralResCNN_GCN(
+        actual_input_size, 
+        config.training_config['device'],
+        use_gru=use_gru,
+        use_gcn=use_gcn
+    ).to(config.training_config['device'])
+    
     logger.info(f"模型结构:\n{model}")
+    logger.info(f"模型配置: 使用GRU={use_gru}, 使用GCN={use_gcn}")
     
     # 设置超参数
     hyperparams = {
@@ -692,6 +703,30 @@ def process_element(element, model_type, input_size, use_gpu=True):
     print(f"正在处理元素: {element}", flush=True)
     logger.info(f"正在处理元素: {element}")
     
+    # 获取命令行参数中的GRU和GCN设置
+    import sys
+    use_gru = True  # 默认使用GRU
+    use_gcn = True  # 默认使用GCN
+    
+    # 解析命令行参数
+    for i, arg in enumerate(sys.argv):
+        if arg == '--use_gru':
+            use_gru = True
+        elif arg == '--no_gru':
+            use_gru = False
+        elif arg == '--use_gcn':
+            use_gcn = True
+        elif arg == '--no_gcn':
+            use_gcn = False
+    
+    # 优先级规则：--no_X 参数优先于 --use_X 参数
+    if '--no_gru' in sys.argv:
+        use_gru = False
+    if '--no_gcn' in sys.argv:
+        use_gcn = False
+    
+    logger.info(f"模型配置: 使用GRU={use_gru}, 使用GCN={use_gcn}")
+    
     # 创建训练状态管理器
     state_manager = TrainingStateManager(
         element=element, 
@@ -722,6 +757,10 @@ def process_element(element, model_type, input_size, use_gpu=True):
     # 设置配置中的设备
     config.training_config['device'] = device
     
+    # 将GRU和GCN使用设置添加到配置中
+    config.use_gru = use_gru
+    config.use_gcn = use_gcn
+    
     # 加载数据
     logger.info(f"加载元素 {element} 的数据")
     train_path = os.path.join('processed_data', 'train_dataset.npz')
@@ -746,7 +785,7 @@ def process_element(element, model_type, input_size, use_gpu=True):
     logger.info(f"为元素 {element} 创建 {model_type} 模型，输入大小: {input_size}")
     
     if model_type == 'SpectralResCNN_GCN':
-        model = SpectralResCNN_GCN(input_size=input_size, device=device)
+        model = SpectralResCNN_GCN(input_size=input_size, device=device, use_gru=use_gru, use_gcn=use_gcn)
     elif model_type == 'SpectralResCNN':
         model = SpectralResCNN(input_size=input_size)
     elif model_type == 'SpectralResCNNEnsemble':
@@ -1226,24 +1265,28 @@ def use_preprocessor(task='train', element='MG_FE', input_file=None, output_dir=
         return {'success': False, 'error': str(e)}
 
 def main():
-    """主函数"""
-    parser = argparse.ArgumentParser(description='恒星光谱元素丰度预测系统')
-    parser.add_argument('--mode', type=str, choices=['train', 'tune', 'test', 'predict', 'all', 'show_results', 'analyze', 'preprocess'], 
-                        default='train', help='运行模式')
-    parser.add_argument('--data_path', type=str, action='append', default=[],
-                       help='数据路径，可以指定多个。例如：--data_path train.npz --data_path val.npz')
-    parser.add_argument('--train_data_path', type=str, default=None, 
-                       help='训练数据路径')
+    """主函数：处理命令行参数并执行相应操作"""
+    
+    logger.info("开始处理命令行参数")
+    
+    # 命令行参数解析
+    parser = argparse.ArgumentParser(description='恒星光谱元素丰度预测')
+    parser.add_argument('--mode', type=str, choices=['train', 'tune', 'test', 'all', 'analyze', 'show_results', 'preprocess'], 
+                      default='train', help='程序模式：训练/调优/测试/全部/分析/显示结果/预处理')
+    parser.add_argument('--data_path', nargs='*', default=None,
+                      help='数据文件路径列表，默认为processed_data目录下的train_dataset.npz、val_dataset.npz和test_dataset.npz')
+    parser.add_argument('--train_data_path', type=str, default=None,
+                      help='训练数据文件路径，优先级高于data_path')
     parser.add_argument('--val_data_path', type=str, default=None,
-                       help='验证数据路径')
+                      help='验证数据文件路径，优先级高于data_path')
     parser.add_argument('--test_data_path', type=str, default=None,
-                       help='测试数据路径')
-    parser.add_argument('--elements', nargs='+', default=None,
-                       help='要处理的元素列表，默认为所有配置的元素')
+                      help='测试数据文件路径，优先级高于data_path')
     parser.add_argument('--element', type=str, default=None,
-                       help='要处理的单个元素，与--elements互斥')
+                      help='要预测的元素（单元素模式），不指定时使用elements参数')
+    parser.add_argument('--elements', nargs='*', default=None,
+                      help='要预测的元素列表（多元素模式），优先级低于element参数')
     parser.add_argument('--batch_size', type=int, default=None,
-                      help='批次大小，默认使用配置文件中的设置')
+                      help='批量大小，默认使用配置文件中的设置')
     parser.add_argument('--learning_rate', type=float, default=None,
                       help='学习率，默认使用配置文件中的设置')
     parser.add_argument('--epochs', type=int, default=None,
@@ -1287,6 +1330,15 @@ def main():
                      help='权重衰减系数')
     parser.add_argument('--force_new_model', action='store_true',
                      help='强制使用新模型')
+    # 添加GRU和GCN控制参数
+    parser.add_argument('--use_gru', action='store_true',
+                     help='使用双向GRU网络')
+    parser.add_argument('--no_gru', action='store_true',
+                     help='不使用双向GRU网络')
+    parser.add_argument('--use_gcn', action='store_true',
+                     help='使用图卷积网络')
+    parser.add_argument('--no_gcn', action='store_true',
+                     help='不使用图卷积网络')
     
     args = parser.parse_args()
     
@@ -1312,6 +1364,26 @@ def main():
         config.training_config['early_stopping_patience'] = args.early_stopping
     if args.device is not None:
         config.training_config['device'] = args.device
+        
+    # 处理GRU和GCN设置
+    # 优先级规则：no_X 参数优先于 use_X 参数
+    use_gru = True  # 默认使用GRU
+    use_gcn = True  # 默认使用GCN
+    
+    if args.use_gru:
+        use_gru = True
+    if args.no_gru:
+        use_gru = False  # no_gru 优先级高于 use_gru
+    if args.use_gcn:
+        use_gcn = True
+    if args.no_gcn:
+        use_gcn = False  # no_gcn 优先级高于 use_gcn
+    
+    # 将GRU和GCN设置添加到配置中
+    config.use_gru = use_gru
+    config.use_gcn = use_gcn
+    
+    logger.info(f"模型配置: 使用GRU={use_gru}, 使用GCN={use_gcn}")
     
     # 更新分析配置
     if args.perform_analysis:
