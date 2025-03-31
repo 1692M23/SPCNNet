@@ -44,7 +44,7 @@ class LAMOSTPreprocessor:
     def __init__(self, csv_files=None, 
                  fits_dir='fits', 
                  output_dir='processed_data',
-                 wavelength_range=None,  # 修改为None，表示将使用最大公有波长范围
+                 wavelength_range=[3690, 9100],  # 修改为固定值[3690,9100]，强制使用此波长范围
                  n_points=None,  # 修改为None，点数将根据波长范围和步长自动计算
                  log_step=0.0001,  # 新增：对数空间中的重采样步长（dex）
                  compute_common_range=True,  # 新增：是否计算最大公有波长范围
@@ -3370,10 +3370,10 @@ def main():
         csv_files=args.csv_files,
         fits_dir=fits_dir,
         output_dir=output_dir,
-        wavelength_range=None,  # 修改为None，表示将使用最大公有波长范围
+        wavelength_range=[3690, 9100],  # 使用固定值[3690,9100]，强制使用此波长范围
         n_points=None,  # 修改为None，点数将根据波长范围和步长自动计算
         log_step=0.0001,  # 新增：对数空间中的重采样步长（dex）
-        compute_common_range=True,  # 新增：是否计算最大公有波长范围
+        compute_common_range=False,  # 修改为False，不再计算公共波长范围
  
         max_workers=1 if low_memory_mode else 2,  # 低内存模式使用单线程
         batch_size=5 if low_memory_mode else 20,   # 低内存模式减小批次大小
