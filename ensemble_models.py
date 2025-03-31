@@ -41,7 +41,7 @@ def train_ensemble(element, train_loader, val_loader, test_loader, num_models=5,
     # 训练配置
     config = {
         'training': {
-            'lr': 0.0005,
+            'lr': 0.001,
             'weight_decay': 1e-4,
             'batch_size': 64,
             'num_epochs': 120,
