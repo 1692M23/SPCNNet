@@ -202,148 +202,51 @@ def calculate_dataset_stats(data_loader):
     else:
         return 0.0
 
-def train_and_evaluate_model(train_loader, val_loader, test_loader, element, config, best_hyperparams=None):
+def train_and_evaluate_model(model, train_loader, val_loader, test_loader, element, device, 
+                           best_hyperparams=None, augment_fn=None):
     """
     训练和评估模型
-
-    Args:
-        train_loader: 训练数据加载器
-        val_loader: 验证数据加载器
-        test_loader: 测试数据加载器
-        element (str): 元素名称
-        config (dict): 包含模型和训练参数的配置字典
-        best_hyperparams (dict, optional): 从调优中找到的最佳超参数. Defaults to None.
-
-    Returns:
-        tuple: (训练好的模型, 评估结果)
     """
-    logger.info(f"开始为元素 {element} 训练和评估模型")
-
-    # 确定设备
-    device = config['training_config']['device']
-
-    # 获取模型输入大小 (从数据加载器的一个批次中推断)
     try:
-        sample_batch, _ = next(iter(train_loader))
-        # 形状通常是 [batch_size, channels, sequence_length]
-        input_size = sample_batch.shape[2]
-        logger.info(f"从数据推断出的模型输入大小: {input_size}")
-    except StopIteration:
-        logger.error("无法从数据加载器获取样本以确定输入大小。")
-        # 尝试从配置中获取，如果已设置
-        input_size = config['model_config'].get('input_size')
-        if input_size is None:
-             logger.error("配置中也未设置 input_size。")
-             return None, None
-        logger.warning(f"使用配置中的输入大小: {input_size}")
-
-
-    # 覆盖配置中的模型输入大小
-    config['model_config']['input_size'] = input_size
-
-
-    # --------------------------------------------------------------------------
-    # 应用最佳超参数 (如果提供了)
-    # --------------------------------------------------------------------------
-    training_params = config['training_config'].copy() # Start with defaults
-    model_params_override = {} # Store overrides for model creation if needed
-
-    if best_hyperparams:
-        logger.info(f"应用找到的最佳超参数: {best_hyperparams}")
-        # 更新训练参数
-        training_params['lr'] = best_hyperparams.get('lr', training_params['lr'])
-        training_params['weight_decay'] = best_hyperparams.get('weight_decay', training_params['weight_decay'])
-        training_params['batch_size'] = best_hyperparams.get('batch_size', training_params['batch_size']) # Note: batch size is usually fixed by loaders here
-        training_params['early_stopping_patience'] = best_hyperparams.get('patience', training_params['early_stopping_patience'])
-        # 更新模型相关参数 (如果它们在调优空间中)
-        model_params_override['dropout_rate'] = best_hyperparams.get('dropout_rate', config['model_config'].get('model_params', {}).get('dropout_rate', 0.5)) # Example
-        model_params_override['use_gru'] = best_hyperparams.get('use_gru', config['model_config'].get('model_params', {}).get('use_gru', True)) # Example
-        model_params_override['use_gcn'] = best_hyperparams.get('use_gcn', config['model_config'].get('model_params', {}).get('use_gcn', True)) # Example
-        # 如果模型类型本身是超参数 (虽然当前实现似乎不是)
-        # config['model_config']['model_type'] = best_hyperparams.get('model_type', config['model_config']['model_type'])
-    else:
-        logger.info("未提供最佳超参数，使用配置中的默认值。")
-    # --------------------------------------------------------------------------
-
-    # 创建模型实例
-    model_type = config['model_config']['model_type']
-    logger.info(f"创建模型: {model_type}")
-
-    # 传递超参数给模型构造函数 (如果需要)
-    # 当前的模型构造函数可能不直接接受所有这些参数，需要检查 model.py
-    # SpectralResCNN_GCN / SpectralResCNN __init__ needs update if dropout etc. are hyperparameters
-    if model_type == 'SpectralResCNN_GCN':
-        model = SpectralResCNN_GCN(
-            input_size=input_size,
+        import json
+        device = config.training_config['device']
+        
+        # 创建训练状态目录
+        os.makedirs('models/training_states', exist_ok=True)
+        state_file = f'models/training_states/training_state_{element}.json'
+        
+        # 如果存在训练状态文件，加载它
+        if os.path.exists(state_file):
+            with open(state_file, 'r') as f:
+                state = json.load(f)
+                start_epoch = state.get('epoch', 0)
+                best_val_loss = state.get('best_val_loss', float('inf'))
+                logger.info(f"从训练状态文件加载：epoch={start_epoch}, best_val_loss={best_val_loss}")
+        else:
+            start_epoch = 0
+            best_val_loss = float('inf')
+            logger.info("未找到训练状态文件，从头开始训练")
+        
+        # 训练模型
+        best_model, val_loss, test_metrics = train(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            test_loader=test_loader,
+            element=element,
             device=device,
-            use_gru=model_params_override.get('use_gru', config['model_config'].get('model_params', {}).get('use_gru', True)), # Pass potentially tuned param
-            use_gcn=model_params_override.get('use_gcn', config['model_config'].get('model_params', {}).get('use_gcn', True)),   # Pass potentially tuned param
-            # Add dropout rate if applicable
-        ).to(device)
-        # Manually set dropout if needed and not handled in __init__
-        dropout_rate = model_params_override.get('dropout_rate', 0.5)
-        for module in model.modules():
-            if isinstance(module, torch.nn.Dropout):
-                module.p = dropout_rate
-        logger.info(f"Set dropout rate for {model_type} to {dropout_rate}")
-
-    elif model_type == 'SpectralResCNN':
-        model = SpectralResCNN(
-            input_size=input_size,
-             # Add dropout rate if applicable
-        ).to(device)
-        # Manually set dropout if needed and not handled in __init__
-        dropout_rate = model_params_override.get('dropout_rate', 0.5)
-        for module in model.modules():
-            if isinstance(module, torch.nn.Dropout):
-                module.p = dropout_rate
-        logger.info(f"Set dropout rate for {model_type} to {dropout_rate}")
-    else:
-        logger.error(f"未知的模型类型: {model_type}")
-        return None, None
-
-    # 准备训练所需的配置 (传递更新后的 training_params)
-    train_run_config = {
-        'training': training_params, # Use potentially updated params
-        'model_config': config['model_config'],
-        'output_config': config['output_config'],
-         # Pass augmentation config if needed by train function
-        'data_config': config['data_config']
-    }
-
-    # 检查是否需要从检查点恢复
-    # ... (省略了检查点加载逻辑以简化，但实际项目中应该保留)
-
-    # 调用训练函数 (来自 model.py)
-    logger.info(f"开始训练模型，使用参数: {training_params}")
-    trained_model, history = train(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        config=train_run_config, # Pass the specific config for this run
-        device=device,
-        element=element,
-        augment_fn=add_noise if config['data_config'].get('augmentation_enabled', False) else None # Pass augment_fn
-    )
-
-    if trained_model is None:
-        logger.error("模型训练失败")
-        return None, None
-
-    # 评估模型
-    logger.info("开始评估模型在测试集上的表现")
-    results = evaluate_model(trained_model, test_loader, device)
-
-    if results:
-        logger.info(f"{element} 测试集评估结果: MAE={results['mae']:.4f}, RMSE={results['rmse']:.4f}, R2={results['r2']:.4f}, DEX={results['dex']:.4f}")
-    else:
-        logger.error("模型评估失败")
-        return trained_model, None
-
-    # 可视化训练过程
-    # visualize_training(element, history['train_loss'], history['val_loss'], config['output_config']['plots_dir'])
-
-    return trained_model, results
+            best_hyperparams=best_hyperparams,
+            augment_fn=augment_fn,
+            start_epoch=start_epoch,
+            best_val_loss=best_val_loss
+        )
+        
+        return best_model, val_loss, test_metrics
+        
+    except Exception as e:
+        logger.error(f"训练元素 {element} 时出错: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise
 
 def hyperparameter_tuning(element, train_loader, val_loader, config):
     """
@@ -679,7 +582,7 @@ def process_element(element, model_type, input_size, use_gpu=True):
     
     # 进行训练和评估
     best_model, val_loss, test_metrics = train_and_evaluate_model(
-        train_loader, val_loader, test_loader, element, config
+        model, train_loader, val_loader, test_loader, element, device
     )
     
     # 训练完成，清除中断恢复状态

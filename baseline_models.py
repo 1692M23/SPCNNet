@@ -130,27 +130,11 @@ class XGBoostModel:
     
     def train_in_batches(self, X, y, batch_size=Config.BASELINE_BATCH_SIZE, batches_per_round=Config.BASELINE_BATCHES_PER_ROUND, val_size=0.2, element=None):
         """
-        分批训练XGBoost模型，每批处理后立即生成完整结果
-        
-        参数:
-            X: 特征数据
-            y: 标签数据
-            batch_size: 每批大小
-            batches_per_round: 每轮处理的批次数
-            val_size: 验证集比例
-            element: 元素名称
-        
-        返回:
-            训练好的模型
+        分批增量训练模型
         """
-        # 检查缓存
-        cache_key = f"xgboost_{element}_batches"
-        cache_data = cache_manager.get_cache(cache_key)
-        
-        if cache_data is not None:
-            self.model = cache_data.get('model')
-            self.trained_batches = cache_data.get('trained_batches', [])
-            logger.info(f"从缓存加载XGBoost模型，已训练批次数: {len(self.trained_batches)}")
+        # 初始化模型
+        if self.model is None:
+            self.model = self._create_initial_model()
         
         # 计算批次索引
         n_samples = X.shape[0]
@@ -166,16 +150,8 @@ class XGBoostModel:
         batch_indices = remaining_batches[:batches_per_round]
         logger.info(f"将处理 {len(batch_indices)}/{n_batches} 个批次")
         
-        # 跟踪最佳模型
-        best_model = self.model
-        best_score = float('inf') if self.model is None else 0.0  # 初始分数
-        
-        # 为每批结果创建目录
-        batch_results_dir = os.path.join(config.output_config['results_dir'], f'xgboost_{element}_batch_results')
-        os.makedirs(batch_results_dir, exist_ok=True)
-        
         # 使用进度管理器
-        with ProgressManager(len(batch_indices), desc=f"XGBoost训练 ({element})") as progress:
+        with ProgressManager(len(batch_indices), desc=f"{self.__class__.__name__}训练 ({element})") as progress:
             for batch_id in batch_indices:
                 # 获取批次索引
                 start_idx = batch_id * batch_size
@@ -190,19 +166,33 @@ class XGBoostModel:
                     X_batch, y_batch, test_size=val_size, random_state=42
                 )
                 
-                # 训练模型
-                batch_result = self.train_on_batch(X_train, y_train, X_val, y_val, batch_id)
-                batch_model = batch_result['model']
-                batch_score = batch_result['validation_score']
+                # 增量训练
+                if isinstance(self, XGBoostModel):
+                    dtrain = xgb.DMatrix(X_train, label=y_train)
+                    dval = xgb.DMatrix(X_val, label=y_val)
+                    self.model = xgb.train(
+                        self.params,
+                        dtrain,
+                        evals=[(dtrain, 'train'), (dval, 'val')],
+                        xgb_model=self.model,  # 使用现有模型继续训练
+                        evals_result={},
+                        verbose_eval=100
+                    )
+                elif isinstance(self, LightGBMModel):
+                    train_data = lgb.Dataset(X_train, label=y_train)
+                    val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
+                    self.model = lgb.train(
+                        self.params,
+                        train_data,
+                        valid_sets=[train_data, val_data],
+                        valid_names=['train', 'val'],
+                        init_model=self.model,  # 使用现有模型继续训练
+                        evals_result={},
+                        verbose_eval=100
+                    )
                 
-                # 更新最佳模型
-                if self.model is None or batch_score < best_score:
-                    best_model = batch_model
-                    best_score = batch_score
-                    logger.info(f"批次 {batch_id} 找到更好的模型，验证分数: {best_score:.6f}")
-                
-                # 生成此批次的评估结果
-                self._generate_batch_results(batch_model, batch_id, X_val, y_val, element, batch_results_dir)
+                # 记录已训练的批次
+                self.trained_batches.append(batch_id)
                 
                 # 更新进度
                 progress.update(1)
@@ -210,18 +200,6 @@ class XGBoostModel:
                 # 释放内存
                 del X_batch, y_batch, X_train, X_val, y_train, y_val
                 gc.collect()
-        
-        # 更新当前模型
-        self.model = best_model
-        
-        # 保存到缓存
-        cache_manager.set_cache(cache_key, {
-            'model': self.model,
-            'trained_batches': self.trained_batches
-        })
-        
-        # 生成和更新完整的评估结果
-        self._generate_final_results(element)
         
         return self.model
     
@@ -579,27 +557,11 @@ class LightGBMModel:
     
     def train_in_batches(self, X, y, batch_size=Config.BASELINE_BATCH_SIZE, batches_per_round=Config.BASELINE_BATCHES_PER_ROUND, val_size=0.2, element=None):
         """
-        分批训练LightGBM模型，每批处理后立即生成完整结果
-        
-        参数:
-            X: 特征数据
-            y: 标签数据
-            batch_size: 每批大小
-            batches_per_round: 每轮处理的批次数
-            val_size: 验证集比例
-            element: 元素名称
-        
-        返回:
-            训练好的模型
+        分批增量训练模型
         """
-        # 检查缓存
-        cache_key = f"lightgbm_{element}_batches"
-        cache_data = cache_manager.get_cache(cache_key)
-        
-        if cache_data is not None:
-            self.model = cache_data.get('model')
-            self.trained_batches = cache_data.get('trained_batches', [])
-            logger.info(f"从缓存加载LightGBM模型，已训练批次数: {len(self.trained_batches)}")
+        # 初始化模型
+        if self.model is None:
+            self.model = self._create_initial_model()
         
         # 计算批次索引
         n_samples = X.shape[0]
@@ -615,16 +577,8 @@ class LightGBMModel:
         batch_indices = remaining_batches[:batches_per_round]
         logger.info(f"将处理 {len(batch_indices)}/{n_batches} 个批次")
         
-        # 跟踪最佳模型
-        best_model = self.model
-        best_score = float('inf') if self.model is None else 0.0  # 初始分数
-        
-        # 为每批结果创建目录
-        batch_results_dir = os.path.join(config.output_config['results_dir'], f'lightgbm_{element}_batch_results')
-        os.makedirs(batch_results_dir, exist_ok=True)
-        
         # 使用进度管理器
-        with ProgressManager(len(batch_indices), desc=f"LightGBM训练 ({element})") as progress:
+        with ProgressManager(len(batch_indices), desc=f"{self.__class__.__name__}训练 ({element})") as progress:
             for batch_id in batch_indices:
                 # 获取批次索引
                 start_idx = batch_id * batch_size
@@ -639,19 +593,33 @@ class LightGBMModel:
                     X_batch, y_batch, test_size=val_size, random_state=42
                 )
                 
-                # 训练模型
-                batch_result = self.train_on_batch(X_train, y_train, X_val, y_val, batch_id)
-                batch_model = batch_result['model']
-                batch_score = batch_result['validation_score']
+                # 增量训练
+                if isinstance(self, XGBoostModel):
+                    dtrain = xgb.DMatrix(X_train, label=y_train)
+                    dval = xgb.DMatrix(X_val, label=y_val)
+                    self.model = xgb.train(
+                        self.params,
+                        dtrain,
+                        evals=[(dtrain, 'train'), (dval, 'val')],
+                        xgb_model=self.model,  # 使用现有模型继续训练
+                        evals_result={},
+                        verbose_eval=100
+                    )
+                elif isinstance(self, LightGBMModel):
+                    train_data = lgb.Dataset(X_train, label=y_train)
+                    val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
+                    self.model = lgb.train(
+                        self.params,
+                        train_data,
+                        valid_sets=[train_data, val_data],
+                        valid_names=['train', 'val'],
+                        init_model=self.model,  # 使用现有模型继续训练
+                        evals_result={},
+                        verbose_eval=100
+                    )
                 
-                # 更新最佳模型
-                if self.model is None or batch_score < best_score:
-                    best_model = batch_model
-                    best_score = batch_score
-                    logger.info(f"批次 {batch_id} 找到更好的模型，验证分数: {best_score:.6f}")
-                
-                # 生成此批次的评估结果
-                self._generate_batch_results(batch_model, batch_id, X_val, y_val, element, batch_results_dir)
+                # 记录已训练的批次
+                self.trained_batches.append(batch_id)
                 
                 # 更新进度
                 progress.update(1)
@@ -659,18 +627,6 @@ class LightGBMModel:
                 # 释放内存
                 del X_batch, y_batch, X_train, X_val, y_train, y_val
                 gc.collect()
-        
-        # 更新当前模型
-        self.model = best_model
-        
-        # 保存到缓存
-        cache_manager.set_cache(cache_key, {
-            'model': self.model,
-            'trained_batches': self.trained_batches
-        })
-        
-        # 生成和更新完整的评估结果
-        self._generate_final_results(element)
         
         return self.model
     

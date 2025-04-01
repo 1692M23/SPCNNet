@@ -225,7 +225,7 @@ tuning_config = {
             'weight_decay': [1e-6, 5e-6, 1e-5, 5e-5, 1e-4],
             'batch_size': [16, 32, 64, 128],
             'dropout_rate': [0.2, 0.3, 0.4, 0.5, 0.6],
-            'patience': [5, 10, 15, 20],
+            'patience': [10, 15, 20],
         },
         'stage2_range': {             # 第二阶段精细调整范围 (相对于第一阶段最佳值)
             'lr': [0.5, 2.0],         # 学习率范围系数 [最佳值*0.5, 最佳值*2.0]
@@ -506,4 +506,37 @@ scheduler_config = {
     'T_0': 10,        # 初始周期长度
     'T_mult': 1,     # 周期倍增因子
     'eta_min': 5e-6  # 最小学习率
+}
+
+# XGBoost 超参数建议范围
+xgboost_params = {
+    'objective': 'reg:squarederror',
+    'learning_rate': 0.001,  # 与主模型学习率相近
+    'max_depth': 6,          # 控制模型复杂度
+    'min_child_weight': 1,   # 控制过拟合
+    'subsample': 0.8,        # 随机采样比例
+    'colsample_bytree': 0.8, # 特征采样比例
+    'n_estimators': 1000,    # 树的数量
+    'early_stopping_rounds': 50,
+    'reg_alpha': 0.1,        # L1正则化
+    'reg_lambda': 1.0,       # L2正则化
+    'tree_method': 'gpu_hist' if device_config['device_type'] == 'cuda' else 'hist',  # 使用GPU加速
+    'seed': 42
+}
+
+# LightGBM 超参数建议范围
+lightgbm_params = {
+    'objective': 'regression',
+    'metric': 'mse',
+    'learning_rate': 0.001,  # 与主模型学习率相近
+    'num_leaves': 31,        # 控制模型复杂度
+    'max_depth': -1,         # -1表示无限制
+    'subsample': 0.8,        # 随机采样比例
+    'colsample_bytree': 0.8, # 特征采样比例
+    'n_estimators': 1000,    # 树的数量
+    'early_stopping_rounds': 50,
+    'reg_alpha': 0.1,        # L1正则化
+    'reg_lambda': 1.0,       # L2正则化
+    'device': 'gpu' if device_config['device_type'] == 'cuda' else 'cpu',  # 使用GPU加速
+    'seed': 42
 } 
