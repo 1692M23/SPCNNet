@@ -1195,6 +1195,47 @@ def parse_args():
     
     return parser.parse_args()
 
+def determine_device(requested_device):
+    """根据请求和可用性确定计算设备"""
+    logger = logging.getLogger('main') # Ensure logger is accessible or pass it
+    if requested_device == 'cuda':
+        if torch.cuda.is_available():
+            logger.info("设备设置为 CUDA")
+            return torch.device('cuda')
+        else:
+            logger.warning("请求使用CUDA，但CUDA不可用，将使用CPU")
+            return torch.device('cpu')
+    elif requested_device == 'tpu':
+        if HAS_XLA: # Check if TPU support is available
+            try:
+                device = xm.xla_device()
+                logger.info(f"设备设置为 TPU: {device}")
+                return device
+            except Exception as e:
+                logger.warning(f"请求使用TPU，但初始化失败: {e}，将使用CPU")
+                return torch.device('cpu')
+        else:
+            logger.warning("请求使用TPU，但torch_xla未安装，将使用CPU")
+            return torch.device('cpu')
+    elif requested_device == 'cpu':
+         logger.info("设备设置为 CPU")
+         return torch.device('cpu')
+    else: # Default case if requested_device is None or unrecognized
+         if torch.cuda.is_available():
+             logger.info("未指定设备或无法识别，默认使用 CUDA (可用)")
+             return torch.device('cuda')
+         # elif HAS_XLA: # Optionally default to TPU if CUDA not available
+         #    try:
+         #        device = xm.xla_device()
+         #        logger.info(f"未指定设备或无法识别，默认使用 TPU (可用): {device}")
+         #        return device
+         #    except Exception:
+         #        logger.info("未指定设备或无法识别，CUDA/TPU均不可用，默认使用 CPU")
+         #        return torch.device('cpu')
+         else:
+             logger.info("未指定设备或无法识别，默认使用 CPU")
+             return torch.device('cpu')
+
 def main():
     """程序主入口函数"""
     # 解析命令行参数
