@@ -29,6 +29,16 @@ from fits_cache import FITSCache
 from hyperparameter_tuning_replacement import hyperparameter_tuning as run_grid_search_tuning
 from model_analysis import analyze_model_performance, show_batch_results, analyze_feature_importance, analyze_residuals
 
+# 添加数据增强函数
+def add_noise(batch, noise_level=0.01):
+    """简单的向批次数据添加高斯噪声"""
+    data, labels = batch
+    # 确保 data 和 noise 在同一设备上
+    device = data.device
+    noise = torch.randn_like(data, device=device) * noise_level
+    noisy_data = data + noise
+    return noisy_data, labels
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
@@ -202,8 +212,7 @@ def calculate_dataset_stats(data_loader):
     else:
         return 0.0
 
-def train_and_evaluate_model(model, train_loader, val_loader, test_loader, element, device, 
-                           best_hyperparams=None, augment_fn=None):
+def train_and_evaluate_model(model, train_loader, val_loader, test_loader, element, device, config, augment_fn=None):
     """
     训练和评估模型
     """
@@ -234,6 +243,7 @@ def train_and_evaluate_model(model, train_loader, val_loader, test_loader, eleme
             val_loader=val_loader,
             element=element,
             device=device,
+            config=config,
             augment_fn=augment_fn,
             start_epoch=start_epoch
         )
@@ -465,7 +475,7 @@ class TrainingStateManager:
             os.remove(self.checkpoint_file)
         return True
 
-def process_element(element, model_type, input_size, use_gpu=True):
+def process_element(element, model_type, input_size, use_gpu=True, config=None):
     # 在函数开始处添加
     print(f"正在处理元素: {element}", flush=True)
     logger.info(f"正在处理元素: {element}")
@@ -551,6 +561,14 @@ def process_element(element, model_type, input_size, use_gpu=True):
     val_loader = create_data_loaders(X_val, y_val, batch_size=batch_size, shuffle=False)
     test_loader = create_data_loaders(X_test, y_test, batch_size=batch_size, shuffle=False)
     
+    # 确定数据增强函数
+    augment_fn = None
+    if config.data_config.get('augmentation_enabled', False):
+        noise_level = config.data_config.get('augmentation_params', {}).get('noise_level', 0.01)
+        # 使用在文件顶部定义的 add_noise 函数
+        augment_fn = lambda batch: add_noise(batch, noise_level)
+        logger.info(f"数据增强已启用，噪声水平: {noise_level}")
+
     # 检查是否存在训练状态
     state = state_manager.load_state()
     if state and not state.get('training_completed', False):
@@ -588,7 +606,7 @@ def process_element(element, model_type, input_size, use_gpu=True):
     
     # 进行训练和评估
     best_model, val_loss, test_metrics = train_and_evaluate_model(
-        model, train_loader, val_loader, test_loader, element, device
+        model, train_loader, val_loader, test_loader, element, device, config, augment_fn=augment_fn
     )
     
     # 训练完成，清除中断恢复状态
@@ -716,7 +734,7 @@ def process_multiple_elements(csv_file, fits_dir, element_columns=None,
         
         try:
             # 训练模型
-            best_model, test_metrics = process_element(element, config.model_config.get('model_type'), config.model_config.get('input_size'), config.training_config['device'] == 'cuda')
+            best_model, test_metrics = process_element(element, config.model_config.get('model_type'), config.model_config.get('input_size'), config.training_config['device'] == 'cuda', config=config)
             
             # 保存结果
             result_info = {
@@ -1426,7 +1444,8 @@ def main():
             try:
                 # 根据命令行参数决定是否进行超参数调优
                 tune_hyperparams = args.tune_hyperparams or args.mode == 'tune'
-                process_element(element, config.model_config.get('model_type'), config.model_config.get('input_size'), config.training_config['device'] == 'cuda')
+                # 修改调用，传递 config
+                process_element(element, config.model_config.get('model_type'), config.model_config.get('input_size'), config.training_config['device'] == 'cuda', config=config)
             except Exception as e:
                 logger.error(f"训练元素 {element} 时出错: {str(e)}")
                 logger.error(f"Traceback: {traceback.format_exc()}")
