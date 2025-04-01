@@ -247,10 +247,25 @@ def train_and_evaluate_model(model, train_loader, val_loader, test_loader, eleme
             start_epoch=start_epoch
         )
 
+        # <<< Define loss_fn before calling evaluate_model >>>
+        # Assuming MSELoss is the appropriate loss function here, same as used in train?
+        # Need to get loss_type from config if it varies
+        loss_type = config.training_config.get('loss_function', 'MSE')
+        if loss_type == 'MSE':
+             loss_fn = torch.nn.MSELoss()
+        elif loss_type == 'MAE': # Example for MAE
+             loss_fn = torch.nn.L1Loss()
+        else:
+             logger.warning(f"未知的损失函数类型 '{loss_type}'，将默认使用 MSELoss。")
+             loss_fn = torch.nn.MSELoss()
+        logger.info(f"在最终评估中使用损失函数: {loss_type}")
+        # <<< End define loss_fn >>>
+
         # 训练完成后，使用 test_loader 评估最佳模型
         if best_model is not None:
             logger.info(f"使用测试集评估元素 {element} 的最佳模型")
-            test_metrics = evaluate_model(best_model, test_loader, device)
+            # <<< Pass loss_fn to evaluate_model >>>
+            _, test_metrics, _, _ = evaluate_model(best_model, test_loader, device, loss_fn)
             logger.info(f"元素 {element} 的测试指标: {test_metrics}")
         else:
             logger.warning(f"元素 {element} 未能训练出有效模型，无法进行测试评估")
