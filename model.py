@@ -564,17 +564,20 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
     # 加载性能最好的模型状态
     # 修改：使用属性访问 config.model_config
     best_model_path = os.path.join(config.model_config['model_dir'], f'{element}_best_model.pth')
+    best_model_loaded = False
     if os.path.exists(best_model_path):
         logger.info(f"加载最佳模型: {best_model_path}")
         try:
             best_checkpoint = torch.load(best_model_path, map_location=device)
             model.load_state_dict(best_checkpoint['model_state_dict'])
+            best_model_loaded = True # 标记最佳模型已加载
         except Exception as e:
             logger.warning(f"加载最佳模型失败: {e}。返回当前模型状态。")
     else:
         logger.warning("未找到保存的最佳模型文件，返回当前模型状态。")
 
-    return model, history
+    # 修改返回值：返回加载了最佳权重的模型和最佳验证损失
+    return model, best_val_loss
 
 # =============== 3. 评估相关 ===============
 def evaluate_model(model, test_loader, device=None):
