@@ -619,16 +619,25 @@ def process_element(element, model_type, input_size, use_gpu=True, config=None):
     try:
         # 需要重新获取测试集的预测值和真实值
         logger.info(f"为 {element} 生成可视化图表")
+        # <<< Ensure model is on the correct device before inference >>>
+        model = model.to(device) 
         model.eval() # 确保模型在评估模式
         all_outputs = []
         all_targets = []
+        
+        # <<< Define element_plot_dir HERE >>>
+        plots_dir = config.output_config.get('plots_dir', 'plots') # Get top-level plots directory
+        element_plot_dir = os.path.join(plots_dir, 'evaluation', element) # Define element-specific plot directory
+        os.makedirs(element_plot_dir, exist_ok=True) # Ensure the directory exists
+        # <<< End define element_plot_dir >>>
+        
         with torch.no_grad():
             for inputs, targets in test_loader:
                 inputs, targets = inputs.to(device), targets.to(device)
                  # 处理输入数据中的NaN值 (如果需要)
                 inputs, _, _ = handle_nan_values(inputs, replacement_strategy='mean', name="绘图输入数据")
                 
-                # <<< ADD AUTOCAST HERE for visualization inference >>>
+                # <<< Re-apply AUTOCAST HERE for visualization inference >>>
                 with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
                      outputs = model(inputs)
                 # <<< END AUTOCAST >>>
@@ -638,10 +647,17 @@ def process_element(element, model_type, input_size, use_gpu=True, config=None):
 
                 # 移动到 CPU 并转换为 numpy
                 if str(device).startswith('xla'):
-                     outputs = xm.send_to_host_async(outputs)
-                     targets = xm.send_to_host_async(targets)
-                all_outputs.append(outputs.cpu().numpy())
-                all_targets.append(targets.cpu().numpy())
+                     # Ensure tensor operations are complete before moving for TPU
+                     xm.mark_step()
+                     # Use synchronous send for simplicity during visualization/debugging
+                     cpu_outputs = outputs.cpu().numpy()
+                     cpu_targets = targets.cpu().numpy()
+                else:
+                    cpu_outputs = outputs.cpu().numpy()
+                    cpu_targets = targets.cpu().numpy()
+                
+                all_outputs.append(cpu_outputs)
+                all_targets.append(cpu_targets)
 
         if all_outputs and all_targets:
             y_pred = np.vstack(all_outputs).flatten()
@@ -655,17 +671,20 @@ def process_element(element, model_type, input_size, use_gpu=True, config=None):
             if len(y_pred) > 0:
                 # 绘制散点图: 预测值 vs 真实值
                 plt.figure(figsize=(10, 6))
-                plt.scatter(y_true, y_pred, alpha=0.5)
+                # Use valid data for plotting
+                plt.scatter(y_true, y_pred, alpha=0.5) 
                 # 添加 y=x 对角线作为参考
-                min_val = min(np.min(y_true), np.min(y_pred))
-                max_val = max(np.max(y_true), np.max(y_pred))
+                # Calculate limits based on valid data
+                min_val = min(np.min(y_true), np.min(y_pred)) if len(y_true)>0 else 0
+                max_val = max(np.max(y_true), np.max(y_pred)) if len(y_true)>0 else 1
                 plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Ideal (y=x)')
                 plt.title(f'Prediction vs True for {element}')
                 plt.xlabel('True Values')
                 plt.ylabel('Predicted Values')
                 plt.grid(True)
                 plt.legend()
-                scatter_path = os.path.join(element_plot_dir, f'{element}_scatter_pred_true.png')
+                # Use defined element_plot_dir
+                scatter_path = os.path.join(element_plot_dir, f'{element}_scatter_pred_true.png') 
                 plt.savefig(scatter_path)
                 plt.close()
                 logger.info(f"散点图已保存至: {scatter_path}")
@@ -679,7 +698,8 @@ def process_element(element, model_type, input_size, use_gpu=True, config=None):
                 plt.xlabel('True Values')
                 plt.ylabel('Residuals (True - Predicted)')
                 plt.grid(True)
-                residual_path = os.path.join(element_plot_dir, f'{element}_residuals.png')
+                # Use defined element_plot_dir
+                residual_path = os.path.join(element_plot_dir, f'{element}_residuals.png') 
                 plt.savefig(residual_path)
                 plt.close()
                 logger.info(f"残差图已保存至: {residual_path}")
@@ -697,7 +717,8 @@ def process_element(element, model_type, input_size, use_gpu=True, config=None):
                 plt.ylabel('Frequency')
                 plt.grid(True)
                 plt.legend()
-                hist_path = os.path.join(element_plot_dir, f'{element}_residuals_hist.png')
+                # Use defined element_plot_dir
+                hist_path = os.path.join(element_plot_dir, f'{element}_residuals_hist.png') 
                 plt.savefig(hist_path)
                 plt.close()
                 logger.info(f"残差直方图已保存至: {hist_path}")
@@ -705,6 +726,9 @@ def process_element(element, model_type, input_size, use_gpu=True, config=None):
             else:
                  logger.warning(f"元素 {element} 没有有效的预测数据，无法生成可视化图表。")
 
+    except NameError as ne:
+        logger.error(f"生成可视化图表时变量未定义: {ne}") # Specific logging for NameError
+        logger.error(traceback.format_exc())
     except Exception as plot_err:
         logger.error(f"为 {element} 生成可视化图表时出错: {plot_err}")
         logger.error(traceback.format_exc())
