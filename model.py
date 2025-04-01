@@ -585,70 +585,81 @@ def evaluate_model(model, data_loader, device, loss_fn):
     total_loss = 0.0
     all_outputs = []
     all_targets = []
-    logger.info("[Evaluate] Starting evaluation...") # Log start
+    logger.info("[Evaluate V3] Starting evaluation...") # Add version marker
     
+    # Determine if AMP should be enabled based on device
+    amp_enabled = (str(device).startswith('cuda'))
+    logger.info(f"[Evaluate V3] AMP enabled: {amp_enabled}")
+
     with torch.no_grad():
         for i, (inputs, targets) in enumerate(data_loader):
-            inputs = inputs.to(device, non_blocking=True) # Use non_blocking for potential speedup
+            inputs = inputs.to(device, non_blocking=True) 
             targets = targets.to(device, non_blocking=True)
             
-            # Handle potential NaNs in input during evaluation
-            # Consider converting to float32 *before* checking NaNs if input could be other types
-            inputs, _, _ = handle_nan_values(inputs.float(), replacement_strategy='mean', name=f"评估输入_batch{i}")
+            # Ensure input is float32 before potential autocast or NaN handling
+            inputs = inputs.float()
+            targets = targets.float()
             
-            # <<< Ensure AUTOCAST wraps the model call >>>
-            amp_enabled = (device.type == 'cuda')
+            # Handle potential NaNs in input 
+            inputs, _, _ = handle_nan_values(inputs, replacement_strategy='mean', name=f"评估输入_batch{i}")
+            
+            outputs = None # Initialize outputs
+            loss = torch.tensor(0.0, device=device, dtype=torch.float32) # Initialize loss
+
             try:
+                 # <<< CORE CHANGE: Wrap model call and loss calculation inside autocast >>>
                  with torch.cuda.amp.autocast(enabled=amp_enabled):
-                     # logger.info(f"[Evaluate Batch {i}] AMP enabled: {amp_enabled}, Input dtype: {inputs.dtype}")
-                     outputs = model(inputs) # <<< The actual model call
-                     # logger.info(f"[Evaluate Batch {i}] Output dtype: {outputs.dtype}")
-                     # Ensure loss calculation happens with appropriate types
-                     # Convert outputs/targets to float32 before loss if necessary and not done by autocast
-                     loss = loss_fn(outputs.float(), targets.float()) 
-                     # logger.info(f"[Evaluate Batch {i}] Loss: {loss.item():.4f}, Loss dtype: {loss.dtype}")
+                     outputs = model(inputs) 
+                     # Ensure outputs and targets are float32 for loss function
+                     loss = loss_fn(outputs.float(), targets.float())
+                 # <<< END AUTOCAST >>>
                      
-                     # Handle potential NaNs in output/loss AFTER calculation
-                     if torch.isnan(loss) or torch.isinf(loss):
-                         logger.warning(f"[Evaluate Batch {i}] 检测到 NaN/Inf 损失！Input dtype: {inputs.dtype}, Output dtype: {outputs.dtype}, Loss: {loss.item()}")
-                         if torch.isnan(outputs).any() or torch.isinf(outputs).any():
-                              logger.warning(f"[Evaluate Batch {i}] 模型原始输出包含 NaN/Inf！")
-                         # Attempt to use a safe value or skip loss contribution
-                         loss = torch.tensor(0.0, device=device, dtype=torch.float32) 
-                         # As a fallback for outputs, maybe create zeros matching target shape?
-                         outputs = torch.zeros_like(targets, dtype=torch.float32) 
+                 # Handle potential NaNs/Infs in loss AFTER calculation
+                 if torch.isnan(loss) or torch.isinf(loss):
+                     logger.warning(f"[Evaluate Batch {i}] 检测到 NaN/Inf 损失！Loss: {loss.item()}")
+                     loss = torch.tensor(0.0, device=device, dtype=torch.float32) 
+                     # If loss is bad, outputs might also be bad, reset them
+                     if outputs is None or torch.isnan(outputs).any() or torch.isinf(outputs).any():
+                          logger.warning(f"[Evaluate Batch {i}] 模型输出包含 NaN/Inf 或计算失败。")
+                          outputs = torch.zeros_like(targets, dtype=torch.float32)
+                 
+                 # Handle NaNs/Infs in outputs if they somehow survived or occurred outside loss calc
+                 if outputs is None or torch.isnan(outputs).any() or torch.isinf(outputs).any():
+                     logger.warning(f"[Evaluate Batch {i}] 最终输出包含 NaN/Inf，将被替换为零。")
+                     outputs = torch.zeros_like(targets, dtype=torch.float32)
 
             except RuntimeError as e:
-                 logger.error(f"[Evaluate Batch {i}] RuntimeError during model inference or loss calculation: {e}")
-                 logger.error(traceback.format_exc())
-                 # Assign safe values on error to allow aggregation loop to continue
+                 logger.error(f"[Evaluate Batch {i}] RuntimeError during autocast/model/loss: {e}")
+                 # traceback.print_exc() # Uncomment for full traceback during debugging
                  loss = torch.tensor(0.0, device=device, dtype=torch.float32)
                  outputs = torch.zeros_like(targets, dtype=torch.float32)
-            except Exception as e: # Catch other potential errors
-                 logger.error(f"[Evaluate Batch {i}] Unexpected error during model inference or loss calculation: {e}")
-                 logger.error(traceback.format_exc())
+            except Exception as e:
+                 logger.error(f"[Evaluate Batch {i}] Unexpected error: {e}")
+                 # traceback.print_exc()
                  loss = torch.tensor(0.0, device=device, dtype=torch.float32)
                  outputs = torch.zeros_like(targets, dtype=torch.float32)
 
-            total_loss += loss.item() * inputs.size(0) # Use loss.item() which is float64
-            # Ensure outputs moved to CPU are float32 for numpy compatibility
+            # Accumulate loss
+            total_loss += loss.item() * inputs.size(0) 
+            # Append results (ensure float32 for numpy)
             all_outputs.append(outputs.cpu().float().numpy())
             all_targets.append(targets.cpu().float().numpy())
             
-    logger.info("[Evaluate] Aggregation complete.")
+    logger.info("[Evaluate V3] Aggregation complete.")
     avg_loss = total_loss / len(data_loader.dataset) if len(data_loader.dataset) > 0 else 0
     
-    # Ensure concatenation happens with float32 numpy arrays
+    # Stack results carefully
     try:
+        if not all_outputs or not all_targets:
+             raise ValueError("No valid outputs or targets collected during evaluation.")
         y_pred = np.vstack(all_outputs).astype(np.float32).flatten()
         y_true = np.vstack(all_targets).astype(np.float32).flatten()
     except ValueError as ve:
-        logger.error(f"[Evaluate] Error during vstack, likely due to inconsistent shapes from errors: {ve}")
-        # Return NaN metrics if stacking fails
+        logger.error(f"[Evaluate V3] Error during vstack: {ve}")
         metrics = {k: np.nan for k in ['mse', 'rmse', 'mae', 'r2']}
         return avg_loss, metrics, np.array([]), np.array([])
 
-    # Filter NaNs from predictions/targets before calculating metrics
+    # Filter NaNs from final arrays before calculating metrics
     valid_mask = ~np.isnan(y_pred) & ~np.isnan(y_true)
     y_pred_valid = y_pred[valid_mask]
     y_true_valid = y_true[valid_mask]
