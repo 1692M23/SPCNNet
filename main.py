@@ -1636,8 +1636,7 @@ def main():
                     continue # Skip tuning for this element
                 # --- END Re-inserting DataLoader creation --- 
 
-                # <<< NEW CODE: Prepare and filter param_grid >>>
-                custom_param_grid = None
+                # <<< START MODIFICATION: Remove filtering, pass base grid >>>
                 base_param_grid = None
                 try:
                     config_module = config # config should be accessible in main()
@@ -1646,44 +1645,19 @@ def main():
                         # Ensure 'param_grid' exists within tuning_config
                         if hasattr(config_module.tuning_config, 'param_grid'):
                              base_param_grid = config_module.tuning_config.param_grid
+                             logger.info(f"从配置加载超参数网格: {base_param_grid}")
                         else:
                              # Try accessing via dict key if it's a dict
                              base_param_grid = config_module.tuning_config.get('param_grid')
+                             if base_param_grid:
+                                 logger.info(f"从配置加载超参数网格 (dict key): {base_param_grid}")
 
-                    # If still None, the tuning function will use its internal default
-                    if base_param_grid:
-                        custom_param_grid = base_param_grid.copy() # Work on a copy
-                        logger.info(f"原始超参数网格: {custom_param_grid}")
-
-                        # Filter based on command-line args (args should be accessible in main())
-                        # Use config.use_gru and config.use_gcn which are set based on args earlier
-                        if 'use_gru' in custom_param_grid:
-                             # Use the value set in config based on args
-                            if not config.use_gru:
-                                custom_param_grid['use_gru'] = [False]
-                                logger.info("根据配置 (来自命令行参数)，将 'use_gru' 限制为 [False]")
-                            # else: # If you want to force True if the flag --use_gru was explicitly passed
-                            #    if args.use_gru: # Check the raw arg
-                            #         custom_param_grid['use_gru'] = [True]
-                            #         logger.info("根据配置 (来自命令行参数)，将 'use_gru' 限制为 [True]")
-
-                        if 'use_gcn' in custom_param_grid:
-                             # Use the value set in config based on args
-                            if not config.use_gcn:
-                                custom_param_grid['use_gcn'] = [False]
-                                logger.info("根据配置 (来自命令行参数)，将 'use_gcn' 限制为 [False]")
-                            # else:
-                            #     if args.use_gcn:
-                            #          custom_param_grid['use_gcn'] = [True]
-                            #          logger.info("根据配置 (来自命令行参数)，将 'use_gcn' 限制为 [True]")
-
-                        logger.info(f"过滤后的超参数网格: {custom_param_grid}")
-                    else:
-                        logger.warning("无法从配置中获取基础 param_grid，将依赖调优函数内部默认值（可能不遵守命令行标志）")
+                    if base_param_grid is None:
+                         logger.warning("配置中未找到 param_grid，调优函数将使用内部默认网格。")
 
                 except Exception as grid_err:
-                     logger.error(f"过滤 param_grid 时出错: {grid_err}，将使用默认网格。")
-                # <<< END NEW CODE >>>
+                     logger.error(f"获取 param_grid 时出错: {grid_err}，调优函数将使用内部默认网格。")
+                # <<< END MODIFICATION >>>
 
 
                 # 4. Call run_grid_search_tuning if loaders are ready
@@ -1697,7 +1671,7 @@ def main():
                             val_loader=val_loader_tune,
                             device=current_device,
                             config_module=config_module,
-                            param_grid=custom_param_grid # <<< Pass the filtered grid
+                            param_grid=base_param_grid # <<< Pass the base grid (or None)
                         )
                         logger.info("run_grid_search_tuning 调用结束")
                         # ... (rest of the tuning block: handling results, saving best_params, etc.)
