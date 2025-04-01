@@ -613,7 +613,8 @@ def process_element(element, model_type, input_size, use_gpu=True, config=None):
     logger.info(f"元素 {element} 的处理完成")
     logger.info(f"验证损失: {val_loss:.6f}")
     logger.info(f"测试指标: {test_metrics}")
-
+    logger.info(f"R² Score (Test): {test_metrics.get('r2', 'N/A')}") # Explicitly log R²
+    
     # --- 开始添加可视化代码 ---
     try:
         # 需要重新获取测试集的预测值和真实值
@@ -1586,21 +1587,51 @@ def main():
                          continue
 
 
-                # 3. Create DataLoaders for tuning
-                train_loader_tune, val_loader_tune = None, None
-                if y_train_element is not None and y_val_element is not None: # Check if we successfully got labels
-                    # Use command-line batch size for hyperopt if provided, else from config, else default
-                    tune_batch_size = getattr(args, 'batch_size_hyperopt', config.tuning_config.get('batch_size', 64))
-                    logger.info(f"创建用于超参数调优的数据加载器，批次大小: {tune_batch_size}")
-                    try:
-                        train_loader_tune = create_data_loaders(X_train_data, y_train_element, batch_size=tune_batch_size, shuffle=True)
-                        val_loader_tune = create_data_loaders(X_val_data, y_val_element, batch_size=tune_batch_size, shuffle=False)
-                    except Exception as loader_err:
-                        logger.error(f"为元素 {element} 创建调优数据加载器时出错: {loader_err}")
-                        continue # Skip tuning for this element
-                else:
-                    logger.error(f"未能为元素 {element} 准备标签数据，无法创建调优加载器。")
-                    continue # Skip tuning for this element
+                # 3. Create DataLoaders for tuning (unless reusing from train/all block)
+                # ... (existing code for creating train_loader_tune, val_loader_tune) ...
+
+                # <<< NEW CODE: Prepare and filter param_grid >>>
+                custom_param_grid = None
+                base_param_grid = None
+                try:
+                    # Get base grid from config or default in tuning function
+                    if config_module and hasattr(config_module, 'tuning_config'):
+                        base_param_grid = config_module.tuning_config.get('param_grid')
+                    # If still None, the tuning function will use its internal default
+                    
+                    if base_param_grid:
+                        custom_param_grid = base_param_grid.copy() # Work on a copy
+                        logger.info(f"原始超参数网格: {custom_param_grid}")
+
+                        # Filter based on command-line args (assuming args object is accessible)
+                        # Need to know how --no_gru/--no_gcn flags affect args
+                        # Common pattern: args.use_gru is False if --no_gru is specified
+                        if 'use_gru' in custom_param_grid:
+                            if not getattr(args, 'use_gru', True): # Default to True if arg not found
+                                custom_param_grid['use_gru'] = [False]
+                                logger.info("根据命令行参数，将 'use_gru' 限制为 [False]")
+                            # Optional: If flag is True, maybe restrict to only True?
+                            # else:
+                            #     custom_param_grid['use_gru'] = [True] 
+                            #     logger.info("根据命令行参数，将 'use_gru' 限制为 [True]")
+                                
+                        if 'use_gcn' in custom_param_grid:
+                           if not getattr(args, 'use_gcn', True): # Default to True if arg not found
+                                custom_param_grid['use_gcn'] = [False]
+                                logger.info("根据命令行参数，将 'use_gcn' 限制为 [False]")
+                           # Optional: If flag is True, maybe restrict to only True?
+                           # else:
+                           #      custom_param_grid['use_gcn'] = [True]
+                           #      logger.info("根据命令行参数，将 'use_gcn' 限制为 [True]")
+                        logger.info(f"过滤后的超参数网格: {custom_param_grid}")
+                    else:
+                        logger.warning("无法从配置中获取基础 param_grid，将依赖调优函数内部默认值（可能不遵守命令行标志）")
+
+                except NameError:
+                    logger.warning("无法访问 'args' 或 'config_module' 来过滤 param_grid，将使用默认网格。")
+                except Exception as grid_err:
+                     logger.error(f"过滤 param_grid 时出错: {grid_err}，将使用默认网格。")
+                # <<< END NEW CODE >>>
 
 
                 # 4. Call run_grid_search_tuning if loaders are ready
@@ -1613,9 +1644,11 @@ def main():
                             train_loader=train_loader_tune,
                             val_loader=val_loader_tune,
                             device=current_device,
-                            config_module=config_module
+                            config_module=config_module,
+                            param_grid=custom_param_grid # <<< Pass the filtered grid
                         )
                         logger.info("run_grid_search_tuning 调用结束")
+                        # ... (rest of the tuning block: handling results, saving best_params, etc.)
 
                         # 5. Handle results
                         if best_params:
