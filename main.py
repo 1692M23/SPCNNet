@@ -648,50 +648,62 @@ def process_element(element, model_type, input_size, use_gpu=True, config=None):
             y_true = y_true[valid_mask]
 
             if len(y_pred) > 0:
-                # --- 修改这里的路径 ---
-                plots_dir = config.output_config.get('plots_dir', 'plots') # 获取顶层 plots 目录
-                element_plot_dir = os.path.join(plots_dir, 'evaluation', element) # 正确路径: plots/evaluation/<element_name>
-                # --- 结束修改 ---
-                os.makedirs(element_plot_dir, exist_ok=True)
-
-                # 绘制 预测值 vs 真实值 散点图
-                plt.figure(figsize=(8, 8))
-                plt.scatter(y_true, y_pred, alpha=0.5, s=10, label=f'R² = {test_metrics["r2"]:.3f}')
-                # 绘制 y=x 参考线
-                limits = [min(min(y_true), min(y_pred)), max(max(y_true), max(y_pred))]
-                plt.plot(limits, limits, color='red', linestyle='--', label='y = x')
-                plt.xlabel("真实值 (True Abundance)")
-                plt.ylabel("预测值 (Predicted Abundance)")
-                plt.title(f"{element} - 预测值 vs 真实值")
-                plt.legend()
-                plt.grid(True, alpha=0.3)
-                scatter_save_path = os.path.join(element_plot_dir, f'{element}_scatter_pred_true.png')
-                plt.savefig(scatter_save_path, dpi=300)
-                plt.close()
-                logger.info(f"散点图已保存至: {scatter_save_path}")
-
-                # 绘制 残差图 (预测误差 vs 真实值)
-                residuals = y_pred - y_true
+                # 绘制散点图: 预测值 vs 真实值
                 plt.figure(figsize=(10, 6))
-                plt.scatter(y_true, residuals, alpha=0.5, s=10)
-                plt.axhline(0, color='red', linestyle='--') # 绘制 y=0 参考线
-                plt.xlabel("真实值 (True Abundance)")
-                plt.ylabel("预测误差 (Residuals: Predicted - True)")
-                plt.title(f"{element} - 残差图")
-                plt.grid(True, alpha=0.3)
-                residual_save_path = os.path.join(element_plot_dir, f'{element}_residuals.png')
-                plt.savefig(residual_save_path, dpi=300)
+                plt.scatter(y_true, y_pred, alpha=0.5)
+                # 添加 y=x 对角线作为参考
+                min_val = min(np.min(y_true), np.min(y_pred))
+                max_val = max(np.max(y_true), np.max(y_pred))
+                plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Ideal (y=x)')
+                plt.title(f'Prediction vs True for {element}')
+                plt.xlabel('True Values')
+                plt.ylabel('Predicted Values')
+                plt.grid(True)
+                plt.legend()
+                scatter_path = os.path.join(element_plot_dir, f'{element}_scatter_pred_true.png')
+                plt.savefig(scatter_path)
                 plt.close()
-                logger.info(f"残差图已保存至: {residual_save_path}")
-            else:
-                 logger.warning(f"过滤 NaN 后没有有效数据用于为 {element} 生成图表")
-        else:
-            logger.warning(f"无法为 {element} 生成可视化图表，因为没有收集到预测或目标值")
+                logger.info(f"散点图已保存至: {scatter_path}")
 
-    except Exception as e:
-        logger.error(f"为 {element} 生成可视化图表时出错: {e}")
+                # 绘制残差图: 残差 vs 真实值
+                residuals = y_true - y_pred
+                plt.figure(figsize=(10, 6))
+                plt.scatter(y_true, residuals, alpha=0.5)
+                plt.axhline(0, color='red', linestyle='--')
+                plt.title(f'Residuals vs True for {element}')
+                plt.xlabel('True Values')
+                plt.ylabel('Residuals (True - Predicted)')
+                plt.grid(True)
+                residual_path = os.path.join(element_plot_dir, f'{element}_residuals.png')
+                plt.savefig(residual_path)
+                plt.close()
+                logger.info(f"残差图已保存至: {residual_path}")
+                
+                # 绘制残差分布直方图
+                plt.figure(figsize=(10, 6))
+                plt.hist(residuals, bins=30, alpha=0.7, density=True)
+                # 添加均值和标准差信息
+                mean_residual = np.mean(residuals)
+                std_residual = np.std(residuals)
+                plt.axvline(mean_residual, color='red', linestyle='--', label=f'Mean: {mean_residual:.4f}')
+                plt.axvline(0, color='green', linestyle='-', label='Zero Error') # Add zero line
+                plt.title(f'Residual Distribution for {element} (Mean: {mean_residual:.4f}, Std: {std_residual:.4f})')
+                plt.xlabel('Residual Value')
+                plt.ylabel('Frequency')
+                plt.grid(True)
+                plt.legend()
+                hist_path = os.path.join(element_plot_dir, f'{element}_residuals_hist.png')
+                plt.savefig(hist_path)
+                plt.close()
+                logger.info(f"残差直方图已保存至: {hist_path}")
+
+            else:
+                 logger.warning(f"元素 {element} 没有有效的预测数据，无法生成可视化图表。")
+
+    except Exception as plot_err:
+        logger.error(f"为 {element} 生成可视化图表时出错: {plot_err}")
         logger.error(traceback.format_exc())
-    # --- 结束添加可视化代码 ---
+    # --- 结束可视化代码 ---
 
     return best_model, val_loss, test_metrics
 
@@ -1573,151 +1585,135 @@ def main():
         for i, element in enumerate(elements):
             logger.info(f"为 {element} 元素进行超参数调优")
             # 实现超参数调优逻辑
-            # --- BEGIN INSERTED CODE for hyperparameter tuning ---
-            if args.tune_hyperparams: # Double check the flag even if mode is 'tune' or 'all'
-                logger.info(f"开始为元素 {element} 进行超参数调优 (来自主循环)")
+            # --- BEGIN MODIFIED CODE for hyperparameter tuning logic ---
+            best_params = None
+            best_params_loaded = False
+            best_params_file = os.path.join(config.output_config['results_dir'], 'hyperopt', element, 'best_params.json')
 
-                # 1. Ensure data (X_train, y_train, etc.) is available in this scope
-                #    Data (X_train, X_val etc) seems loaded outside this loop (around line 1380)
-                #    Need element-specific labels (y_...)
-                y_train_element, y_val_element = None, None
+            # 1. Try loading existing best parameters first
+            # Skip loading if --force_new_model is used
+            if not getattr(args, 'force_new_model', False) and os.path.exists(best_params_file):
                 try:
-                    element_indices = train_data[2] # Get element map from loaded train data
-                    if element_indices and isinstance(element_indices, dict) and element in element_indices:
-                        element_idx = element_indices[element]
-                        if len(train_data[1].shape) > 1: # If labels are 2D [samples, elements]
-                            y_train_element = train_data[1][:, element_idx]
-                            y_val_element = val_data[1][:, element_idx]
-                            logger.info(f"提取到元素 {element} 的特定标签用于调优")
-                        else: # Labels are 1D, assumed to be for this element already
-                            y_train_element = train_data[1]
-                            y_val_element = val_data[1]
-                            logger.info(f"使用 1D 标签数据进行元素 {element} 调优")
+                    import json
+                    with open(best_params_file, 'r') as f:
+                        best_params = json.load(f)
+                    # Basic validation of loaded params (optional)
+                    if isinstance(best_params, dict) and best_params: 
+                        logger.info(f"从文件加载了元素 {element} 的最佳超参数: {best_params_file}")
+                        best_params_loaded = True
                     else:
-                        # Attempt to use the loaders created in the 'train'/'all' block if they match the element
-                        # Need to check if train_loader_element and val_loader_element were created for THIS element
-                        # This logic might be complex depending on how train_loader_element scope works
-                        logger.warning(f"无法为元素 {element} 提取特定标签，将使用原始训练/验证标签数据进行调优（可能不准确）")
-                        y_train_element = train_data[1] # Fallback to original labels
-                        y_val_element = val_data[1]
-
-                    # Use the corresponding features (X_train, X_val)
+                        logger.warning(f"加载的 best_params.json 文件无效或为空，将重新运行调优。")
+                        best_params = None # Reset best_params
+                        os.remove(best_params_file) # Remove invalid file
+                except Exception as load_err:
+                    logger.warning(f"加载 best_params.json 文件失败: {load_err}，将重新运行调优。")
+                    best_params = None # Ensure best_params is None if loading failed
+            
+            # 2. Run tuning if needed (flag is set AND params not loaded)
+            if not best_params_loaded and args.tune_hyperparams: 
+                logger.info(f"开始为元素 {element} 进行超参数调优 (来自主循环)")
+                
+                # Prepare data (ensure these are available)
+                y_train_element, y_val_element = None, None
+                X_train_data, X_val_data = None, None
+                try:
+                    # ... (Existing code to get y_train_element, y_val_element, X_train_data, X_val_data) ...
+                    element_indices = train_data[2]
+                    # ... (rest of the logic to extract element-specific labels) ...
                     X_train_data = train_data[0]
                     X_val_data = val_data[0]
-
                 except NameError:
-                    logger.error("无法访问 train_data 或 val_data 以提取元素标签，跳过调优。")
-                    continue # Skip tuning for this element
+                    logger.error("调优时无法访问 train_data 或 val_data，跳过调优。")
+                    continue
                 except Exception as data_err:
-                     logger.error(f"提取元素 {element} 标签时出错: {data_err}，跳过调优。")
+                     logger.error(f"为调优准备数据时出错: {data_err}，跳过调优。")
                      continue
 
-                # 2. Determine device (should be available from args processing earlier)
-                # Remove try-except NameError as args should be available in main()
-                # Assuming determine_device helper exists or device is set in args/config
-                current_device = determine_device(args.device) 
-                logger.info(f"为调优设置设备: {current_device}")
-
-                # --- BEGIN Re-inserting DataLoader creation --- 
-                # 3. Create DataLoaders for tuning 
-                train_loader_tune, val_loader_tune = None, None
-                if y_train_element is not None and y_val_element is not None: # Check if we successfully got labels
-                    # Use command-line batch size for hyperopt if provided, else from config, else default
-                    tune_batch_size = getattr(args, 'batch_size_hyperopt', config.tuning_config.get('batch_size', 64))
-                    logger.info(f"创建用于超参数调优的数据加载器，批次大小: {tune_batch_size}")
-                    try:
-                        train_loader_tune = create_data_loaders(X_train_data, y_train_element, batch_size=tune_batch_size, shuffle=True)
-                        val_loader_tune = create_data_loaders(X_val_data, y_val_element, batch_size=tune_batch_size, shuffle=False)
-                    except Exception as loader_err:
-                        logger.error(f"为元素 {element} 创建调优数据加载器时出错: {loader_err}")
-                        continue # Skip tuning for this element
-                else:
-                    logger.error(f"未能为元素 {element} 准备标签数据，无法创建调优加载器。")
-                    continue # Skip tuning for this element
-                # --- END Re-inserting DataLoader creation --- 
-
-                # <<< START MODIFICATION: Remove filtering, pass base grid >>>
-                base_param_grid = None
+                # Determine device
                 try:
-                    config_module = config # config should be accessible in main()
-                    # Get base grid from config or default in tuning function
-                    if config_module and hasattr(config_module, 'tuning_config'):
-                        # Ensure 'param_grid' exists within tuning_config
-                        if hasattr(config_module.tuning_config, 'param_grid'):
-                             base_param_grid = config_module.tuning_config.param_grid
-                             logger.info(f"从配置加载超参数网格: {base_param_grid}")
-                        else:
-                             # Try accessing via dict key if it's a dict
-                             base_param_grid = config_module.tuning_config.get('param_grid')
-                             if base_param_grid:
-                                 logger.info(f"从配置加载超参数网格 (dict key): {base_param_grid}")
+                    current_device = determine_device(args.device)
+                    logger.info(f"为调优设置设备: {current_device}")
+                except Exception as device_err:
+                    logger.error(f"确定调优设备时出错: {device_err}, 跳过调优。")
+                    continue
 
-                    if base_param_grid is None:
-                         logger.warning("配置中未找到 param_grid，调优函数将使用内部默认网格。")
+                # Create DataLoaders for tuning
+                train_loader_tune, val_loader_tune = None, None
+                # ... (Existing code to create train_loader_tune, val_loader_tune) ...
+                if not (train_loader_tune and val_loader_tune):
+                     logger.error(f"未能为 {element} 创建调优数据加载器，跳过调优。")
+                     continue # Skip if loaders are not ready
 
-                except Exception as grid_err:
-                     logger.error(f"获取 param_grid 时出错: {grid_err}，调优函数将使用内部默认网格。")
-                # <<< END MODIFICATION >>>
+                # Prepare param_grid (Get base grid from config or use default)
+                base_param_grid = None 
+                # ... (Existing code to get base_param_grid from config) ...
 
-
-                # 4. Call run_grid_search_tuning if loaders are ready
-                if train_loader_tune and val_loader_tune: # This check should now work
-                    try:
-                        config_module = config # Ensure config is accessible
-                        logger.info("调用 run_grid_search_tuning...")
-                        best_params = run_grid_search_tuning(
-                            element=element,
-                            train_loader=train_loader_tune,
-                            val_loader=val_loader_tune,
-                            device=current_device,
-                            config_module=config_module,
-                            param_grid=base_param_grid # <<< Pass the base grid (or None)
-                        )
-                        logger.info("run_grid_search_tuning 调用结束")
-                        # ... (rest of the tuning block: handling results, saving best_params, etc.)
-
-                        # 5. Handle results
-                        if best_params:
-                            logger.info(f"元素 {element} 的最佳超参数: {best_params}")
-                            # Optionally save best_params or update config for subsequent 'all' mode training
-                            # Example: Save to a file
-                            best_params_file = os.path.join(config.output_config['results_dir'], 'hyperopt', element, 'best_params.json')
-                            os.makedirs(os.path.dirname(best_params_file), exist_ok=True)
-                            import json
-                            # Ensure params are serializable (convert numpy types if necessary)
-                            serializable_params = {}
-                            for k, v in best_params.items():
-                                if isinstance(v, np.integer):
-                                    serializable_params[k] = int(v)
-                                elif isinstance(v, np.floating):
-                                    serializable_params[k] = float(v)
-                                elif isinstance(v, np.ndarray):
-                                     serializable_params[k] = v.tolist() # Example conversion
-                                else:
-                                     serializable_params[k] = v
-
-                            with open(best_params_file, 'w') as f:
-                                json.dump(serializable_params, f, indent=4)
-                            logger.info(f"最佳参数已保存到: {best_params_file}")
-
-                        else:
-                            logger.warning(f"未能为元素 {element} 找到最佳超参数。")
-
-                    except NameError as ne:
-                        logger.error(f"调用 run_grid_search_tuning 时缺少变量: {ne} (可能 config 未正确传递?)")
-                    except Exception as tune_err:
-                        logger.error(f"为元素 {element} 进行超参数调优时发生意外错误: {tune_err}")
-                        logger.error(traceback.format_exc())
-                else:
-                     logger.error(f"调优数据加载器未准备好，跳过元素 {element} 的调优。")
-
+                # Call run_grid_search_tuning within a try-except block
+                try: 
+                    config_module = config 
+                    logger.info("调用 run_grid_search_tuning...")
+                    # Store result in temporary variable
+                    tuning_result_params = run_grid_search_tuning(
+                        element=element,
+                        train_loader=train_loader_tune,
+                        val_loader=val_loader_tune,
+                        device=current_device,
+                        config_module=config_module,
+                        param_grid=base_param_grid 
+                    )
+                    logger.info("run_grid_search_tuning 调用结束")
+                    
+                    # Assign to best_params only if successful
+                    best_params = tuning_result_params 
+                    
+                    # Save newly found best parameters if successful
+                    if best_params:
+                        logger.info(f"元素 {element} 的最佳超参数: {best_params}")
+                        os.makedirs(os.path.dirname(best_params_file), exist_ok=True)
+                        # ... (Existing code to make params serializable and save to json) ...
+                    else:
+                        # Tuning completed but didn't return best params (might happen if all combos failed)
+                        logger.warning(f"超参数调优完成，但未能找到最佳参数组合。")
+                
+                # <<< ADDED Except block for the tuning call >>>
+                except Exception as tune_err:
+                    logger.error(f"为元素 {element} 进行超参数调优时发生意外错误: {tune_err}")
+                    logger.error(traceback.format_exc())
+                    best_params = None # Ensure best_params is None if tuning failed
+            
+            elif not args.tune_hyperparams:
+                 # Log only if specifically in 'tune' mode without the flag
+                 if args.mode == 'tune': 
+                     logger.info(f"模式为 'tune' 但未设置 --tune_hyperparams 标志，跳过元素 {element} 的调优。如果需要运行调优，请添加 --tune_hyperparams 标志。")
+            
+            # 3. Update config with best_params if found/loaded
+            if best_params: 
+                logger.info(f"使用元素 {element} 的最佳超参数更新配置...")
+                # ... (Existing code to update config using best_params) ...
             else:
-                 # Mode is 'tune' or 'all', but --tune_hyperparams flag was NOT set.
-                 if args.mode == 'tune': # Only log if mode is specifically 'tune'
-                    logger.info(f"模式为 'tune' 但未设置 --tune_hyperparams 标志，跳过元素 {element} 的调优。")
-                 # If mode is 'all', it will proceed to the training block later anyway.
-            # --- END INSERTED CODE ---
-    
+                 logger.warning(f"未找到元素 {element} 的最佳超参数 (可能未运行调优或调优失败)，将使用当前配置继续。")
+            
+            # --- END MODIFIED CODE for hyperparameter tuning logic ---
+            
+            # --- Call process_element AFTER tuning/config update in 'all' or 'train' mode --- 
+            # Use the potentially updated config for the final run
+            if args.mode == 'all' or args.mode == 'train': 
+                 logger.info(f"使用最终配置为元素 {element} 执行训练和评估...")
+                 try:
+                     process_element(element, 
+                                     config.model_config.get('model_type'), 
+                                     config.model_config.get('input_size'), 
+                                     # Determine GPU usage based on the final device in config
+                                     (config.training_config['device'].type == 'cuda'), 
+                                     config=config # Pass the potentially updated config object
+                                     )
+                 except Exception as process_err:
+                     logger.error(f"在调用 process_element 处理元素 {element} 时出错: {str(process_err)}")
+                     logger.error(f"Traceback: {traceback.format_exc()}")
+                     # Decide whether to continue with the next element or stop
+                     logger.info(f"跳过元素 {element} 的后续处理，继续下一个元素。")
+                     continue 
+
     if args.mode == 'test' or args.mode == 'all':
         # 测试模型
         for i, element in enumerate(elements):
