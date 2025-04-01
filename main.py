@@ -1591,44 +1591,50 @@ def main():
                  logger.info(f"[Main Loop] 未加载参数且设置了 tune_hyperparams，开始调优...")
                  # Prepare data, device, loaders for tuning
                  try:
-                      y_train_element, y_val_element = None, None
-                      element_indices = train_data[2]
-                      # ... (logic to extract element specific labels) ...
-                      if element_indices and isinstance(element_indices, dict) and element in element_indices:
-                           element_idx = element_indices[element]
-                           if len(train_data[1].shape) > 1: 
-                                y_train_element = train_data[1][:, element_idx]
-                                y_val_element = val_data[1][:, element_idx]
-                           else: 
-                                y_train_element = train_data[1]
-                                y_val_element = val_data[1]
-                      else:
-                           logger.warning(f"调优时无法提取元素 {element} 特定标签，使用原始标签。")
-                           y_train_element = train_data[1]
-                           y_val_element = val_data[1]
-                      X_train_data = train_data[0]
-                      X_val_data = val_data[0]
-                      
-                      current_device = determine_device(args.device)
-                      logger.info(f"[Main Loop] 为调优设置设备: {current_device}")
-                      
-                      tune_batch_size = getattr(args, 'batch_size_hyperopt', config.tuning_config.get('batch_size', 64))
-                      train_loader_tune = create_data_loaders(X_train_data, y_train_element, batch_size=tune_batch_size, shuffle=True)
-                      val_loader_tune = create_data_loaders(X_val_data, y_val_element, batch_size=tune_batch_size, shuffle=False)
-                      
-                      base_param_grid = None 
-                      if hasattr(config, 'tuning_config') and hasattr(config.tuning_config, 'param_grid'):
-                           base_param_grid = config.tuning_config.param_grid
-                           logger.info(f"[Main Loop] 从配置加载调优网格: {base_param_grid}")
-                      else:
-                           logger.info("[Main Loop] 配置中无调优网格，使用默认值。")
-                 
+                     # 首先加载数据
+                     logger.info(f"[Main Loop] 为调优加载 {element} 的数据...")
+                     train_path = os.path.join('processed_data', 'train_dataset.npz')
+                     val_path = os.path.join('processed_data', 'val_dataset.npz')
+                     
+                     X_train, y_train, train_elements = load_data(train_path, element)
+                     X_val, y_val, val_elements = load_data(val_path, element)
+                     
+                     # 确定是否需要提取特定元素的标签
+                     if train_elements and isinstance(train_elements, dict) and element in train_elements:
+                         element_idx = train_elements[element]
+                         if len(y_train.shape) > 1:
+                             y_train = y_train[:, element_idx]
+                             y_val = y_val[:, element_idx]
+                     
+                     # 设置设备
+                     current_device = determine_device(args.device)
+                     logger.info(f"[Main Loop] 为调优设置设备: {current_device}")
+                     
+                     # 创建数据加载器
+                     tune_batch_size = getattr(args, 'batch_size_hyperopt', config.tuning_config.get('batch_size', 64))
+                     train_loader_tune = create_data_loaders(X_train, y_train, batch_size=tune_batch_size, shuffle=True)
+                     val_loader_tune = create_data_loaders(X_val, y_val, batch_size=tune_batch_size, shuffle=False)
+                     
+                     logger.info(f"[Main Loop] 调优数据准备完成。训练集大小: {len(X_train)}, 验证集大小: {len(X_val)}")
+                     
+                     # 准备参数网格
+                     base_param_grid = None 
+                     if hasattr(config, 'tuning_config') and hasattr(config.tuning_config, 'param_grid'):
+                          base_param_grid = config.tuning_config.param_grid
+                          logger.info(f"[Main Loop] 从配置加载调优网格: {base_param_grid}")
+                     else:
+                          logger.info("[Main Loop] 配置中无调优网格，使用默认值。")
+                     
+                     loaders_ready = True
+                     
                  except Exception as prep_err:
                       logger.error(f"[Main Loop] 准备调优数据/配置时出错: {prep_err}")
-                      train_loader_tune, val_loader_tune = None, None # Ensure loaders are None
+                      logger.error(traceback.format_exc())
+                      train_loader_tune, val_loader_tune = None, None
+                      loaders_ready = False
                  
                  # Call tuning function if prep was successful
-                 if train_loader_tune and val_loader_tune:
+                 if loaders_ready:
                      try: 
                           config_module = config 
                           logger.info("[Main Loop] 调用 run_grid_search_tuning...")
