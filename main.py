@@ -1571,71 +1571,82 @@ def main():
                      logger.error(f"提取元素 {element} 标签时出错: {data_err}，跳过调优。")
                      continue
 
-
                 # 2. Determine device (should be available from args processing earlier)
-                try:
-                    # Assuming determine_device helper exists or device is set in args/config
-                    current_device = determine_device(args.device)
-                except NameError:
-                     # Fallback if determine_device not found or args not accessible
-                     # Ensure 'config' module is accessible here
-                     try:
-                         current_device = torch.device(config.training_config.get('device', 'cpu'))
-                         logger.warning(f"无法调用 determine_device，从配置或默认值设置设备为: {current_device}")
-                     except NameError:
-                         logger.error("无法访问 config 模块确定设备，跳过调优。")
-                         continue
+                # Remove try-except NameError as args should be available in main()
+                # Assuming determine_device helper exists or device is set in args/config
+                current_device = determine_device(args.device) 
+                logger.info(f"为调优设置设备: {current_device}")
 
-
-                # 3. Create DataLoaders for tuning (unless reusing from train/all block)
-                # ... (existing code for creating train_loader_tune, val_loader_tune) ...
+                # --- BEGIN Re-inserting DataLoader creation --- 
+                # 3. Create DataLoaders for tuning 
+                train_loader_tune, val_loader_tune = None, None
+                if y_train_element is not None and y_val_element is not None: # Check if we successfully got labels
+                    # Use command-line batch size for hyperopt if provided, else from config, else default
+                    tune_batch_size = getattr(args, 'batch_size_hyperopt', config.tuning_config.get('batch_size', 64))
+                    logger.info(f"创建用于超参数调优的数据加载器，批次大小: {tune_batch_size}")
+                    try:
+                        train_loader_tune = create_data_loaders(X_train_data, y_train_element, batch_size=tune_batch_size, shuffle=True)
+                        val_loader_tune = create_data_loaders(X_val_data, y_val_element, batch_size=tune_batch_size, shuffle=False)
+                    except Exception as loader_err:
+                        logger.error(f"为元素 {element} 创建调优数据加载器时出错: {loader_err}")
+                        continue # Skip tuning for this element
+                else:
+                    logger.error(f"未能为元素 {element} 准备标签数据，无法创建调优加载器。")
+                    continue # Skip tuning for this element
+                # --- END Re-inserting DataLoader creation --- 
 
                 # <<< NEW CODE: Prepare and filter param_grid >>>
                 custom_param_grid = None
                 base_param_grid = None
                 try:
+                    config_module = config # config should be accessible in main()
                     # Get base grid from config or default in tuning function
                     if config_module and hasattr(config_module, 'tuning_config'):
-                        base_param_grid = config_module.tuning_config.get('param_grid')
+                        # Ensure 'param_grid' exists within tuning_config
+                        if hasattr(config_module.tuning_config, 'param_grid'):
+                             base_param_grid = config_module.tuning_config.param_grid
+                        else:
+                             # Try accessing via dict key if it's a dict
+                             base_param_grid = config_module.tuning_config.get('param_grid')
+
                     # If still None, the tuning function will use its internal default
-                    
                     if base_param_grid:
                         custom_param_grid = base_param_grid.copy() # Work on a copy
                         logger.info(f"原始超参数网格: {custom_param_grid}")
 
-                        # Filter based on command-line args (assuming args object is accessible)
-                        # Need to know how --no_gru/--no_gcn flags affect args
-                        # Common pattern: args.use_gru is False if --no_gru is specified
+                        # Filter based on command-line args (args should be accessible in main())
+                        # Use config.use_gru and config.use_gcn which are set based on args earlier
                         if 'use_gru' in custom_param_grid:
-                            if not getattr(args, 'use_gru', True): # Default to True if arg not found
+                             # Use the value set in config based on args
+                            if not config.use_gru:
                                 custom_param_grid['use_gru'] = [False]
-                                logger.info("根据命令行参数，将 'use_gru' 限制为 [False]")
-                            # Optional: If flag is True, maybe restrict to only True?
-                            # else:
-                            #     custom_param_grid['use_gru'] = [True] 
-                            #     logger.info("根据命令行参数，将 'use_gru' 限制为 [True]")
-                                
+                                logger.info("根据配置 (来自命令行参数)，将 'use_gru' 限制为 [False]")
+                            # else: # If you want to force True if the flag --use_gru was explicitly passed
+                            #    if args.use_gru: # Check the raw arg
+                            #         custom_param_grid['use_gru'] = [True]
+                            #         logger.info("根据配置 (来自命令行参数)，将 'use_gru' 限制为 [True]")
+
                         if 'use_gcn' in custom_param_grid:
-                           if not getattr(args, 'use_gcn', True): # Default to True if arg not found
+                             # Use the value set in config based on args
+                            if not config.use_gcn:
                                 custom_param_grid['use_gcn'] = [False]
-                                logger.info("根据命令行参数，将 'use_gcn' 限制为 [False]")
-                           # Optional: If flag is True, maybe restrict to only True?
-                           # else:
-                           #      custom_param_grid['use_gcn'] = [True]
-                           #      logger.info("根据命令行参数，将 'use_gcn' 限制为 [True]")
+                                logger.info("根据配置 (来自命令行参数)，将 'use_gcn' 限制为 [False]")
+                            # else:
+                            #     if args.use_gcn:
+                            #          custom_param_grid['use_gcn'] = [True]
+                            #          logger.info("根据配置 (来自命令行参数)，将 'use_gcn' 限制为 [True]")
+
                         logger.info(f"过滤后的超参数网格: {custom_param_grid}")
                     else:
                         logger.warning("无法从配置中获取基础 param_grid，将依赖调优函数内部默认值（可能不遵守命令行标志）")
 
-                except NameError:
-                    logger.warning("无法访问 'args' 或 'config_module' 来过滤 param_grid，将使用默认网格。")
                 except Exception as grid_err:
                      logger.error(f"过滤 param_grid 时出错: {grid_err}，将使用默认网格。")
                 # <<< END NEW CODE >>>
 
 
                 # 4. Call run_grid_search_tuning if loaders are ready
-                if train_loader_tune and val_loader_tune:
+                if train_loader_tune and val_loader_tune: # This check should now work
                     try:
                         config_module = config # Ensure config is accessible
                         logger.info("调用 run_grid_search_tuning...")
