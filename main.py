@@ -235,8 +235,7 @@ def train_and_evaluate_model(model, train_loader, val_loader, test_loader, eleme
             element=element,
             device=device,
             augment_fn=augment_fn,
-            start_epoch=start_epoch,
-            best_val_loss=best_val_loss
+            start_epoch=start_epoch
         )
 
         # 训练完成后，使用 test_loader 评估最佳模型
