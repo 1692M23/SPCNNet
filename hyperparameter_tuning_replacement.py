@@ -200,11 +200,14 @@ def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None,
             if temp_config['training']['lr'] is None:
                  logger.error(f"参数组合 {params} 中缺少 'lr' 或 'learning_rate' 键。跳过此组合。")
                  processed_combinations.append(params) # Mark as processed to avoid retrying
-                 update_state_file() # Update state
+                 update_hyperopt_state(processed_combinations, best_val_loss, best_params, current_combination_idx)
                  continue # Skip to the next parameter combination
             # !!! 更好的方法是修改 train 函数接收 config_module !!!
             # 如果 model.py 的 train 已修改为接收模块，则直接传递
             train_config_arg = config_module if config_module else temp_config
+
+            # 记录传递给 train 函数的配置信息
+            logger.info(f"  [Tune Detail] 调用 model.train 使用配置: epochs={temp_config['training']['num_epochs']}, patience={temp_config['training']['early_stopping_patience']}, lr={temp_config['training']['lr']:.2e}, wd={temp_config['training']['weight_decay']:.2e}, use_gru={temp_config['model_config']['use_gru']}, use_gcn={temp_config['model_config']['use_gcn']}")
 
             # 确保模型目录存在
             os.makedirs(os.path.join(results_dir, 'models'), exist_ok=True)
@@ -227,6 +230,9 @@ def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None,
             training_time = time.time() - start_time
             logger.info(f"超参数评估完成: 验证损失={val_loss:.6f}, 耗时={training_time:.2f}秒")
             
+            # 记录传递给 train 函数的配置信息
+            logger.info(f"  [Tune Result] 参数: {params} -> Val Loss: {val_loss:.6f}")
+            
             # 更新最佳参数
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -242,6 +248,9 @@ def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None,
                 best_params_json = os.path.join(results_dir, 'best_params.json')
                 with open(best_params_json, 'w') as f:
                     json.dump(best_params, f, indent=4)
+                
+                # 记录传递给 train 函数的配置信息
+                logger.info(f"    [Tune Best Update] 新最佳参数: {best_params}, 新最佳验证损失: {best_val_loss:.6f}")
             
             # 记录参数和结果
             result = {
@@ -277,12 +286,15 @@ def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None,
             
             # 记录失败，但仍然更新当前进度
             current_combination_idx = i + 1
+            
+            # 在每次循环结束（无论成功或失败）后更新状态
+            # 这样即使中途中断，下次也能从下一个组合开始
             update_hyperopt_state(processed_combinations, best_val_loss, best_params, current_combination_idx)
     
     # 全部完成，更新状态
     update_hyperopt_state(processed_combinations, best_val_loss, best_params, total_combinations, True)
     
-    logger.info(f"超参数调优完成，共评估 {len(processed_combinations)}/{total_combinations} 组参数")
+    logger.info(f"超参数调优循环结束，共处理 {current_combination_idx}/{total_combinations} 组参数")
     logger.info(f"最佳参数: {best_params}")
     logger.info(f"最佳验证损失: {best_val_loss:.6f}")
     
