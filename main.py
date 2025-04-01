@@ -1538,47 +1538,119 @@ def main():
             # No major change needed inside this block, just ensure the condition is correct.
             logger.info(f"为 {element} 元素进行调优/加载参数和后续处理")
             
-            # --- BEGIN MODIFIED CODE for hyperparameter tuning logic --- (Code from previous edits should be here)
+            # --- BEGIN Re-inserting detailed logic --- 
             best_params = None
             best_params_loaded = False
             best_params_file = os.path.join(config.output_config['results_dir'], 'hyperopt', element, 'best_params.json')
 
             # 1. Try loading existing best parameters first
             logger.info(f"[Main Loop Debug] 检查最佳参数文件: {best_params_file}") 
-            # ... (rest of the detailed loading logic with [Main Loop Debug] logs) ...
             if not getattr(args, 'force_new_model', False) and os.path.exists(best_params_file):
-                 # ... try loading ...
-                 pass # Placeholder for the detailed loading code
+                logger.info(f"[Main Loop Debug] 文件存在且未使用 force_new_model，尝试加载... ")
+                try:
+                    import json
+                    with open(best_params_file, 'r') as f:
+                        best_params = json.load(f)
+                    if isinstance(best_params, dict) and best_params: 
+                        logger.info(f"[Main Loop Debug] 成功加载并验证 best_params: {best_params}")
+                        best_params_loaded = True
+                    else:
+                        logger.warning(f"[Main Loop Debug] 加载的 best_params.json 文件无效或为空。 best_params: {best_params}")
+                        best_params = None 
+                        best_params_loaded = False
+                except Exception as load_err:
+                    logger.warning(f"[Main Loop Debug] 加载 best_params.json 文件失败: {load_err}")
+                    best_params = None 
+                    best_params_loaded = False
             else:
-                 # ... log why not loaded ...
+                 if getattr(args, 'force_new_model', False):
+                      logger.info("[Main Loop Debug] 使用了 force_new_model，跳过加载最佳参数文件。")
+                 elif not os.path.exists(best_params_file):
+                      logger.info("[Main Loop Debug] 最佳参数文件不存在。")
                  best_params_loaded = False
+            
             logger.info(f"[Main Loop Debug] 加载尝试后状态: best_params_loaded={best_params_loaded}, best_params={best_params}")
             
             # 2. Run tuning if needed 
             if not best_params_loaded and args.tune_hyperparams: 
-                 # ... (logic to prepare data, device, loaders for tuning) ...
-                 y_train_element, y_val_element = None, None
-                 # ... (get element specific labels) ...
-                 X_train_data = train_data[0]
-                 X_val_data = val_data[0]
-                 current_device = determine_device(args.device)
-                 train_loader_tune, val_loader_tune = None, None
-                 # ... (create tuning loaders) ...
-                 base_param_grid = None 
-                 # ... (get base_param_grid from config) ...
+                 logger.info(f"[Main Loop] 未加载参数且设置了 tune_hyperparams，开始调优...")
+                 # Prepare data, device, loaders for tuning
+                 try:
+                      y_train_element, y_val_element = None, None
+                      element_indices = train_data[2]
+                      # ... (logic to extract element specific labels) ...
+                      if element_indices and isinstance(element_indices, dict) and element in element_indices:
+                           element_idx = element_indices[element]
+                           if len(train_data[1].shape) > 1: 
+                                y_train_element = train_data[1][:, element_idx]
+                                y_val_element = val_data[1][:, element_idx]
+                           else: 
+                                y_train_element = train_data[1]
+                                y_val_element = val_data[1]
+                      else:
+                           logger.warning(f"调优时无法提取元素 {element} 特定标签，使用原始标签。")
+                           y_train_element = train_data[1]
+                           y_val_element = val_data[1]
+                      X_train_data = train_data[0]
+                      X_val_data = val_data[0]
+                      
+                      current_device = determine_device(args.device)
+                      logger.info(f"[Main Loop] 为调优设置设备: {current_device}")
+                      
+                      tune_batch_size = getattr(args, 'batch_size_hyperopt', config.tuning_config.get('batch_size', 64))
+                      train_loader_tune = create_data_loaders(X_train_data, y_train_element, batch_size=tune_batch_size, shuffle=True)
+                      val_loader_tune = create_data_loaders(X_val_data, y_val_element, batch_size=tune_batch_size, shuffle=False)
+                      
+                      base_param_grid = None 
+                      if hasattr(config, 'tuning_config') and hasattr(config.tuning_config, 'param_grid'):
+                           base_param_grid = config.tuning_config.param_grid
+                           logger.info(f"[Main Loop] 从配置加载调优网格: {base_param_grid}")
+                      else:
+                           logger.info("[Main Loop] 配置中无调优网格，使用默认值。")
                  
+                 except Exception as prep_err:
+                      logger.error(f"[Main Loop] 准备调优数据/配置时出错: {prep_err}")
+                      train_loader_tune, val_loader_tune = None, None # Ensure loaders are None
+                 
+                 # Call tuning function if prep was successful
                  if train_loader_tune and val_loader_tune:
                      try: 
-                          # ... (Call run_grid_search_tuning) ...
-                          tuning_result_params = run_grid_search_tuning(...)
+                          config_module = config 
+                          logger.info("[Main Loop] 调用 run_grid_search_tuning...")
+                          tuning_result_params = run_grid_search_tuning(
+                               element=element,
+                               train_loader=train_loader_tune,
+                               val_loader=val_loader_tune,
+                               device=current_device,
+                               config_module=config_module,
+                               param_grid=base_param_grid 
+                          )
                           best_params = tuning_result_params 
-                          # ... (Save best_params) ...
+                          logger.info("[Main Loop] run_grid_search_tuning 调用结束")
+                          
+                          if best_params:
+                               logger.info(f"[Main Loop] 调优找到的最佳参数: {best_params}")
+                               os.makedirs(os.path.dirname(best_params_file), exist_ok=True)
+                               # Serialize and save best_params to json
+                               import json
+                               serializable_params = {} # Make sure params are JSON serializable
+                               for k, v in best_params.items():
+                                   if isinstance(v, np.integer): serializable_params[k] = int(v)
+                                   elif isinstance(v, np.floating): serializable_params[k] = float(v)
+                                   elif isinstance(v, np.ndarray): serializable_params[k] = v.tolist()
+                                   else: serializable_params[k] = v
+                               with open(best_params_file, 'w') as f:
+                                    json.dump(serializable_params, f, indent=4)
+                               logger.info(f"[Main Loop] 最佳参数已保存到: {best_params_file}")
+                          else:
+                               logger.warning(f"[Main Loop] 调优完成但未找到最佳参数。")
                      except Exception as tune_err:
-                          # ... (Handle tuning error) ...
-                          pass # Added pass to handle exception block correctly
+                          logger.error(f"[Main Loop] 超参数调优过程中发生错误: {tune_err}")
+                          logger.error(traceback.format_exc())
+                          best_params = None # Reset best_params on error
                  else: 
-                      # <<< Indentation Fixed: Added necessary indentation >>>
-                      logger.error("未能创建调优加载器，跳过此元素的调优。")
+                      logger.error("[Main Loop] 未能创建调优加载器，跳过调优。")
+            
             elif not args.tune_hyperparams and args.mode == 'tune':
                  logger.info(f"模式为 'tune' 但未设置 --tune_hyperparams 标志，跳过元素 {element} 的调优。")
 
@@ -1588,15 +1660,36 @@ def main():
             # 3. Update config with best_params if found/loaded
             if best_params: 
                 logger.info(f"[Main Loop] best_params 有效，进入配置更新块。")
-                # ... (Existing robust config update logic with [Main Loop] logs)
+                # --- Re-insert robust config update logic --- 
+                try:
+                    logger.info(f"[Main Loop] Config 更新前: use_gru={getattr(config, 'use_gru', 'N/A')}, use_gcn={getattr(config, 'use_gcn', 'N/A')}")
+                    update_made = False
+                    # Update LR, BS, WD etc.
+                    lr = best_params.get('learning_rate', best_params.get('lr'))
+                    if lr is not None: config.training_config['lr'] = lr; logger.info(f"  [Main Loop] 更新 LR: {lr}"); update_made=True
+                    bs = best_params.get('batch_size')
+                    if bs is not None: config.training_config['batch_size'] = bs; logger.info(f"  [Main Loop] 更新 Batch Size: {bs}"); update_made=True
+                    wd = best_params.get('weight_decay')
+                    if wd is not None: config.training_config['weight_decay'] = wd; logger.info(f"  [Main Loop] 更新 Weight Decay: {wd}"); update_made=True
+                    # Update GRU/GCN
+                    gru_setting = best_params.get('use_gru')
+                    if gru_setting is not None and getattr(config, 'use_gru', None) != gru_setting: 
+                        config.use_gru = gru_setting; logger.info(f"  [Main Loop] 更新 use_gru: {gru_setting}"); update_made = True
+                    gcn_setting = best_params.get('use_gcn')
+                    if gcn_setting is not None and getattr(config, 'use_gcn', None) != gcn_setting: 
+                        config.use_gcn = gcn_setting; logger.info(f"  [Main Loop] 更新 use_gcn: {gcn_setting}"); update_made = True
+                    logger.info(f"[Main Loop] Config 更新后: use_gru={getattr(config, 'use_gru', 'N/A')}, use_gcn={getattr(config, 'use_gcn', 'N/A')}")
+                    if not update_made: logger.info("[Main Loop] 配置未发生实际更改。")
+                    logger.info(f"[Main Loop] 配置更新完成。")
+                except Exception as config_update_err:
+                     logger.error(f"[Main Loop] 使用最佳超参数更新配置时发生错误: {config_update_err}")
+                # --- End re-insert config update --- 
             else:
                  logger.warning(f"[Main Loop] best_params 无效或未找到，跳过配置更新。将使用当前默认/命令行配置。")
             
-            # --- Call process_element AFTER tuning/config update in 'all' or 'train' mode ---
-            # This call should ONLY happen if mode is 'all' OR ('train' AND best_params were applied - though 'train' only case is handled above now)
-            # Let's simplify: process_element is called here ONLY if mode is 'all' or 'tune'(if tuning ran/loaded successfully? No, tune should just tune/save)
-            # Correction: If mode is 'all', we proceed. If mode is 'tune', we should stop after tuning/saving.
+            # --- Call process_element AFTER tuning/config update only in 'all' mode ---
             if args.mode == 'all': 
+                 # <<< Replace Placeholder: Insert process_element call block >>>
                  logger.info(f"[Main Loop] 模式为 'all'，使用最终配置为元素 {element} 执行训练和评估...") 
                  try:
                      final_device = determine_device(args.device) 
@@ -1616,8 +1709,11 @@ def main():
                      logger.error(f"Traceback: {traceback.format_exc()}")
                      logger.info(f"[Main Loop] 跳过元素 {element} 的后续处理，继续下一个元素。")
                      continue 
+                 # <<< End Replace Placeholder >>>
             elif args.mode == 'tune':
+                 # <<< Fix Indentation Here >>>
                  logger.info(f"模式为 'tune'，元素 {element} 处理完成（仅调优/加载参数）。")
+            # --- End call block ---
 
     # Block 3: Handle ONLY test mode
     elif args.mode == 'test':
