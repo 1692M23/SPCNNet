@@ -524,7 +524,8 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
             patience_counter = 0
             logger.info(f"  New best validation loss: {best_val_loss:.6f}. Saving model...")
             # 保存最佳模型
-            best_model_path = os.path.join(config['model_config']['model_dir'], f'{element}_best_model.pth')
+            # 修改：使用属性访问 config.model_config
+            best_model_path = os.path.join(config.model_config['model_dir'], f'{element}_best_model.pth')
             save_dict = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -536,11 +537,12 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
             logger.info(f"  Validation loss did not improve. Patience: {patience_counter}/{patience}")
 
         # --- 保存检查点 ---
-        checkpoint_save_path = os.path.join(config['model_config']['model_dir'], f'{element}_checkpoint.pth')
+        checkpoint_save_path = os.path.join(config.model_config['model_dir'], f'{element}_checkpoint.pth')
         save_dict_ckpt = {
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict() if optimizer else None,
+            'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
             'best_val_loss': best_val_loss,
             'patience_counter': patience_counter,
         }
@@ -560,7 +562,8 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
     logger.info("训练完成。")
     
     # 加载性能最好的模型状态
-    best_model_path = os.path.join(config['model_config']['model_dir'], f'{element}_best_model.pth')
+    # 修改：使用属性访问 config.model_config
+    best_model_path = os.path.join(config.model_config['model_dir'], f'{element}_best_model.pth')
     if os.path.exists(best_model_path):
         logger.info(f"加载最佳模型: {best_model_path}")
         try:
