@@ -1718,7 +1718,70 @@ def main():
             # 3. Update config with best_params if found/loaded
             if best_params: 
                 logger.info(f"使用元素 {element} 的最佳超参数更新配置...")
-                # ... (Existing code to update config using best_params) ...
+                logger.info(f"加载/找到的最佳参数: {best_params}") # Log loaded/found params
+                try:
+                    # --- Training Config Updates ---
+                    lr = best_params.get('learning_rate', best_params.get('lr'))
+                    if lr is not None: 
+                        config.training_config['lr'] = lr
+                        logger.info(f"  更新 LR: {lr}")
+                    else: 
+                        logger.warning("  最佳参数中未找到 learning_rate 或 lr")
+                        
+                    bs = best_params.get('batch_size')
+                    if bs is not None: 
+                        config.training_config['batch_size'] = bs
+                        logger.info(f"  更新 Batch Size: {bs}")
+                    else:
+                        logger.warning("  最佳参数中未找到 batch_size")
+                        
+                    wd = best_params.get('weight_decay')
+                    if wd is not None: 
+                        config.training_config['weight_decay'] = wd
+                        logger.info(f"  更新 Weight Decay: {wd}")
+                    else:
+                         logger.warning("  最佳参数中未找到 weight_decay")
+                         
+                    # Optional: Update patience? Decide if tuning patience should affect final training patience
+                    # patience = best_params.get('patience')
+                    # if patience is not None: 
+                    #    config.training_config['early_stopping_patience'] = patience
+                    #    logger.info(f"  更新 Early Stopping Patience: {patience}")
+
+                    # --- Model Structure Config Updates ---
+                    # Log current config values BEFORE update
+                    logger.info(f"  Config 更新前: use_gru={getattr(config, 'use_gru', 'N/A')}, use_gcn={getattr(config, 'use_gcn', 'N/A')}")
+                    
+                    gru_setting = best_params.get('use_gru')
+                    if gru_setting is not None: 
+                        config.use_gru = gru_setting
+                        logger.info(f"  更新 use_gru: {gru_setting}")
+                    else:
+                         logger.warning("  最佳参数中未找到 use_gru")
+                         
+                    gcn_setting = best_params.get('use_gcn')
+                    if gcn_setting is not None: 
+                        config.use_gcn = gcn_setting
+                        logger.info(f"  更新 use_gcn: {gcn_setting}")
+                    else:
+                         logger.warning("  最佳参数中未找到 use_gcn")
+                         
+                    # Log current config values AFTER update
+                    logger.info(f"  Config 更新后: use_gru={getattr(config, 'use_gru', 'N/A')}, use_gcn={getattr(config, 'use_gcn', 'N/A')}")
+
+                    # Optional: Update dropout rate
+                    # dropout = best_params.get('dropout_rate')
+                    # if dropout is not None:
+                    #     if not hasattr(config, 'model_config'): config.model_config = {}
+                    #     config.model_config['dropout_rate'] = dropout
+                    #     logger.info(f"  更新 Dropout Rate: {dropout}")
+
+                    logger.info(f"配置更新完成。最终关键配置: LR={config.training_config.get('lr')}, BS={config.training_config.get('batch_size')}, WD={config.training_config.get('weight_decay')}, use_gru={config.use_gru}, use_gcn={config.use_gcn}")
+                
+                except KeyError as ke:
+                     logger.error(f"使用最佳超参数更新配置时键错误: {ke}。最佳参数内容: {best_params}")
+                except Exception as config_update_err:
+                     logger.error(f"使用最佳超参数更新配置时发生未知错误: {config_update_err}")
             else:
                  logger.warning(f"未找到元素 {element} 的最佳超参数 (可能未运行调优或调优失败)，将使用当前配置继续。")
             
@@ -1727,13 +1790,17 @@ def main():
             # --- Call process_element AFTER tuning/config update in 'all' or 'train' mode --- 
             # Use the potentially updated config for the final run
             if args.mode == 'all' or args.mode == 'train': 
-                 logger.info(f"使用最终配置为元素 {element} 执行训练和评估...")
+                 logger.info(f"使用最终配置为元素 {element} 执行训练和评估... (传入 config id: {id(config)}) ") # Log config object id
                  try:
+                     # Ensure device is set correctly in the config passed to process_element
+                     final_device = determine_device(args.device) # Determine device again just before call
+                     config.training_config['device'] = final_device
+                     
                      process_element(element, 
                                      config.model_config.get('model_type'), 
                                      config.model_config.get('input_size'), 
                                      # Determine GPU usage based on the final device in config
-                                     (config.training_config['device'].type == 'cuda'), 
+                                     (final_device.type == 'cuda'), 
                                      config=config # Pass the potentially updated config object
                                      )
                  except Exception as process_err:

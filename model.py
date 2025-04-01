@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import time
 import pandas as pd
 from scipy import stats
-from sklearn.metrics import r2_score
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 import sys
 from torch.cuda.amp import GradScaler, autocast
 import torch.nn.utils as torch_utils # Added for gradient clipping
@@ -580,179 +580,72 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
     return model, best_val_loss
 
 # =============== 3. 评估相关 ===============
-def evaluate_model(model, test_loader, device=None):
-    """
-    在测试集上评估模型
-    Args:
-        model: 训练好的模型
-        test_loader: 测试数据加载器
-        device: 计算设备
-    Returns:
-        评估结果字典
-    """
-    if device is None:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # 确定设备类型
-    device_type = 'cpu'
-    if str(device).startswith('cuda'):
-        device_type = 'cuda'
-    elif str(device).startswith('xla'):
-        device_type = 'tpu'
-    
-    logger.info(f"在 {device_type} 设备上评估模型: {device}")
-    
-    # 确保模型在正确的设备上
-    if next(model.parameters()).device != device:
-        logger.info(f"将模型从 {next(model.parameters()).device} 移动到 {device}")
-        model = move_to_device(model, device)  # 使用通用设备移动函数
-    
-    model.eval()
-    
+def evaluate_model(model, data_loader, device, loss_fn):
+    model.eval()  # Set model to evaluation mode
+    total_loss = 0.0
     all_outputs = []
     all_targets = []
     
-    # 添加NaN统计
-    nan_stats = {'input': 0, 'output': 0, 'total_samples': 0}
-    
     with torch.no_grad():
-        for data, target in test_loader:
-            nan_stats['total_samples'] += data.size(0)
+        for inputs, targets in data_loader:
+            inputs, targets = inputs.to(device), targets.to(device)
+            # Handle potential NaNs in input during evaluation
+            inputs, _, _ = handle_nan_values(inputs, replacement_strategy='mean', name="评估输入")
             
-            # 将数据移到相应设备
-            data = move_to_device(data, device)
-            target = move_to_device(target, device)
+            # <<< ADD AUTOCAST and logging HERE >>>
+            amp_enabled = (device.type == 'cuda')
+            # logger.info(f"[Evaluate] AMP enabled: {amp_enabled}") # Optional detailed log
+            with torch.cuda.amp.autocast(enabled=amp_enabled):
+                 # logger.info(f"[Evaluate] Input dtype before model: {inputs.dtype}") # Optional
+                 outputs = model(inputs)
+                 # logger.info(f"[Evaluate] Output dtype after model: {outputs.dtype}") # Optional
+                 loss = loss_fn(outputs, targets)
+                 # logger.info(f"[Evaluate] Loss calculated: {loss.item()}, dtype: {loss.dtype}") # Optional
+                 # Handle potential NaNs in output/loss
+                 if torch.isnan(loss):
+                      logger.warning(f"评估中检测到NaN损失！Input dtype: {inputs.dtype}, Output dtype: {outputs.dtype}")
+                      # Before handling output NaNs, log if output itself is NaN
+                      if torch.isnan(outputs).any():
+                           logger.warning(f"评估中模型原始输出包含NaN！Sample: {outputs.flatten()[:10]}")
+                      outputs, _, _ = handle_nan_values(outputs, replacement_strategy='zero', name="评估输出")
+                      # Recompute loss with handled outputs if needed, or handle NaN loss (e.g., skip batch)
+                      loss = loss_fn(outputs, targets) # Try recomputing
+                      if torch.isnan(loss): # If still NaN, maybe skip or assign high value
+                           logger.error("处理 NaN 输出后损失仍然为 NaN，跳过此批次损失计算。")
+                           loss = torch.tensor(0.0, device=device, dtype=torch.float32) # Assign 0 loss
+            # <<< END AUTOCAST >>>
+                 
+            total_loss += loss.item() * inputs.size(0)
+            # Ensure outputs moved to CPU are float32 for numpy compatibility
+            all_outputs.append(outputs.cpu().float().numpy())
+            all_targets.append(targets.cpu().float().numpy())
             
-            # 处理输入数据中的NaN值
-            data, has_nan, nan_count = handle_nan_values(
-                data, 
-                replacement_strategy='mean', 
-                name="评估输入数据"
-            )
-            if has_nan:
-                nan_stats['input'] += nan_count
-            
-            try:
-                # 前向传播
-                output = model(data)
-                
-                # TPU特定处理：确保计算已完成
-                if device_type == 'tpu':
-                    if HAS_XLA:
-                        xm.mark_step()
-                
-                # 处理输出中的NaN值
-                output, has_nan, nan_count = handle_nan_values(
-                    output, 
-                    replacement_strategy='zero', 
-                    name="评估模型输出"
-                )
-                if has_nan:
-                    nan_stats['output'] += nan_count
-                
-                # 收集非NaN预测结果和真实值
-                valid_indices = ~torch.isnan(output).any(dim=1) & ~torch.isnan(target).any(dim=1)
-                if valid_indices.any():
-                    # 如果在TPU上，先移动到CPU再转换为numpy
-                    if device_type == 'tpu':
-                        try:
-                            import torch_xla.core.xla_model as xm
-                            cpu_output = xm.send_to_host_async(output[valid_indices])
-                            cpu_target = xm.send_to_host_async(target[valid_indices])
-                            all_outputs.append(cpu_output.numpy())
-                            all_targets.append(cpu_target.numpy())
-                        except (ImportError, AttributeError):
-                            # 降级到标准处理
-                            all_outputs.append(output[valid_indices].cpu().numpy())
-                            all_targets.append(target[valid_indices].cpu().numpy())
-                    else:
-                        all_outputs.append(output[valid_indices].cpu().numpy())
-                        all_targets.append(target[valid_indices].cpu().numpy())
-                
-            except Exception as e:
-                logger.error(f"评估过程中出错: {str(e)}")
-                import traceback
-                logger.error(traceback.format_exc())
-                continue
+    avg_loss = total_loss / len(data_loader.dataset) if len(data_loader.dataset) > 0 else 0
     
-    # 如果出现了NaN值，记录日志
-    if nan_stats['input'] > 0 or nan_stats['output'] > 0:
-        logger.warning(f"评估过程中处理的样本总数: {nan_stats['total_samples']}")
-        logger.warning(f"输入数据中的NaN值数量: {nan_stats['input']}")
-        logger.warning(f"模型输出中的NaN值数量: {nan_stats['output']}")
+    # Ensure concatenation happens with float32 numpy arrays
+    y_pred = np.vstack(all_outputs).astype(np.float32).flatten()
+    y_true = np.vstack(all_targets).astype(np.float32).flatten()
     
-    # 合并结果，计算指标
-    if len(all_outputs) > 0 and len(all_targets) > 0:
+    # Filter NaNs from predictions/targets before calculating metrics
+    valid_mask = ~np.isnan(y_pred) & ~np.isnan(y_true)
+    y_pred_valid = y_pred[valid_mask]
+    y_true_valid = y_true[valid_mask]
+    
+    metrics = {}
+    if len(y_pred_valid) > 0:
         try:
-            all_outputs = np.vstack(all_outputs)
-            all_targets = np.vstack(all_targets)
-            
-            # 检查连接后的数据是否仍包含NaN
-            if np.isnan(all_outputs).any() or np.isnan(all_targets).any():
-                logger.warning("合并后的评估数据仍包含NaN值，尝试过滤")
-                # 过滤掉包含NaN的行
-                valid_rows = ~np.isnan(all_outputs).any(axis=1) & ~np.isnan(all_targets).any(axis=1)
-                all_outputs = all_outputs[valid_rows]
-                all_targets = all_targets[valid_rows]
-                
-                if len(all_outputs) == 0:
-                    logger.error("过滤NaN后，没有有效数据进行评估")
-                    return {
-                        'mse': float('nan'),
-                        'rmse': float('nan'),
-                        'mae': float('nan'),
-                        'r2': float('nan')
-                    }
-            
-            # 计算指标
-            mse = np.mean((all_outputs - all_targets) ** 2)
-            rmse = np.sqrt(mse)
-            mae = np.mean(np.abs(all_outputs - all_targets))
-            
-            # 安全计算R2分数
-            try:
-                r2 = r2_score(all_targets.flatten(), all_outputs.flatten())
-            except Exception:
-                # 如果r2_score函数失败，手动计算
-                y_mean = np.mean(all_targets)
-                ss_total = np.sum((all_targets - y_mean) ** 2)
-                ss_residual = np.sum((all_targets - all_outputs) ** 2)
-                r2 = 1 - (ss_residual / ss_total if ss_total > 0 else 0)
-            
-            # 计算散点图的统计数据
-            try:
-                slope, intercept, r_value, p_value, std_err = stats.linregress(all_targets.flatten(), all_outputs.flatten())
-            except Exception as e:
-                logger.warning(f"无法计算线性回归统计: {str(e)}")
-                slope, intercept, r_value, p_value, std_err = float('nan'), float('nan'), float('nan'), float('nan'), float('nan')
-            
-            # 返回评估结果
-            return {
-                'mse': mse,
-                'rmse': rmse,
-                'mae': mae,
-                'r2': r2,
-                'r_value': r_value,
-                'slope': slope,
-                'intercept': intercept,
-                'std_err': std_err,
-                'p_value': p_value,
-                'num_samples': len(all_outputs)
-            }
-                
+            metrics['mse'] = mean_squared_error(y_true_valid, y_pred_valid)
+            metrics['rmse'] = np.sqrt(metrics['mse'])
+            metrics['mae'] = mean_absolute_error(y_true_valid, y_pred_valid)
+            metrics['r2'] = r2_score(y_true_valid, y_pred_valid)
         except Exception as e:
-            logger.error(f"计算评估指标时出错: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-    
-    # 如果没有有效数据或发生错误，返回NaN指标
-    return {
-        'mse': float('nan'),
-        'rmse': float('nan'),
-        'mae': float('nan'),
-        'r2': float('nan'),
-        'num_samples': 0
-    }
+            logger.error(f"计算评估指标时出错: {e}")
+            metrics = {k: np.nan for k in ['mse', 'rmse', 'mae', 'r2']}
+    else:
+         logger.warning("评估中没有有效的预测值/目标值，无法计算指标。")
+         metrics = {k: np.nan for k in ['mse', 'rmse', 'mae', 'r2']}
+
+    return avg_loss, metrics, y_pred, y_true # Return original y_pred/y_true for potential full analysis
 
 # 添加一个新的工具函数，用于处理和检测NaN值
 def handle_nan_values(tensor, replacement_strategy='mean', fill_value=0.0, name="数据"):
