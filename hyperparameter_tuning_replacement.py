@@ -180,7 +180,8 @@ def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None,
             # (最好是让 train 函数也接收 config_module)
             temp_config = {
                 'training': {
-                    'lr': params['lr'],
+                    # Robust replacement: Use 'lr' if present, otherwise try 'learning_rate'
+                    'lr': params.get('lr', params.get('learning_rate')), 
                     'weight_decay': params['weight_decay'],
                     'num_epochs': params['num_epochs'],
                     'early_stopping_patience': params['patience'],
@@ -195,6 +196,12 @@ def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None,
                     'use_gcn': use_gcn
                 }
             }
+            # Ensure that the lr value is not None if neither key was found
+            if temp_config['training']['lr'] is None:
+                 logger.error(f"参数组合 {params} 中缺少 'lr' 或 'learning_rate' 键。跳过此组合。")
+                 processed_combinations.append(params) # Mark as processed to avoid retrying
+                 update_state_file() # Update state
+                 continue # Skip to the next parameter combination
             # !!! 更好的方法是修改 train 函数接收 config_module !!!
             # 如果 model.py 的 train 已修改为接收模块，则直接传递
             train_config_arg = config_module if config_module else temp_config
