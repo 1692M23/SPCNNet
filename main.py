@@ -627,7 +627,12 @@ def process_element(element, model_type, input_size, use_gpu=True, config=None):
                 inputs, targets = inputs.to(device), targets.to(device)
                  # 处理输入数据中的NaN值 (如果需要)
                 inputs, _, _ = handle_nan_values(inputs, replacement_strategy='mean', name="绘图输入数据")
-                outputs = model(inputs)
+                
+                # <<< ADD AUTOCAST HERE for visualization inference >>>
+                with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
+                     outputs = model(inputs)
+                # <<< END AUTOCAST >>>
+
                 # 处理输出中的NaN值 (如果需要)
                 outputs, _, _ = handle_nan_values(outputs, replacement_strategy='zero', name="绘图模型输出")
 
