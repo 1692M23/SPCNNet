@@ -14,21 +14,20 @@ import pandas as pd
 # 设置logger
 logger = logging.getLogger(__name__)
 
-def hyperparameter_tuning(element, X_train, y_train, X_val, y_val, param_grid=None, 
-                         device=None, batch_size=None, batches_per_round=None):
+def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None, 
+                         device=None, batch_size=None, batches_per_round=None, config_module=None):
     """
-    网格搜索超参数调优
+    网格搜索超参数调优 (修改为接收 DataLoader)
     
     参数:
         element (str): 元素名称
-        X_train (ndarray): 训练特征
-        y_train (ndarray): 训练标签
-        X_val (ndarray): 验证特征
-        y_val (ndarray): 验证标签
+        train_loader: 训练数据加载器
+        val_loader: 验证数据加载器
         param_grid (dict): 参数网格
         device (torch.device): 计算设备
-        batch_size (int): 超参数调优每批次的样本数量
-        batches_per_round (int): 每轮处理的批次数量
+        batch_size (int): (此实现中未使用，保留兼容性)
+        batches_per_round (int): (此实现中未使用，保留兼容性)
+        config_module (module): 传递过来的config模块
         
     返回:
         dict: 最佳超参数
@@ -39,22 +38,29 @@ def hyperparameter_tuning(element, X_train, y_train, X_val, y_val, param_grid=No
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # 如果未指定参数网格，使用默认值
+    # 如果未指定参数网格，使用默认值 (从config模块获取)
     if param_grid is None:
-        param_grid = {
-            'lr': [0.001, 0.0005, 0.0001],
-            'batch_size': [32, 64, 128],
-            'dropout_rate': [0.3, 0.5, 0.7],
-            'weight_decay': [1e-4, 1e-5, 1e-6],
-            'use_gru': [True, False],
-            'use_gcn': [True, False]
-        }
-    
-    # 添加固定参数
-    param_grid.update({
-        'num_epochs': [50],  # 调优时使用较少的时代数
-        'patience': [15]
-    })
+        if config_module and hasattr(config_module, 'tuning_config'):
+             param_grid = config_module.tuning_config.get('param_grid')
+        if not param_grid: # 如果还是没有，用硬编码的默认值
+            param_grid = {
+                'lr': [0.001, 0.0005, 0.0001],
+                'batch_size': [32, 64, 128],
+                'dropout_rate': [0.3, 0.5, 0.7],
+                'weight_decay': [1e-4, 1e-5, 1e-6],
+                'use_gru': [True, False],
+                'use_gcn': [True, False]
+            }
+
+    # 添加固定参数 (从config模块获取)
+    fixed_params = {}
+    if config_module and hasattr(config_module, 'tuning_config'):
+        fixed_params['num_epochs'] = [config_module.tuning_config.get('stage1_epochs', 50)]
+        fixed_params['patience'] = [config_module.tuning_config.get('early_stopping_patience', 15)] # 使用调优特定的patience
+    else:
+        fixed_params['num_epochs'] = [50]
+        fixed_params['patience'] = [15]
+    param_grid.update(fixed_params)
     
     # 创建结果目录
     results_dir = os.path.join('results', 'hyperopt', element)
@@ -113,31 +119,6 @@ def hyperparameter_tuning(element, X_train, y_train, X_val, y_val, param_grid=No
         with open(hyperopt_state_file, 'w') as f:
             json.dump(hyperopt_state, f, indent=4)
     
-    # 创建训练和验证数据加载器
-    from torch.utils.data import TensorDataset, DataLoader
-    
-    # 确保数据是torch.Tensor
-    if not isinstance(X_train, torch.Tensor):
-        X_train = torch.FloatTensor(X_train)
-    if not isinstance(y_train, torch.Tensor):
-        y_train = torch.FloatTensor(y_train)
-    if not isinstance(X_val, torch.Tensor):
-        X_val = torch.FloatTensor(X_val)
-    if not isinstance(y_val, torch.Tensor):
-        y_val = torch.FloatTensor(y_val)
-    
-    # 对于一维y，添加一个维度
-    if len(y_train.shape) == 1:
-        y_train = y_train.unsqueeze(1)
-    if len(y_val.shape) == 1:
-        y_val = y_val.unsqueeze(1)
-    
-    # 对于二维X，添加通道维度
-    if len(X_train.shape) == 2:
-        X_train = X_train.unsqueeze(1)
-    if len(X_val.shape) == 2:
-        X_val = X_val.unsqueeze(1)
-    
     # 循环处理参数组合
     logger.info(f"开始超参数调优: 共{total_combinations}组参数组合")
     
@@ -153,46 +134,37 @@ def hyperparameter_tuning(element, X_train, y_train, X_val, y_val, param_grid=No
         
         logger.info(f"评估超参数 {i+1}/{total_combinations}: {params}")
         
-        # 创建数据加载器
-        current_batch_size = params.get('batch_size', 32)
-        train_dataset = TensorDataset(X_train, y_train)
-        val_dataset = TensorDataset(X_val, y_val)
-        
-        train_loader = DataLoader(
-            train_dataset, 
-            batch_size=current_batch_size,
-            shuffle=True
-        )
-        
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=current_batch_size,
-            shuffle=False
-        )
-        
-        # 创建模型
+        # 创建模型 (需要 input_size)
+        # !!! 如何获取 input_size？需要从数据加载器或config获取 !!!
+        input_size = None
+        if config_module and hasattr(config_module, 'model_config'):
+             input_size = config_module.model_config.get('input_size') # 尝试从config获取
+        if input_size is None:
+             # 尝试从DataLoader的第一个batch获取
+             try:
+                 first_batch_data, _ = next(iter(train_loader))
+                 input_size = first_batch_data.shape[2] # 假设 [batch, channel, length]
+                 logger.info(f"从数据加载器推断输入大小: {input_size}")
+             except Exception as data_err:
+                 logger.error(f"无法从数据加载器推断输入大小: {data_err}")
+                 logger.error("请在 config.py 中设置 model_config['input_size']")
+                 continue # 跳过此参数组合
+
         from model import SpectralResCNN, SpectralResCNN_GCN
-        
-        input_size = X_train.shape[2]  # 假设形状为 [batch, channel, length]
-        
         use_gru = params.get('use_gru', True)
         use_gcn = params.get('use_gcn', True)
         dropout_rate = params.get('dropout_rate', 0.5)
         
-        # 创建模型
+        # 创建模型实例
         if use_gcn:
-            model = SpectralResCNN_GCN(input_size=input_size, device=device, use_gru=use_gru, use_gcn=use_gcn)
-            # 设置dropout率
-            for module in model.modules():
-                if isinstance(module, torch.nn.Dropout):
-                    module.p = dropout_rate
+             model = SpectralResCNN_GCN(input_size=input_size, device=device, use_gru=use_gru, use_gcn=use_gcn)
         else:
-            model = SpectralResCNN(input_size=input_size)
-            # 设置dropout率
-            for module in model.modules():
-                if isinstance(module, torch.nn.Dropout):
-                    module.p = dropout_rate
-        
+             model = SpectralResCNN(input_size=input_size)
+             model = model.to(device)
+        # 设置dropout率 (需要确保模型创建后设置)
+        for module in model.modules():
+             if isinstance(module, torch.nn.Dropout):
+                 module.p = dropout_rate
         model = model.to(device)
         
         logger.info(f"已将模型中的dropout层设置为 {dropout_rate}")
@@ -201,16 +173,21 @@ def hyperparameter_tuning(element, X_train, y_train, X_val, y_val, param_grid=No
         start_time = time.time()
         
         try:
-            from model import train, train_and_evaluate_model
+            from model import train
             
-            # 准备配置
-            config = {
+            # 创建临时的 config 字典给 train 函数
+            # !!! 注意：train 函数内部也需要能处理 config 模块 !!!
+            # (最好是让 train 函数也接收 config_module)
+            temp_config = {
                 'training': {
                     'lr': params['lr'],
                     'weight_decay': params['weight_decay'],
                     'num_epochs': params['num_epochs'],
                     'early_stopping_patience': params['patience'],
-                    'device': device
+                    'device': device,
+                     # 传递调优特定的配置给train
+                    'resume_training': False, # 调优时不恢复检查点
+                    'save_checkpoints': False # 调优时不保存检查点
                 },
                 'model_config': {
                     'model_dir': os.path.join(results_dir, 'models'),
@@ -218,22 +195,26 @@ def hyperparameter_tuning(element, X_train, y_train, X_val, y_val, param_grid=No
                     'use_gcn': use_gcn
                 }
             }
-            
+            # !!! 更好的方法是修改 train 函数接收 config_module !!!
+            # 如果 model.py 的 train 已修改为接收模块，则直接传递
+            train_config_arg = config_module if config_module else temp_config
+
             # 确保模型目录存在
-            os.makedirs(config['model_config']['model_dir'], exist_ok=True)
+            os.makedirs(os.path.join(results_dir, 'models'), exist_ok=True)
             
             # 训练模型并获取验证损失
-            train_losses, val_losses = train(
+            # 注意：train 返回 (model, best_val_loss)
+            trained_model, best_run_val_loss = train(
                 model=model,
                 train_loader=train_loader,
                 val_loader=val_loader,
-                config=config,
+                config=train_config_arg, # 传递模块或字典
                 device=device,
                 element=f"{element}_hyperparam_{i}"
             )
             
-            # 获取最佳验证损失
-            val_loss = min(val_losses) if val_losses else float('inf')
+            # 获取最佳验证损失 (train 函数直接返回)
+            val_loss = best_run_val_loss
             
             # 记录训练时间
             training_time = time.time() - start_time

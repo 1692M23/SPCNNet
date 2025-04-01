@@ -265,77 +265,55 @@ def train_and_evaluate_model(model, train_loader, val_loader, test_loader, eleme
 
 def hyperparameter_tuning(element, train_loader, val_loader, config):
     """
-    执行超参数调优
+    执行超参数调优 (修改为传递 DataLoader)
 
     Args:
         element (str): 元素名称
         train_loader: 训练数据加载器
         val_loader: 验证数据加载器
-        config (dict): 配置字典
+        config (module): 配置模块
 
     Returns:
         dict: 找到的最佳超参数
     """
     logger.info(f"开始为元素 {element} 进行超参数调优")
 
-    tuning_cfg = config['tuning_config']
-    device = config['training_config']['device']
+    tuning_cfg = config.tuning_config
+    device = config.training_config['device']
 
-    # 准备训练集和验证集 (从 DataLoader 获取 Tensor)
-    # 注意：这可能加载整个数据集到内存，对于大数据集需要优化
     try:
-        X_train_list, y_train_list = [], []
-        for batch_X, batch_y in train_loader:
-            X_train_list.append(batch_X)
-            y_train_list.append(batch_y)
-        X_train = torch.cat(X_train_list, dim=0)
-        y_train = torch.cat(y_train_list, dim=0)
-
-        X_val_list, y_val_list = [], []
-        for batch_X, batch_y in val_loader:
-            X_val_list.append(batch_X)
-            y_val_list.append(batch_y)
-        X_val = torch.cat(X_val_list, dim=0)
-        y_val = torch.cat(y_val_list, dim=0)
-
-        # 添加日志：打印提取的数据形状和类型
-        logger.info(f"Hyperparameter tuning data prepared:")
-        logger.info(f"  X_train shape: {X_train.shape}, type: {X_train.dtype}")
-        logger.info(f"  y_train shape: {y_train.shape}, type: {y_train.dtype}")
-        logger.info(f"  X_val shape: {X_val.shape}, type: {X_val.dtype}")
-        logger.info(f"  y_val shape: {y_val.shape}, type: {y_val.dtype}")
-
-        # 检查是否有空的 Tensor
-        if X_train.numel() == 0 or y_train.numel() == 0 or X_val.numel() == 0 or y_val.numel() == 0:
-            logger.error("用于超参数调优的数据为空，无法继续。")
-            return None
+        # 不再需要从DataLoader提取完整数据集
+        # logger.info(f"Hyperparameter tuning data prepared:")
+        # logger.info(f"  Train loader batches: {len(train_loader)}")
+        # logger.info(f"  Val loader batches: {len(val_loader)}")
 
         # 从 config 获取 param_grid
         param_grid = tuning_cfg.get('search_space', {}).get('stage1')
         if not param_grid:
             logger.warning("配置中未找到有效的 param_grid for stage1，使用默认网格。")
-            # 可以选择在此处定义一个默认网格，或者让 run_grid_search_tuning 内部处理
-            param_grid = None # 让调优函数内部使用它的默认值
+            param_grid = None
         else:
              logger.info(f"使用配置中的参数网格进行调优: {param_grid}")
 
-        # 运行网格搜索 (或其他调优方法)
-        # 使用重命名的导入 run_grid_search_tuning
-        logger.info("调用 run_grid_search_tuning 函数...")
+        # 调用 run_grid_search_tuning 函数，传递加载器
+        logger.info("调用 run_grid_search_tuning 函数 (传递 DataLoader)...")
         best_params = run_grid_search_tuning(
             element=element,
-            X_train=X_train,
-            y_train=y_train,
-            X_val=X_val,
-            y_val=y_val,
+            train_loader=train_loader, # 传递加载器
+            val_loader=val_loader,   # 传递加载器
             param_grid=param_grid,
             device=device,
-            # batch_size 和 batches_per_round 在 grid search 中不太适用，由 param_grid 控制
+            config_module=config # 传递整个config模块给调优函数，供其内部使用
         )
 
         if best_params:
             logger.info(f"超参数调优完成。找到的最佳参数: {best_params}")
-            return best_params
+            # 确保返回的参数不包含非基本类型（如device对象）
+            if isinstance(best_params, dict):
+                 cleaned_params = {k: v for k, v in best_params.items() if isinstance(v, (str, int, float, bool, list, dict))}
+                 return cleaned_params
+            else:
+                 return best_params # 或者返回None，如果格式不确定
         else:
             logger.warning("超参数调优未能找到最佳参数，将使用默认值。")
             return None
