@@ -234,7 +234,6 @@ def train_and_evaluate_model(model, train_loader, val_loader, test_loader, eleme
             val_loader=val_loader,
             element=element,
             device=device,
-            best_hyperparams=best_hyperparams,
             augment_fn=augment_fn,
             start_epoch=start_epoch,
             best_val_loss=best_val_loss
