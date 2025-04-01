@@ -21,7 +21,7 @@ from torchvision import transforms
 
 # 导入自定义模块
 import config
-from model import SpectralResCNN, SpectralResCNN_GCN, SpectralResCNNEnsemble, train, evaluate_model, load_trained_model, save_model, load_checkpoint
+from model import SpectralResCNN, SpectralResCNN_GCN, SpectralResCNNEnsemble, train, evaluate_model, load_trained_model, save_model, load_checkpoint, handle_nan_values
 from evaluation import evaluate_all_elements, plot_predictions_vs_true, plot_metrics_comparison
 from utils import CacheManager, ProgressManager, ask_clear_cache, setup_analysis_directories, set_seed
 from multi_element_processor import MultiElementProcessor
@@ -298,17 +298,37 @@ def hyperparameter_tuning(element, train_loader, val_loader, config):
         X_val = torch.cat(X_val_list, dim=0)
         y_val = torch.cat(y_val_list, dim=0)
 
-        logger.info(f"从加载器提取数据用于调优: X_train shape={X_train.shape}, X_val shape={X_val.shape}")
+        # 添加日志：打印提取的数据形状和类型
+        logger.info(f"Hyperparameter tuning data prepared:")
+        logger.info(f"  X_train shape: {X_train.shape}, type: {X_train.dtype}")
+        logger.info(f"  y_train shape: {y_train.shape}, type: {y_train.dtype}")
+        logger.info(f"  X_val shape: {X_val.shape}, type: {X_val.dtype}")
+        logger.info(f"  y_val shape: {y_val.shape}, type: {y_val.dtype}")
+
+        # 检查是否有空的 Tensor
+        if X_train.numel() == 0 or y_train.numel() == 0 or X_val.numel() == 0 or y_val.numel() == 0:
+            logger.error("用于超参数调优的数据为空，无法继续。")
+            return None
+
+        # 从 config 获取 param_grid
+        param_grid = tuning_cfg.get('search_space', {}).get('stage1')
+        if not param_grid:
+            logger.warning("配置中未找到有效的 param_grid for stage1，使用默认网格。")
+            # 可以选择在此处定义一个默认网格，或者让 run_grid_search_tuning 内部处理
+            param_grid = None # 让调优函数内部使用它的默认值
+        else:
+             logger.info(f"使用配置中的参数网格进行调优: {param_grid}")
 
         # 运行网格搜索 (或其他调优方法)
         # 使用重命名的导入 run_grid_search_tuning
+        logger.info("调用 run_grid_search_tuning 函数...")
         best_params = run_grid_search_tuning(
             element=element,
             X_train=X_train,
             y_train=y_train,
             X_val=X_val,
             y_val=y_val,
-            param_grid=tuning_cfg.get('search_space', {}).get('stage1'), # Using stage1 grid for example
+            param_grid=param_grid,
             device=device,
             # batch_size 和 batches_per_round 在 grid search 中不太适用，由 param_grid 控制
         )
@@ -615,7 +635,85 @@ def process_element(element, model_type, input_size, use_gpu=True, config=None):
     logger.info(f"元素 {element} 的处理完成")
     logger.info(f"验证损失: {val_loss:.6f}")
     logger.info(f"测试指标: {test_metrics}")
-    
+
+    # --- 开始添加可视化代码 ---
+    try:
+        # 需要重新获取测试集的预测值和真实值
+        logger.info(f"为 {element} 生成可视化图表")
+        model.eval() # 确保模型在评估模式
+        all_outputs = []
+        all_targets = []
+        with torch.no_grad():
+            for inputs, targets in test_loader:
+                inputs, targets = inputs.to(device), targets.to(device)
+                 # 处理输入数据中的NaN值 (如果需要)
+                inputs, _, _ = handle_nan_values(inputs, replacement_strategy='mean', name="绘图输入数据")
+                outputs = model(inputs)
+                # 处理输出中的NaN值 (如果需要)
+                outputs, _, _ = handle_nan_values(outputs, replacement_strategy='zero', name="绘图模型输出")
+
+                # 移动到 CPU 并转换为 numpy
+                if str(device).startswith('xla'):
+                     outputs = xm.send_to_host_async(outputs)
+                     targets = xm.send_to_host_async(targets)
+                all_outputs.append(outputs.cpu().numpy())
+                all_targets.append(targets.cpu().numpy())
+
+        if all_outputs and all_targets:
+            y_pred = np.vstack(all_outputs).flatten()
+            y_true = np.vstack(all_targets).flatten()
+
+            # 清理 NaN 值以防万一
+            valid_mask = ~np.isnan(y_pred) & ~np.isnan(y_true)
+            y_pred = y_pred[valid_mask]
+            y_true = y_true[valid_mask]
+
+            if len(y_pred) > 0:
+                # --- 修改这里的路径 ---
+                plots_dir = config.output_config.get('plots_dir', 'plots') # 获取顶层 plots 目录
+                element_plot_dir = os.path.join(plots_dir, 'evaluation', element) # 正确路径: plots/evaluation/<element_name>
+                # --- 结束修改 ---
+                os.makedirs(element_plot_dir, exist_ok=True)
+
+                # 绘制 预测值 vs 真实值 散点图
+                plt.figure(figsize=(8, 8))
+                plt.scatter(y_true, y_pred, alpha=0.5, s=10, label=f'R² = {test_metrics["r2"]:.3f}')
+                # 绘制 y=x 参考线
+                limits = [min(min(y_true), min(y_pred)), max(max(y_true), max(y_pred))]
+                plt.plot(limits, limits, color='red', linestyle='--', label='y = x')
+                plt.xlabel("真实值 (True Abundance)")
+                plt.ylabel("预测值 (Predicted Abundance)")
+                plt.title(f"{element} - 预测值 vs 真实值")
+                plt.legend()
+                plt.grid(True, alpha=0.3)
+                scatter_save_path = os.path.join(element_plot_dir, f'{element}_scatter_pred_true.png')
+                plt.savefig(scatter_save_path, dpi=300)
+                plt.close()
+                logger.info(f"散点图已保存至: {scatter_save_path}")
+
+                # 绘制 残差图 (预测误差 vs 真实值)
+                residuals = y_pred - y_true
+                plt.figure(figsize=(10, 6))
+                plt.scatter(y_true, residuals, alpha=0.5, s=10)
+                plt.axhline(0, color='red', linestyle='--') # 绘制 y=0 参考线
+                plt.xlabel("真实值 (True Abundance)")
+                plt.ylabel("预测误差 (Residuals: Predicted - True)")
+                plt.title(f"{element} - 残差图")
+                plt.grid(True, alpha=0.3)
+                residual_save_path = os.path.join(element_plot_dir, f'{element}_residuals.png')
+                plt.savefig(residual_save_path, dpi=300)
+                plt.close()
+                logger.info(f"残差图已保存至: {residual_save_path}")
+            else:
+                 logger.warning(f"过滤 NaN 后没有有效数据用于为 {element} 生成图表")
+        else:
+            logger.warning(f"无法为 {element} 生成可视化图表，因为没有收集到预测或目标值")
+
+    except Exception as e:
+        logger.error(f"为 {element} 生成可视化图表时出错: {e}")
+        logger.error(traceback.format_exc())
+    # --- 结束添加可视化代码 ---
+
     return best_model, val_loss, test_metrics
 
 def process_multiple_elements(csv_file, fits_dir, element_columns=None, 
