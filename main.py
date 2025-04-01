@@ -1531,6 +1531,133 @@ def main():
         for i, element in enumerate(elements):
             logger.info(f"为 {element} 元素进行超参数调优")
             # 实现超参数调优逻辑
+            # --- BEGIN INSERTED CODE for hyperparameter tuning ---
+            if args.tune_hyperparams: # Double check the flag even if mode is 'tune' or 'all'
+                logger.info(f"开始为元素 {element} 进行超参数调优 (来自主循环)")
+
+                # 1. Ensure data (X_train, y_train, etc.) is available in this scope
+                #    Data (X_train, X_val etc) seems loaded outside this loop (around line 1380)
+                #    Need element-specific labels (y_...)
+                y_train_element, y_val_element = None, None
+                try:
+                    element_indices = train_data[2] # Get element map from loaded train data
+                    if element_indices and isinstance(element_indices, dict) and element in element_indices:
+                        element_idx = element_indices[element]
+                        if len(train_data[1].shape) > 1: # If labels are 2D [samples, elements]
+                            y_train_element = train_data[1][:, element_idx]
+                            y_val_element = val_data[1][:, element_idx]
+                            logger.info(f"提取到元素 {element} 的特定标签用于调优")
+                        else: # Labels are 1D, assumed to be for this element already
+                            y_train_element = train_data[1]
+                            y_val_element = val_data[1]
+                            logger.info(f"使用 1D 标签数据进行元素 {element} 调优")
+                    else:
+                        # Attempt to use the loaders created in the 'train'/'all' block if they match the element
+                        # Need to check if train_loader_element and val_loader_element were created for THIS element
+                        # This logic might be complex depending on how train_loader_element scope works
+                        logger.warning(f"无法为元素 {element} 提取特定标签，将使用原始训练/验证标签数据进行调优（可能不准确）")
+                        y_train_element = train_data[1] # Fallback to original labels
+                        y_val_element = val_data[1]
+
+                    # Use the corresponding features (X_train, X_val)
+                    X_train_data = train_data[0]
+                    X_val_data = val_data[0]
+
+                except NameError:
+                    logger.error("无法访问 train_data 或 val_data 以提取元素标签，跳过调优。")
+                    continue # Skip tuning for this element
+                except Exception as data_err:
+                     logger.error(f"提取元素 {element} 标签时出错: {data_err}，跳过调优。")
+                     continue
+
+
+                # 2. Determine device (should be available from args processing earlier)
+                try:
+                    # Assuming determine_device helper exists or device is set in args/config
+                    current_device = determine_device(args.device)
+                except NameError:
+                     # Fallback if determine_device not found or args not accessible
+                     # Ensure 'config' module is accessible here
+                     try:
+                         current_device = torch.device(config.training_config.get('device', 'cpu'))
+                         logger.warning(f"无法调用 determine_device，从配置或默认值设置设备为: {current_device}")
+                     except NameError:
+                         logger.error("无法访问 config 模块确定设备，跳过调优。")
+                         continue
+
+
+                # 3. Create DataLoaders for tuning
+                train_loader_tune, val_loader_tune = None, None
+                if y_train_element is not None and y_val_element is not None: # Check if we successfully got labels
+                    # Use command-line batch size for hyperopt if provided, else from config, else default
+                    tune_batch_size = getattr(args, 'batch_size_hyperopt', config.tuning_config.get('batch_size', 64))
+                    logger.info(f"创建用于超参数调优的数据加载器，批次大小: {tune_batch_size}")
+                    try:
+                        train_loader_tune = create_data_loaders(X_train_data, y_train_element, batch_size=tune_batch_size, shuffle=True)
+                        val_loader_tune = create_data_loaders(X_val_data, y_val_element, batch_size=tune_batch_size, shuffle=False)
+                    except Exception as loader_err:
+                        logger.error(f"为元素 {element} 创建调优数据加载器时出错: {loader_err}")
+                        continue # Skip tuning for this element
+                else:
+                    logger.error(f"未能为元素 {element} 准备标签数据，无法创建调优加载器。")
+                    continue # Skip tuning for this element
+
+
+                # 4. Call run_grid_search_tuning if loaders are ready
+                if train_loader_tune and val_loader_tune:
+                    try:
+                        config_module = config # Ensure config is accessible
+                        logger.info("调用 run_grid_search_tuning...")
+                        best_params = run_grid_search_tuning(
+                            element=element,
+                            train_loader=train_loader_tune,
+                            val_loader=val_loader_tune,
+                            device=current_device,
+                            config_module=config_module
+                        )
+                        logger.info("run_grid_search_tuning 调用结束")
+
+                        # 5. Handle results
+                        if best_params:
+                            logger.info(f"元素 {element} 的最佳超参数: {best_params}")
+                            # Optionally save best_params or update config for subsequent 'all' mode training
+                            # Example: Save to a file
+                            best_params_file = os.path.join(config.output_config['results_dir'], 'hyperopt', element, 'best_params.json')
+                            os.makedirs(os.path.dirname(best_params_file), exist_ok=True)
+                            import json
+                            # Ensure params are serializable (convert numpy types if necessary)
+                            serializable_params = {}
+                            for k, v in best_params.items():
+                                if isinstance(v, np.integer):
+                                    serializable_params[k] = int(v)
+                                elif isinstance(v, np.floating):
+                                    serializable_params[k] = float(v)
+                                elif isinstance(v, np.ndarray):
+                                     serializable_params[k] = v.tolist() # Example conversion
+                                else:
+                                     serializable_params[k] = v
+
+                            with open(best_params_file, 'w') as f:
+                                json.dump(serializable_params, f, indent=4)
+                            logger.info(f"最佳参数已保存到: {best_params_file}")
+
+                        else:
+                            logger.warning(f"未能为元素 {element} 找到最佳超参数。")
+
+                    except NameError as ne:
+                        logger.error(f"调用 run_grid_search_tuning 时缺少变量: {ne} (可能 config 未正确传递?)")
+                    except Exception as tune_err:
+                        logger.error(f"为元素 {element} 进行超参数调优时发生意外错误: {tune_err}")
+                        logger.error(traceback.format_exc())
+                else:
+                     logger.error(f"调优数据加载器未准备好，跳过元素 {element} 的调优。")
+
+            else:
+                 # Mode is 'tune' or 'all', but --tune_hyperparams flag was NOT set.
+                 if args.mode == 'tune': # Only log if mode is specifically 'tune'
+                    logger.info(f"模式为 'tune' 但未设置 --tune_hyperparams 标志，跳过元素 {element} 的调优。")
+                 # If mode is 'all', it will proceed to the training block later anyway.
+            # --- END INSERTED CODE ---
     
     if args.mode == 'test' or args.mode == 'all':
         # 测试模型
@@ -1572,6 +1699,9 @@ def main():
         # 使用训练好的模型进行预测
         for element in elements:
             logger.info(f"使用 {element} 模型进行预测")
+        
+        
+
 
 if __name__ == '__main__':
     main() 
