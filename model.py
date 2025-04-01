@@ -328,7 +328,7 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
         model: 待训练的模型
         train_loader: 训练数据加载器
         val_loader: 验证数据加载器
-        config (dict): 包含训练和模型配置的字典
+        config (module): 包含训练和模型配置的 *模块*
         device: 计算设备
         element (str): 元素名称，用于保存模型和状态
         start_epoch (int): 起始的epoch
@@ -343,8 +343,8 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
     """
     logger = logging.getLogger('train')
     
-    # 从配置中获取训练参数
-    train_cfg = config['training']
+    # 从配置模块中获取训练参数
+    train_cfg = config.training_config # 修改：使用属性访问
     lr = train_cfg.get('lr', 0.001)
     weight_decay = train_cfg.get('weight_decay', 1e-4)
     num_epochs = train_cfg.get('num_epochs', 100)
@@ -352,7 +352,7 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
     scheduler_type = train_cfg.get('scheduler', 'cosine')
     scheduler_params = train_cfg.get('scheduler_params', {})
     lr_min = train_cfg.get('lr_min', 1e-6)
-    gradient_clip_val = train_cfg.get('gradient_clip_val', 1.0) # Added gradient clipping value
+    gradient_clip_val = train_cfg.get('gradient_clip_val', 1.0)
     
     # 确定设备
     if device is None:
@@ -404,8 +404,8 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
     history = {'train_loss': [], 'val_loss': [], 'lr': []}
     
     # 加载检查点 (如果存在且需要)
-    # --- Checkpoint Loading Logic --- (Simplified for this edit)
-    checkpoint_path = os.path.join(config['model_config']['model_dir'], f'{element}_checkpoint.pth')
+    model_cfg = config.model_config # 修改：使用属性访问
+    checkpoint_path = os.path.join(model_cfg['model_dir'], f'{element}_checkpoint.pth') # 修改：使用属性访问
     if train_cfg.get('resume_training', True) and os.path.exists(checkpoint_path):
         try:
             logger.info(f"从检查点加载状态: {checkpoint_path}")
@@ -431,7 +431,6 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
          start_epoch = 0
          best_val_loss = float('inf')
          patience_counter = 0
-    # --- End Checkpoint Loading Logic ---
 
     # ------------------- 训练循环 -------------------
     logger.info(f"开始训练 {element}，共 {num_epochs} 个 epochs")
