@@ -1620,23 +1620,36 @@ def main():
             best_params_file = os.path.join(config.output_config['results_dir'], 'hyperopt', element, 'best_params.json')
 
             # 1. Try loading existing best parameters first
+            logger.info(f"[Main Loop Debug] 检查最佳参数文件: {best_params_file}") # Debug log
             # Skip loading if --force_new_model is used
             if not getattr(args, 'force_new_model', False) and os.path.exists(best_params_file):
+                logger.info(f"[Main Loop Debug] 文件存在且未使用 force_new_model，尝试加载... ") # Debug log
                 try:
                     import json
                     with open(best_params_file, 'r') as f:
                         best_params = json.load(f)
                     # Basic validation of loaded params (optional)
                     if isinstance(best_params, dict) and best_params: 
-                        logger.info(f"从文件加载了元素 {element} 的最佳超参数: {best_params_file}")
+                        logger.info(f"[Main Loop Debug] 成功加载并验证 best_params: {best_params}") # Debug log
                         best_params_loaded = True
                     else:
-                        logger.warning(f"加载的 best_params.json 文件无效或为空，将重新运行调优。")
+                        logger.warning(f"[Main Loop Debug] 加载的 best_params.json 文件无效或为空。 best_params: {best_params}") # Debug log
                         best_params = None # Reset best_params
-                        os.remove(best_params_file) # Remove invalid file
+                        best_params_loaded = False # Ensure flag is False
+                        # os.remove(best_params_file) # Optionally remove invalid file
                 except Exception as load_err:
-                    logger.warning(f"加载 best_params.json 文件失败: {load_err}，将重新运行调优。")
+                    logger.warning(f"[Main Loop Debug] 加载 best_params.json 文件失败: {load_err}") # Debug log
                     best_params = None # Ensure best_params is None if loading failed
+                    best_params_loaded = False # Ensure flag is False
+            else:
+                 if getattr(args, 'force_new_model', False):
+                      logger.info("[Main Loop Debug] 使用了 force_new_model，跳过加载最佳参数文件。") # Debug log
+                 elif not os.path.exists(best_params_file):
+                      logger.info("[Main Loop Debug] 最佳参数文件不存在。") # Debug log
+                 best_params_loaded = False # Ensure flag is False if file not loaded
+            
+            # Log state after attempting load
+            logger.info(f"[Main Loop Debug] 加载尝试后状态: best_params_loaded={best_params_loaded}, best_params={best_params}")
             
             # 2. Run tuning if needed (flag is set AND params not loaded)
             if not best_params_loaded and args.tune_hyperparams: 
