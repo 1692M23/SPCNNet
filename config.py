@@ -148,6 +148,25 @@ model_config = {
         'gru_bidirectional': True,
         'gcn_layers': 2,      # GCN层数
         'fusion_channels': 64
+    },
+    'resample_dim': 3000,              # 光谱重采样维度
+    'denoise': True,                   # 是否去噪
+    'denoise_params': {
+        'first_pass': {'window': 5, 'polyorder': 2},  # 第一次去噪参数
+        'second_pass': {'window': 7, 'polyorder': 3}  # 第二次去噪参数
+    },
+    'normalization_method': 'median',  # 归一化方法 (median, minmax, standard)
+    'wavelength_grids': {
+        'u': np.linspace(3000, 4000, 1000),  # u波段波长范围
+        'g': np.linspace(4000, 5000, 1000),  # g波段波长范围
+        'r': np.linspace(5000, 6000, 1000),  # r波段波长范围
+        'i': np.linspace(6000, 7000, 1000),  # i波段波长范围
+        'z': np.linspace(7000, 8000, 1000),  # z波段波长范围
+    },
+    'augmentation_enabled': True,
+    'augmentation_params': {
+        'noise_level': 0.02,
+        'shift_range': 0.1
     }
 }
 
@@ -159,6 +178,7 @@ training_config = {
     'force_new_model': True,
     'num_epochs': 100,
     'early_stopping_patience': 20,
+    'gradient_clip_val': 1.0, # 添加梯度裁剪阈值
     'device': device_config['device'],  # 使用检测到的设备
     'device_type': device_config['device_type'],  # 设备类型（'cpu', 'cuda', 或 'tpu'）
     'multi_device': device_config['multi_device'],  # 是否有多个设备可用

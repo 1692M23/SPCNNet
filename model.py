@@ -12,6 +12,9 @@ import pandas as pd
 from scipy import stats
 from sklearn.metrics import r2_score
 import sys
+from torch.cuda.amp import GradScaler, autocast
+import torch.nn.utils as torch_utils # Added for gradient clipping
+from tqdm import tqdm
 
 # 处理torch_xla导入问题
 try:
@@ -314,462 +317,262 @@ class SpectralResCNNEnsemble:
         return predictions.squeeze(), uncertainty.squeeze()
 
 # =============== 2. 训练相关 ===============
-def _train_epoch(model, train_loader, criterion, optimizer, device):
+def train(model, train_loader, val_loader, config, device=None, element=None, start_epoch=0, 
+          initial_best_val_loss=float('inf'), initial_patience=0, 
+          stage1_completed=False, training_completed=False,
+          augment_fn=None): # Added augment_fn parameter
     """
-    单轮训练函数
-    """
-    model.train()
-    train_loss = 0
-    for spectra, abundances in train_loader:
-        spectra = spectra.to(device)
-        abundances = abundances.to(device)
-        
-        optimizer.zero_grad()
-        outputs = model(spectra)
-        loss = criterion(outputs.squeeze(), abundances)
-        
-        # 检查损失值是否为 nan
-        if torch.isnan(loss):
-            logger.warning("Detected nan loss value, skipping current batch")
-            continue
-        
-        loss.backward()
-        
-        # 梯度裁剪
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        
-        optimizer.step()
-        train_loss += loss.item()
+    训练模型的核心函数，支持断点续训和两阶段训练。
     
-    return train_loss / len(train_loader)
+    参数:
+        model: 待训练的模型
+        train_loader: 训练数据加载器
+        val_loader: 验证数据加载器
+        config (dict): 包含训练和模型配置的字典
+        device: 计算设备
+        element (str): 元素名称，用于保存模型和状态
+        start_epoch (int): 起始的epoch
+        initial_best_val_loss (float): 初始的最佳验证损失
+        initial_patience (int): 初始的早停计数器
+        stage1_completed (bool): 第一阶段训练是否完成
+        training_completed (bool): 整个训练是否完成
+        augment_fn (callable, optional): Batch-level augmentation function.
 
-def _validate(model, val_loader, criterion, device):
+    返回:
+        tuple: (训练好的模型, history_dict)
     """
-    验证函数
-    """
-    model.eval()
-    val_loss = 0
-    with torch.no_grad():
-        for spectra, abundances in val_loader:
-            spectra = spectra.to(device)
-            abundances = abundances.to(device)
-            outputs = model(spectra)
-            val_loss += criterion(outputs.squeeze(), abundances).item()
+    logger = logging.getLogger('train')
     
-    return val_loss / len(val_loader)
-
-def _save_checkpoint(model, optimizer, scheduler, epoch_val, loss, element, config):
-    """
-    保存检查点
-    """
-    try:
-        # 确保模型目录存在
-        if isinstance(config, dict):
-            model_dir = config.get('output', {}).get('model_dir', 'models')
-        else:
-            model_dir = getattr(config, 'output', {}).get('model_dir', 'models')
-            
-        os.makedirs(model_dir, exist_ok=True)
-        model_path = os.path.join(model_dir, f'best_model_{element}.pth')
-        
-        # 只保存状态字典
-        checkpoint = {
-            'epoch': epoch_val,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
-            'loss': loss,
-        }
-        
-        torch.save(checkpoint, model_path)
-        logger.info(f"成功保存检查点: {model_path}")
-        return True
-    except Exception as e:
-        logger.error(f"保存检查点失败: {str(e)}")
-        return False
-
-def train(model, train_loader, val_loader, num_epochs=50, patience=10, device=None, element=None, config=None):
-    """训练模型"""
-    logger = logging.getLogger('model')
+    # 从配置中获取训练参数
+    train_cfg = config['training']
+    lr = train_cfg.get('lr', 0.001)
+    weight_decay = train_cfg.get('weight_decay', 1e-4)
+    num_epochs = train_cfg.get('num_epochs', 100)
+    patience = train_cfg.get('early_stopping_patience', 10)
+    scheduler_type = train_cfg.get('scheduler', 'cosine')
+    scheduler_params = train_cfg.get('scheduler_params', {})
+    lr_min = train_cfg.get('lr_min', 1e-6)
+    gradient_clip_val = train_cfg.get('gradient_clip_val', 1.0) # Added gradient clipping value
     
-    # 配置兼容性处理：确保config有正确的结构
-    if 'training' not in config:
-        if 'training_config' in config:
-            logger.warning("配置结构使用了'training_config'键而非'training'键，正在转换...")
-            config['training'] = config['training_config']
-        else:
-            logger.error("配置缺少训练参数！尝试创建默认配置。")
-            config['training'] = {
-                'lr': 0.001,
-                'weight_decay': 1e-4,
-                'num_epochs': 50,
-                'early_stopping_patience': 10
-            }
+    # 确定设备
+    if device is None:
+        device = setup_device()
     
-    # 确保model_config路径存在
-    if 'model_config' not in config or 'model_dir' not in config['model_config']:
-        if 'model_dir' not in config.get('model_config', {}):
-            logger.warning("配置缺少model_dir路径，使用默认路径。")
-            if 'model_config' not in config:
-                config['model_config'] = {}
-            config['model_config']['model_dir'] = 'models'
+    # 如果模型不在指定设备上，移动模型
+    if next(model.parameters()).device != device:
+        model = model.to(device)
+        logger.info(f"模型已移动到设备: {device}")
     
-    # 确定设备类型
-    device_type = 'cpu'
-    if str(device).startswith('cuda'):
-        device_type = 'cuda'
-    elif str(device).startswith('xla'):
-        device_type = 'tpu'
+    # 初始化优化器
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     
-    logger.info(f"在 {device_type} 设备上训练模型: {device}")
-    
-    # 创建训练状态恢复文件路径
-    training_state_dir = os.path.join(config['model_config']['model_dir'], 'training_states')
-    os.makedirs(training_state_dir, exist_ok=True)
-    training_state_file = os.path.join(training_state_dir, f'training_state_{element}.json')
-    
-    # 检查是否存在训练状态文件
-    resume_training = False
-    current_stage = 1  # 默认从第一阶段开始
-    start_epoch = 0    # 默认从第0轮开始
-    best_val_loss = float('inf')
-    patience_counter = 0
-    
-    if os.path.exists(training_state_file):
-        try:
-            import json
-            with open(training_state_file, 'r') as f:
-                training_state = json.load(f)
-                
-            current_stage = training_state.get('current_stage', 1)
-            start_epoch = training_state.get('current_epoch', 0) + 1  # 从下一轮开始
-            best_val_loss = training_state.get('best_val_loss', float('inf'))
-            patience_counter = training_state.get('patience_counter', 0)
-            
-            # 如果上次训练已经完成，重新开始
-            if training_state.get('training_completed', False):
-                logger.info(f"找到已完成的训练状态文件，将重新开始训练")
-                current_stage = 1
-                start_epoch = 0
-                best_val_loss = float('inf')
-                patience_counter = 0
-            else:
-                logger.info(f"从中断点恢复训练: 阶段{current_stage}, 轮次{start_epoch}")
-                resume_training = True
-                
-                # 如果发现阶段1已经完成，准备开始阶段2
-                if current_stage == 1 and training_state.get('stage1_completed', False):
-                    logger.info("第一阶段已完成，将从第二阶段开始")
-                    current_stage = 2
-                    start_epoch = 0
-        except Exception as e:
-            logger.warning(f"读取训练状态文件失败: {str(e)}，将重新开始训练")
-    
-    # 设置优化器和学习率调度器
-    optimizer = optim.Adam(model.parameters(), 
-                          lr=config['training']['lr'],
-                          weight_decay=config['training']['weight_decay'])
-    
-    # 在train函数中修改创建scheduler的代码部分
-    if 'scheduler' in config['training'] and config['training']['scheduler'] == 'cosine':
-        scheduler_params = config['training'].get('scheduler_params', {})
-        T_0 = scheduler_params.get('T_0', 10)
-        T_mult = scheduler_params.get('T_mult', 1) 
-        eta_min = scheduler_params.get('eta_min', 5e-6)
-        
+    # 初始化学习率调度器
+    scheduler = None
+    if scheduler_type == 'cosine':
         scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optimizer,
-            T_0=T_0, 
-            T_mult=T_mult,
-            eta_min=eta_min
+            T_0=scheduler_params.get('T_0', 10), 
+            T_mult=scheduler_params.get('T_mult', 1),
+            eta_min=scheduler_params.get('eta_min', lr_min)
+        )
+    elif scheduler_type == 'reduce_lr_on_plateau':
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=scheduler_params.get('factor', 0.5),
+            patience=scheduler_params.get('patience', 5),
+            verbose=True,
+            min_lr=lr_min
         )
     else:
-        # 默认调度器
-        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
+        logger.warning(f"不支持的学习率调度器类型: {scheduler_type}，将不使用调度器。")
     
-    # 如果恢复训练，尝试加载模型和优化器状态
-    if resume_training:
-        checkpoint_path = os.path.join(config['model_config']['model_dir'], f'checkpoint_{element}.pth')
-        if os.path.exists(checkpoint_path):
-            try:
-                checkpoint = torch.load(checkpoint_path, map_location=device)
-                model.load_state_dict(checkpoint['model_state_dict'])
-                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    # 损失函数
+    criterion = nn.MSELoss()
+    
+    # 混合精度训练 (如果设备支持)
+    scaler = None
+    if device.type == 'cuda':
+        scaler = GradScaler()
+        logger.info("启用CUDA混合精度训练")
+    elif str(device).startswith('xla'):
+        logger.info("TPU训练通常自动处理混合精度")
+        
+    # 状态变量
+    best_val_loss = initial_best_val_loss
+    patience_counter = initial_patience
+    history = {'train_loss': [], 'val_loss': [], 'lr': []}
+    
+    # 加载检查点 (如果存在且需要)
+    # --- Checkpoint Loading Logic --- (Simplified for this edit)
+    checkpoint_path = os.path.join(config['model_config']['model_dir'], f'{element}_checkpoint.pth')
+    if train_cfg.get('resume_training', True) and os.path.exists(checkpoint_path):
+        try:
+            logger.info(f"从检查点加载状态: {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            if scheduler and 'scheduler_state_dict' in checkpoint:
                 scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-                logger.info(f"成功加载模型和优化器状态")
-            except Exception as e:
-                logger.warning(f"加载模型和优化器状态失败: {str(e)}")
-    
-    # 设置损失函数
-    criterion = WeightedMSELoss(threshold=0.2, high_weight=2.0)  # 使用自定义损失函数
-    
-    # 训练记录
-    train_losses = []
-    val_losses = []
-    
-    # 第一阶段或第二阶段的训练过程
-    def train_stage(stage, start_from_epoch=0, initial_best_val_loss=float('inf'), initial_patience=0):
-        """训练指定阶段"""
-        nonlocal train_losses, val_losses
-        best_val_loss = initial_best_val_loss
-        patience_counter = initial_patience
-        stage_completed = False
-        
-        # 冻结或解冻参数，根据阶段设置
-        if stage == 1:
-            logger.info("开始第一阶段训练 - 特征提取器")
-            # 获取模型的所有参数
-            all_params = list(model.parameters())
-            # 冻结最后一层的参数
-            for param in all_params[-2:]:  # 最后一个线性层的权重和偏置
-                param.requires_grad = False
-        else:
-            logger.info("开始第二阶段训练 - 全模型微调")
-            # 解冻所有层
-            for param in model.parameters():
-                param.requires_grad = True
-                
-            # 重置优化器和学习率 - 第二阶段使用较小的学习率
-            nonlocal optimizer, scheduler
-            optimizer = optim.Adam(model.parameters(), 
-                                  lr=config['training']['lr'] * 0.1,
-                                  weight_decay=config['training']['weight_decay'])
-            scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2)
-        
-        # 从指定轮次开始训练
-        for epoch in range(start_from_epoch, config['training']['num_epochs']):
-            model.train()
-            total_loss = 0
-            batch_count = 0
-            
-            for batch_idx, (data, target) in enumerate(train_loader):
-                # 将数据移动到正确的设备 - 支持TPU/GPU/CPU
-                data = move_to_device(data, device)
-                target = move_to_device(target, device)
-                
-                # 检查数据是否包含NaN
-                if torch.isnan(data).any() or torch.isnan(target).any():
-                    logger.warning("检测到输入数据包含NaN值，跳过该批次")
-                    continue
-                
-                # TPU特定处理：清除之前的梯度
-                optimizer.zero_grad()
-                
-                # 前向传播
-                output = model(data)
-                loss = criterion(output, target)
-                
-                # 反向传播
-                loss.backward()
-                
-                # 梯度裁剪
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                
-                # 优化器步进
-                optimizer.step()
-                
-                # TPU特定处理：确保梯度更新已应用
-                if device_type == 'tpu':
-                    if HAS_XLA:
-                        xm.mark_step()
-                
-                total_loss += loss.item()
-                batch_count += 1
-                
-                # 每个批次后添加进度显示 (无论TPU/GPU/CPU)
-                if batch_idx % 2 == 0 or batch_idx == len(train_loader) - 1:  # 修改为每2个批次显示一次
-                    # 确保TPU上的操作完成后再输出
-                    if device_type == 'tpu' and HAS_XLA:
-                        import torch_xla.core.xla_model as xm
-                        xm.mark_step()
-                    
-                    # 直接使用print输出，确保控制台可见
-                    progress_msg = f"阶段{stage} - Epoch {epoch+1}/{config['training']['num_epochs']} - 批次 {batch_idx+1}/{len(train_loader)} ({(batch_idx+1)*100/len(train_loader):.1f}%) - 损失: {loss.item():.6f}"
-                    print(progress_msg, flush=True)  # 添加flush=True强制立即显示
-                    logger.info(progress_msg)
-            
-            # 更新学习率
-            scheduler.step()
-            
-            # 验证
-            model.eval()
-            val_loss = 0
-            with torch.no_grad():
-                for data, target in val_loader:
-                    # 将数据移动到正确的设备 - 支持TPU/GPU/CPU
-                    data = move_to_device(data, device)
-                    target = move_to_device(target, device)
-                    
-                    # 前向传播
-                    output = model(data)
-                    val_loss += criterion(output, target).item()
-                    
-                    # TPU特定处理：确保计算已完成
-                    if device_type == 'tpu':
-                        if HAS_XLA:
-                            xm.mark_step()
-            
-            val_loss /= len(val_loader)
-            train_loss = total_loss / batch_count if batch_count > 0 else float('inf')
-            
-            train_losses.append(train_loss)
-            val_losses.append(val_loss)
-            
-            # 强制同步点和输出
-            if device_type == 'tpu' and HAS_XLA:
-                xm.mark_step()
+            start_epoch = checkpoint.get('epoch', 0) + 1
+            best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+            patience_counter = checkpoint.get('patience_counter', 0)
+            # Load scaler state if exists
+            if scaler and 'scaler_state_dict' in checkpoint:
+                 scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            logger.info(f"从 epoch {start_epoch} 继续训练")
+        except Exception as e:
+            logger.warning(f"加载检查点失败: {e}，将从头开始训练。")
+            start_epoch = 0
+            best_val_loss = float('inf')
+            patience_counter = 0
+    else:
+         logger.info("未找到检查点或未启用恢复，将从头开始训练。")
+         start_epoch = 0
+         best_val_loss = float('inf')
+         patience_counter = 0
+    # --- End Checkpoint Loading Logic ---
 
-            # 使用print直接输出而不仅仅依赖logger
-            print(f"第{stage}阶段 - 轮次: {epoch+1}/{config['training']['num_epochs']}, 训练损失: {train_loss:.6f}, 验证损失: {val_loss:.6f}")
-            sys.stdout.flush()  # 强制刷新输出缓冲区
-            logger.info(f"第{stage}阶段 - 轮次: {epoch+1}/{config['training']['num_epochs']}, 训练损失: {train_loss:.6f}, 验证损失: {val_loss:.6f}")
+    # ------------------- 训练循环 -------------------
+    logger.info(f"开始训练 {element}，共 {num_epochs} 个 epochs")
+    for epoch in range(start_epoch, num_epochs):
+        epoch_start_time = time.time()
+        
+        # --- 训练阶段 ---
+        model.train()
+        running_train_loss = 0.0
+        train_pbar = tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1}/{num_epochs} [Train]")
+        
+        for i, (inputs, targets) in train_pbar:
+            inputs, targets = inputs.to(device), targets.to(device)
             
-            # 更新训练状态并保存
-            save_training_state(element, stage, epoch, best_val_loss, patience_counter, False, stage==1 and stage_completed)
+            # 应用数据增强 (如果提供了函数)
+            if augment_fn:
+                inputs = augment_fn(inputs)
+
+            optimizer.zero_grad()
             
-            # 保存当前检查点，用于恢复训练
-            save_checkpoint(model, optimizer, scheduler, epoch, val_loss, element, 'checkpoint')
+            # 混合精度
+            if scaler:
+                with autocast():
+                    outputs = model(inputs)
+                    loss = criterion(outputs, targets)
+                scaler.scale(loss).backward()
+                # Gradient Clipping before scaler.step()
+                if gradient_clip_val > 0:
+                    scaler.unscale_(optimizer) # Unscale gradients before clipping
+                    torch_utils.clip_grad_norm_(model.parameters(), gradient_clip_val)
+                scaler.step(optimizer)
+                scaler.update()
+            elif str(device).startswith('xla'):
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+                loss.backward()
+                # Gradient Clipping
+                if gradient_clip_val > 0:
+                    torch_utils.clip_grad_norm_(model.parameters(), gradient_clip_val)
+                xm.optimizer_step(optimizer, barrier=True) # TPU optimizer step
+            else: # CPU
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+                loss.backward()
+                 # Gradient Clipping
+                if gradient_clip_val > 0:
+                    torch_utils.clip_grad_norm_(model.parameters(), gradient_clip_val)
+                optimizer.step()
             
-            # 早停检查
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                patience_counter = 0
-                # 保存最佳模型 - 使用当前循环的 epoch 变量作为 epoch_val 参数
-                save_checkpoint(model, optimizer, scheduler, epoch, val_loss, element, 'best_model')
+            running_train_loss += loss.item()
+            train_pbar.set_postfix(loss=f'{loss.item():.4f}')
+        
+        epoch_train_loss = running_train_loss / len(train_loader)
+        history['train_loss'].append(epoch_train_loss)
+        history['lr'].append(optimizer.param_groups[0]['lr'])
+
+        # --- 验证阶段 ---
+        model.eval()
+        running_val_loss = 0.0
+        val_pbar = tqdm(enumerate(val_loader), total=len(val_loader), desc=f"Epoch {epoch+1}/{num_epochs} [Val]")
+        with torch.no_grad():
+            for i, (inputs, targets) in val_pbar:
+                inputs, targets = inputs.to(device), targets.to(device)
+                if scaler:
+                    with autocast():
+                        outputs = model(inputs)
+                        loss = criterion(outputs, targets)
+                else:
+                    outputs = model(inputs)
+                    loss = criterion(outputs, targets)
+                running_val_loss += loss.item()
+                val_pbar.set_postfix(loss=f'{loss.item():.4f}')
+        
+        epoch_val_loss = running_val_loss / len(val_loader)
+        history['val_loss'].append(epoch_val_loss)
+        
+        epoch_end_time = time.time()
+        epoch_duration = epoch_end_time - epoch_start_time
+        
+        logger.info(f"Epoch {epoch+1}/{num_epochs} | Train Loss: {epoch_train_loss:.6f} | Val Loss: {epoch_val_loss:.6f} | LR: {optimizer.param_groups[0]['lr']:.6e} | Time: {epoch_duration:.2f}s")
+
+        # --- 更新学习率和早停逻辑 ---
+        if scheduler:
+            if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(epoch_val_loss)
             else:
-                patience_counter += 1
-                if patience_counter >= config['training']['early_stopping_patience']:
-                    logger.info(f"第{stage}阶段 - 早停触发，最佳验证损失: {best_val_loss:.6f}")
-                    stage_completed = True
-                    break
+                scheduler.step()
         
-        # 如果没有提前停止，标记阶段完成
-        if not stage_completed and epoch == config['training']['num_epochs'] - 1:
-            stage_completed = True
-            
-        return best_val_loss, stage_completed
-    
-    # 保存训练状态的辅助函数
-    def save_training_state(element, current_stage, current_epoch, best_val_loss, patience_counter, 
-                           training_completed=False, stage1_completed=False):
-        """保存当前训练状态"""
-        import json
-        
-        training_state = {
-            'element': element,
-            'current_stage': current_stage,
-            'current_epoch': current_epoch,
+        if epoch_val_loss < best_val_loss:
+            best_val_loss = epoch_val_loss
+            patience_counter = 0
+            logger.info(f"  New best validation loss: {best_val_loss:.6f}. Saving model...")
+            # 保存最佳模型
+            best_model_path = os.path.join(config['model_config']['model_dir'], f'{element}_best_model.pth')
+            save_dict = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'best_val_loss': best_val_loss,
+            }
+            torch.save(save_dict, best_model_path)
+        else:
+            patience_counter += 1
+            logger.info(f"  Validation loss did not improve. Patience: {patience_counter}/{patience}")
+
+        # --- 保存检查点 ---
+        checkpoint_save_path = os.path.join(config['model_config']['model_dir'], f'{element}_checkpoint.pth')
+        save_dict_ckpt = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
             'best_val_loss': best_val_loss,
             'patience_counter': patience_counter,
-            'training_completed': training_completed,
-            'stage1_completed': stage1_completed,
-            'timestamp': time.time()
         }
+        if scheduler:
+            save_dict_ckpt['scheduler_state_dict'] = scheduler.state_dict()
+        if scaler:
+            save_dict_ckpt['scaler_state_dict'] = scaler.state_dict()
+        torch.save(save_dict_ckpt, checkpoint_save_path)
+        # logger.debug(f"Checkpoint saved to {checkpoint_save_path}")
         
-        with open(training_state_file, 'w') as f:
-            json.dump(training_state, f, indent=4)
+        # --- 早停检查 ---
+        if patience_counter >= patience:
+            logger.info(f"Early stopping triggered after {epoch+1} epochs.")
+            break
+            
+    # ------------------- 训练结束 -------------------
+    logger.info("训练完成。")
     
-    # 保存当前检查点的辅助函数，用于恢复训练
-    def save_checkpoint(model, optimizer, scheduler, epoch_val, loss, element, checkpoint_type='checkpoint'):
-        """保存训练检查点"""
-        if isinstance(config, dict):
-            model_dir = config.get('model_config', {}).get('model_dir', 'models')
-        else:
-            try:
-                model_dir = config.model_config['model_dir']
-            except:
-                model_dir = 'models'
-        
-        os.makedirs(model_dir, exist_ok=True)
-        checkpoint_path = os.path.join(model_dir, f'{checkpoint_type}_{element}.pth')
-        
-        # 只保存状态字典，不保存整个模型对象
-        checkpoint = {
-            'epoch': epoch_val,  # 使用epoch_val而不是epoch
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict() if optimizer else None,
-            'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
-            'loss': loss
-        }
-        
+    # 加载性能最好的模型状态
+    best_model_path = os.path.join(config['model_config']['model_dir'], f'{element}_best_model.pth')
+    if os.path.exists(best_model_path):
+        logger.info(f"加载最佳模型: {best_model_path}")
         try:
-            torch.save(checkpoint, checkpoint_path)
-            logger.info(f"成功保存检查点: {checkpoint_path}")
-            return True
+            best_checkpoint = torch.load(best_model_path, map_location=device)
+            model.load_state_dict(best_checkpoint['model_state_dict'])
         except Exception as e:
-            logger.error(f"保存检查点失败: {str(e)}")
-            return False
-    
-    # 根据当前阶段进行训练
-    if current_stage == 1:
-        # 执行第一阶段训练
-        best_val_loss, stage1_completed = train_stage(1, start_epoch, best_val_loss, patience_counter)
-        
-        # 如果第一阶段完成，继续第二阶段
-        if stage1_completed:
-            save_training_state(element, 1, config['training']['num_epochs']-1, best_val_loss, 0, False, True)
-            best_val_loss, _ = train_stage(2, 0, float('inf'), 0)
+            logger.warning(f"加载最佳模型失败: {e}。返回当前模型状态。")
     else:
-        # 从第二阶段继续
-        best_val_loss, _ = train_stage(2, start_epoch, best_val_loss, patience_counter)
-    
-    # 训练全部完成，更新状态
-    save_training_state(element, 2, config['training']['num_epochs']-1, best_val_loss, 0, True, True)
-    
-    # 训练结束，保存最终模型
-    # 从配置中获取模型目录，处理配置可能是字典或模块的情况
-    if config is not None:
-        if isinstance(config, dict):
-            model_dir = config.get('model_config', {}).get('model_dir', 'models')
-        else:
-            model_dir = getattr(config, 'model_config', {}).get('model_dir', 'models')
-    else:
-        model_dir = 'models'
-    
-    # 确保目录存在
-    os.makedirs(model_dir, exist_ok=True)
-    
-    # 保存最终模型
-    final_model_path = os.path.join(model_dir, f'SpectralResCNN_GCN_{element}.pth')
-    
-    try:
-        # 只保存状态字典
-        torch.save(model.state_dict(), final_model_path)
-        logger.info(f"成功保存最终模型: {final_model_path}")
-    except Exception as e:
-        logger.error(f"保存最终模型失败: {str(e)}")
-        # 尝试备用保存方式
-        try:
-            backup_path = os.path.join(model_dir, f'{element}_model.pth')
-            torch.save(model.state_dict(), backup_path)
-            logger.info(f"成功保存备用最终模型: {backup_path}")
-        except Exception as e2:
-            logger.error(f"保存备用最终模型也失败: {str(e2)}")
-    
-    # 同时保存检查点格式的模型以备后续使用
-    if isinstance(config, dict):
-        checkpoint_dir = config.get('model_config', {}).get('model_dir', 'models')
-    else:
-        checkpoint_dir = getattr(config, 'model_config', {}).get('model_dir', 'models')
-        
-    checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_{element}.pth')
-    
-    try:
-        # 使用最后的训练轮次作为epoch_val
-        last_epoch = config['training']['num_epochs'] - 1
-        checkpoint = {
-            'epoch': last_epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict() if optimizer else None,
-            'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
-            'loss': best_val_loss
-        }
-        torch.save(checkpoint, checkpoint_path)
-        logger.info(f"成功保存检查点: {checkpoint_path}")
-    except Exception as e:
-        logger.error(f"保存检查点失败: {str(e)}")
-    
-    return train_losses, val_losses
+        logger.warning("未找到保存的最佳模型文件，返回当前模型状态。")
+
+    return model, history
 
 # =============== 3. 评估相关 ===============
 def evaluate_model(model, test_loader, device=None):
