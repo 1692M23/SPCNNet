@@ -30,14 +30,13 @@ from hyperparameter_tuning_replacement import hyperparameter_tuning as run_grid_
 from model_analysis import analyze_model_performance, show_batch_results, analyze_feature_importance, analyze_residuals
 
 # 添加数据增强函数
-def add_noise(batch, noise_level=0.01):
-    """简单的向批次数据添加高斯噪声"""
-    data, labels = batch
+def add_noise(data, noise_level=0.01):
+    """简单的向数据张量添加高斯噪声"""
     # 确保 data 和 noise 在同一设备上
     device = data.device
     noise = torch.randn_like(data, device=device) * noise_level
     noisy_data = data + noise
-    return noisy_data, labels
+    return noisy_data
 
 # 配置日志
 logging.basicConfig(
@@ -565,8 +564,8 @@ def process_element(element, model_type, input_size, use_gpu=True, config=None):
     augment_fn = None
     if config.data_config.get('augmentation_enabled', False):
         noise_level = config.data_config.get('augmentation_params', {}).get('noise_level', 0.01)
-        # 使用在文件顶部定义的 add_noise 函数
-        augment_fn = lambda batch: add_noise(batch, noise_level)
+        # 修改 lambda 表达式以匹配新的 add_noise 签名
+        augment_fn = lambda data: add_noise(data, noise_level)
         logger.info(f"数据增强已启用，噪声水平: {noise_level}")
 
     # 检查是否存在训练状态
