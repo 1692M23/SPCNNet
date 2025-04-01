@@ -228,11 +228,10 @@ def train_and_evaluate_model(model, train_loader, val_loader, test_loader, eleme
             logger.info("未找到训练状态文件，从头开始训练")
         
         # 训练模型
-        best_model, val_loss, test_metrics = train(
+        best_model, val_loss = train(
             model=model,
             train_loader=train_loader,
             val_loader=val_loader,
-            test_loader=test_loader,
             element=element,
             device=device,
             best_hyperparams=best_hyperparams,
@@ -240,7 +239,16 @@ def train_and_evaluate_model(model, train_loader, val_loader, test_loader, eleme
             start_epoch=start_epoch,
             best_val_loss=best_val_loss
         )
-        
+
+        # 训练完成后，使用 test_loader 评估最佳模型
+        if best_model is not None:
+            logger.info(f"使用测试集评估元素 {element} 的最佳模型")
+            test_metrics = evaluate_model(best_model, test_loader, device)
+            logger.info(f"元素 {element} 的测试指标: {test_metrics}")
+        else:
+            logger.warning(f"元素 {element} 未能训练出有效模型，无法进行测试评估")
+            test_metrics = {'mse': float('nan'), 'mae': float('nan'), 'r2': float('nan')} # 或者其他表示失败的值
+
         return best_model, val_loss, test_metrics
         
     except Exception as e:
