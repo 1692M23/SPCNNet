@@ -29,6 +29,44 @@ from fits_cache import FITSCache
 from hyperparameter_tuning_replacement import hyperparameter_tuning as run_grid_search_tuning
 from model_analysis import analyze_model_performance, show_batch_results, analyze_feature_importance, analyze_residuals
 
+# ============ 全局日志配置 ============
+def setup_logging():
+    log_dir = 'logs'
+    os.makedirs(log_dir, exist_ok=True)
+    log_file_path = os.path.join(log_dir, 'main.log')
+
+    # 获取根 logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO) # 设置根 logger 的级别
+
+    # 移除所有现有的处理器，避免重复添加
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    # 创建文件处理器 (INFO 级别)
+    file_handler = logging.FileHandler(log_file_path, mode='a', encoding='utf-8')
+    file_handler.setLevel(logging.INFO)
+    
+    # 创建控制台处理器 (可以设为 INFO 或 WARNING)
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO) # 控制台也显示 INFO 信息
+    
+    # 创建格式化器
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+    
+    # 添加处理器到根 logger
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+    
+    logging.info("日志系统设置完成。日志将写入 {} 并显示在控制台。".format(log_file_path))
+
+# ========================================
+
+# 配置logger (保留单个getLogger调用，继承全局配置)
+logger = logging.getLogger(__name__)
+
 # 添加数据增强函数
 def add_noise(data, noise_level=0.01):
     """简单的向数据张量添加高斯噪声"""
@@ -37,36 +75,6 @@ def add_noise(data, noise_level=0.01):
     noise = torch.randn_like(data, device=device) * noise_level
     noisy_data = data + noise
     return noisy_data
-
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(os.path.join(config.output_config['log_dir'], 'main.log')),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger('main')
-
-# 创建缓存管理器
-cache_manager = CacheManager(cache_dir=os.path.join(config.output_config['cache_dir'], 'main'))
-
-# 处理torch_xla导入问题
-try:
-    import torch_xla
-    import torch_xla.core.xla_model as xm
-    HAS_XLA = True
-    try:
-        import torch_xla.distributed.parallel_loader as pl
-        HAS_PARALLEL_LOADER = True
-    except ImportError:
-        HAS_PARALLEL_LOADER = False
-        print("torch_xla.distributed.parallel_loader导入失败，将禁用并行加载功能")
-except ImportError:
-    HAS_XLA = False
-    HAS_PARALLEL_LOADER = False
-    print("torch_xla导入失败，将禁用TPU支持")
 
 def load_data(data_path, element=None):
     """加载数据集并返回numpy数组"""
@@ -1771,4 +1779,5 @@ def main():
 
 
 if __name__ == '__main__':
-    main() 
+    setup_logging() # 在程序入口处调用日志设置
+    main()

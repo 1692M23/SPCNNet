@@ -32,20 +32,9 @@ except ImportError:
     HAS_PARALLEL_LOADER = False
     print("torch_xla导入失败，将禁用TPU支持")
 
-# 配置logger
+# 配置logger (继承自全局设置)
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
-# 创建控制台处理器
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-
-# 创建格式化器
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-console_handler.setFormatter(formatter)
-
-# 添加处理器到logger
-logger.addHandler(console_handler)
+# logger.setLevel(logging.INFO) # 不再需要单独设置级别
 
 # 检测TPU是否可用并返回相应工具函数
 def is_tpu_available():

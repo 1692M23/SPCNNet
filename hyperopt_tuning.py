@@ -19,16 +19,16 @@ import torch.nn as nn
 import config
 from model import SpectralResCNN, SpectralResCNN_GCN, train, evaluate_model
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(os.path.join(config.output_config['log_dir'], 'hyperopt.log')),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger('hyperopt')
+# 配置日志 (继承自全局配置)
+# logging.basicConfig(
+#     level=logging.INFO,
+#     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+#     handlers=[
+#         logging.FileHandler(os.path.join(config.output_config['log_dir'], 'hyperopt.log')),
+#         logging.StreamHandler()
+#     ]
+# )
+logger = logging.getLogger('hyperopt') # 使用特定的名字，便于过滤
 
 def objective(params, element, train_loader, val_loader, device=None):
     """
