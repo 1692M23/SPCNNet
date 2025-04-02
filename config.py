@@ -203,7 +203,7 @@ training_config = {
 tuning_config = {
     # 传统网格搜索参数 (作为备选)
     'param_grid': {
-        'learning_rate': [5e-5, 1e-4, 5e-4],
+        'learning_rate': [5e-5, 1e-4, 5e-4, 0.001],
         'batch_size': [32, 64, 128],
         'weight_decay': [1e-6, 1e-5, 1e-4],
         'use_gru': [True, False],
