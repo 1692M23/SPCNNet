@@ -496,12 +496,24 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
         epoch_val_loss = running_val_loss / len(val_loader)
         history['val_loss'].append(epoch_val_loss)
         
+        # <<< 添加验证集 R² 计算 >>>
+        # 使用 evaluate_model 计算验证集指标
+        try:
+            _, val_metrics, _, _ = evaluate_model(model, val_loader, device, criterion) # 假设 evaluate_model 已导入且可用
+            epoch_val_r2 = val_metrics.get('r2', np.nan)
+        except Exception as eval_err:
+            logger.warning(f"Epoch {epoch+1} 计算验证 R² 时出错: {eval_err}")
+            epoch_val_r2 = np.nan
+        history.setdefault('val_r2', []).append(epoch_val_r2) # 使用 setdefault 初始化列表
+        # <<< 结束 R² 计算 >>>
+        
         epoch_end_time = time.time()
         epoch_duration = epoch_end_time - epoch_start_time
         
-        logger.info(f"Epoch {epoch+1}/{num_epochs} | Train Loss: {epoch_train_loss:.6f} | Val Loss: {epoch_val_loss:.6f} | LR: {optimizer.param_groups[0]['lr']:.6e} | Time: {epoch_duration:.2f}s")
+        # <<< 修改日志记录，加入 Val R2 >>>
+        logger.info(f"Epoch {epoch+1}/{num_epochs} | Train Loss: {epoch_train_loss:.6f} | Val Loss: {epoch_val_loss:.6f} | Val R2: {epoch_val_r2:.4f} | LR: {optimizer.param_groups[0]['lr']:.6e} | Time: {epoch_duration:.2f}s")
 
-        # --- 更新学习率和早停逻辑 ---
+        # --- 更新学习率和早停逻辑 (基于Val Loss) ---
         if scheduler:
             if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
                 scheduler.step(epoch_val_loss)
@@ -550,7 +562,20 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
     # ------------------- 训练结束 -------------------
     logger.info("训练完成。")
     
-    # 加载性能最好的模型状态
+    # <<< 添加最终最佳 R² 追踪 >>>
+    best_val_r2 = -float('inf')
+    if 'val_r2' in history:
+         valid_r2s = [r2 for r2 in history['val_r2'] if not np.isnan(r2)]
+         if valid_r2s:
+              best_val_r2 = max(valid_r2s)
+              logger.info(f"训练过程中最佳验证 R²: {best_val_r2:.4f}")
+         else:
+              logger.warning("未能记录任何有效的验证 R² 值。")
+    else:
+         logger.warning("history 字典中缺少 'val_r2' 记录。")
+    # <<< 结束 R² 追踪 >>>
+
+    # 加载性能最好的模型状态 (基于Val Loss)
     # 修改：使用属性访问 config.model_config
     best_model_path = os.path.join(config.model_config['model_dir'], f'{element}_best_model.pth')
     best_model_loaded = False
@@ -565,8 +590,8 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
     else:
         logger.warning("未找到保存的最佳模型文件，返回当前模型状态。")
 
-    # 修改返回值：返回加载了最佳权重的模型和最佳验证损失
-    return model, best_val_loss
+    # 修改返回值：返回加载了最佳权重的模型、最佳验证损失和最佳验证 R²
+    return model, best_val_loss, best_val_r2
 
 # =============== 3. 评估相关 ===============
 def evaluate_model(model, data_loader, device, loss_fn):

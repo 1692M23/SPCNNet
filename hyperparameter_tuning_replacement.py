@@ -73,7 +73,7 @@ def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None,
     param_combinations = list(ParameterGrid(param_grid))
     total_combinations = len(param_combinations)
     processed_combinations = []
-    best_val_loss = float('inf')
+    best_val_metric = -float('inf') # 追踪最佳 R²，初始化为负无穷
     best_params = None
     current_combination_idx = 0
     
@@ -85,7 +85,7 @@ def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None,
                 
             # 恢复状态
             processed_combinations = hyperopt_state.get('processed_combinations', [])
-            best_val_loss = hyperopt_state.get('best_val_loss', float('inf'))
+            best_val_metric = hyperopt_state.get('best_val_metric', -float('inf'))
             best_params = hyperopt_state.get('best_params', None)
             current_combination_idx = hyperopt_state.get('current_combination_idx', 0)
             
@@ -95,7 +95,7 @@ def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None,
             if hyperopt_state.get('completed', False):
                 logger.info("超参数调优已完成，将从头开始")
                 processed_combinations = []
-                best_val_loss = float('inf')
+                best_val_metric = -float('inf')
                 best_params = None
                 current_combination_idx = 0
                 
@@ -108,7 +108,7 @@ def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None,
         hyperopt_state = {
             'element': element,
             'processed_combinations': processed,
-            'best_val_loss': best_loss,
+            'best_val_metric': best_loss,
             'best_params': best_p,
             'current_combination_idx': current_idx,
             'total_combinations': total_combinations,
@@ -200,7 +200,7 @@ def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None,
             if temp_config['training']['lr'] is None:
                  logger.error(f"参数组合 {params} 中缺少 'lr' 或 'learning_rate' 键。跳过此组合。")
                  processed_combinations.append(params) # Mark as processed to avoid retrying
-                 update_hyperopt_state(processed_combinations, best_val_loss, best_params, current_combination_idx)
+                 update_hyperopt_state(processed_combinations, best_val_metric, best_params, current_combination_idx)
                  continue # Skip to the next parameter combination
             # !!! 更好的方法是修改 train 函数接收 config_module !!!
             # 如果 model.py 的 train 已修改为接收模块，则直接传递
@@ -212,34 +212,37 @@ def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None,
             # 确保模型目录存在
             os.makedirs(os.path.join(results_dir, 'models'), exist_ok=True)
             
-            # 训练模型并获取验证损失
-            # 注意：train 返回 (model, best_val_loss)
-            trained_model, best_run_val_loss = train(
+            # 训练模型并获取验证损失和 R²
+            # 注意：train 返回 (model, best_val_loss, best_val_r2)
+            trained_model, best_run_val_loss, best_run_val_r2 = train(
                 model=model,
-                train_loader=train_loader,
-                val_loader=val_loader,
+                train_loader=train_loader, # 确保 train_loader 在此作用域内有效
+                val_loader=val_loader,   # 确保 val_loader 在此作用域内有效
                 config=train_config_arg, # 传递模块或字典
-                device=device,
+                device=device,           # 确保 device 在此作用域内有效
                 element=f"{element}_hyperparam_{i}"
             )
             
-            # 获取最佳验证损失 (train 函数直接返回)
-            val_loss = best_run_val_loss
+            # 获取最佳验证 R² (train 函数直接返回)
+            val_metric = best_run_val_r2 # 使用 R² 作为评估指标
+            val_loss = best_run_val_loss   # 同时记录损失用于日志
             
             # 记录训练时间
             training_time = time.time() - start_time
-            logger.info(f"超参数评估完成: 验证损失={val_loss:.6f}, 耗时={training_time:.2f}秒")
-            
+            logger.info(f"超参数评估完成: 验证损失={val_loss:.6f}, 验证 R²={val_metric:.4f}, 耗时={training_time:.2f}秒")
             # 记录传递给 train 函数的配置信息
-            logger.info(f"  [Tune Result] 参数: {params} -> Val Loss: {val_loss:.6f}")
+            logger.info(f"  [Tune Result] 参数: {params} -> Val Loss: {val_loss:.6f}, Val R2: {val_metric:.4f}")
             
-            # 更新最佳参数
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            # 更新最佳参数 (基于 R²)
+            if not np.isnan(val_metric) and val_metric > best_val_metric:
+                best_val_metric = val_metric
                 best_params = params.copy()
-                logger.info(f"找到新的最佳参数: {best_params}, 验证损失: {best_val_loss:.6f}")
+                logger.info(f"找到新的最佳参数(基于R²): {best_params}, 验证 R²: {best_val_metric:.4f}")
                 
-                # 保存最佳参数
+                # 记录传递给 train 函数的配置信息 (记录最佳R²)
+                logger.info(f"    [Tune Best Update] 新最佳参数: {best_params}, 新最佳验证 R²: {best_val_metric:.4f}")
+            
+                # 保存最佳参数 (仍然保存最佳参数，即使标准变了)
                 best_params_file = os.path.join(results_dir, 'best_params.pkl')
                 with open(best_params_file, 'wb') as f:
                     pickle.dump(best_params, f)
@@ -248,14 +251,12 @@ def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None,
                 best_params_json = os.path.join(results_dir, 'best_params.json')
                 with open(best_params_json, 'w') as f:
                     json.dump(best_params, f, indent=4)
-                
-                # 记录传递给 train 函数的配置信息
-                logger.info(f"    [Tune Best Update] 新最佳参数: {best_params}, 新最佳验证损失: {best_val_loss:.6f}")
             
             # 记录参数和结果
             result = {
                 'params': params,
                 'val_loss': val_loss,
+                'val_r2': val_metric,
                 'training_time': training_time
             }
             
@@ -266,11 +267,11 @@ def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None,
             current_combination_idx = i + 1
             
             # 保存超参数调优状态
-            update_hyperopt_state(processed_combinations, best_val_loss, best_params, current_combination_idx)
+            update_hyperopt_state(processed_combinations, best_val_metric, best_params, current_combination_idx)
             
             # 保存结果到CSV
             results_csv = os.path.join(results_dir, 'hyperopt_results.csv')
-            result_df = pd.DataFrame([{**params, 'val_loss': val_loss, 'training_time': training_time}])
+            result_df = pd.DataFrame([{**params, 'val_loss': val_loss, 'val_r2': val_metric, 'training_time': training_time}])
             
             if os.path.exists(results_csv):
                 # 追加到现有文件
@@ -289,13 +290,13 @@ def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None,
             
             # 在每次循环结束（无论成功或失败）后更新状态
             # 这样即使中途中断，下次也能从下一个组合开始
-            update_hyperopt_state(processed_combinations, best_val_loss, best_params, current_combination_idx)
+            update_hyperopt_state(processed_combinations, best_val_metric, best_params, current_combination_idx)
     
     # 全部完成，更新状态
-    update_hyperopt_state(processed_combinations, best_val_loss, best_params, total_combinations, True)
+    update_hyperopt_state(processed_combinations, best_val_metric, best_params, total_combinations, True)
     
     logger.info(f"超参数调优循环结束，共处理 {current_combination_idx}/{total_combinations} 组参数")
     logger.info(f"最佳参数: {best_params}")
-    logger.info(f"最佳验证损失: {best_val_loss:.6f}")
+    logger.info(f"最佳验证 R²: {best_val_metric:.4f}")
     
     return best_params 
