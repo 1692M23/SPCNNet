@@ -1626,7 +1626,18 @@ def main():
                      logger.info(f"[Main Loop] 调优数据准备完成。训练集大小: {len(X_train)}, 验证集大小: {len(X_val)}")
                      
                      # 准备参数网格
-                     base_param_grid = None 
+                     base_param_grid = None
+                     # <<< 添加调试日志 >>>
+                     logger.info(f"[Main Loop Debug] 检查 config 模块: type={type(config)}, dir={dir(config)}")
+                     if hasattr(config, 'tuning_config'):
+                         logger.info(f"[Main Loop Debug] config 有 tuning_config 属性: type={type(config.tuning_config)}, dir={dir(config.tuning_config)}")
+                         if hasattr(config.tuning_config, 'param_grid'):
+                             logger.info("[Main Loop Debug] config.tuning_config 有 param_grid 属性")
+                         else:
+                             logger.info("[Main Loop Debug] config.tuning_config ***没有*** param_grid 属性")
+                     else:
+                         logger.info("[Main Loop Debug] config ***没有*** tuning_config 属性")
+                     # <<< 结束调试日志 >>>                      
                      if hasattr(config, 'tuning_config') and hasattr(config.tuning_config, 'param_grid'):
                           base_param_grid = config.tuning_config.param_grid
                           logger.info(f"[Main Loop] 从配置加载调优网格: {base_param_grid}")
