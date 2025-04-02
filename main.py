@@ -244,7 +244,7 @@ def train_and_evaluate_model(model, train_loader, val_loader, test_loader, eleme
             logger.info("未找到训练状态文件，从头开始训练")
         
         # 训练模型
-        best_model, val_loss = train(
+        best_model, val_loss, val_r2 = train(
             model=model,
             train_loader=train_loader,
             val_loader=val_loader,
