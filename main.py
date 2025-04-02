@@ -154,7 +154,7 @@ def create_data_loaders(spectra, labels, batch_size=32, shuffle=True, augment=Fa
     # 对于一维y，添加一个维度
     if len(labels.shape) == 1:
         labels = labels.unsqueeze(1)
-    
+
     # 对于二维X，添加通道维度
     if len(spectra.shape) == 2:
         spectra = spectra.unsqueeze(1) # Shape: [batch, 1, length]
@@ -242,12 +242,12 @@ def train_and_evaluate_model(model, train_loader, val_loader, test_loader, eleme
             start_epoch = 0
             best_val_loss = float('inf')
             logger.info("未找到训练状态文件，从头开始训练")
-    
-    # 训练模型
+        
+        # 训练模型
         best_model, val_loss = train(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
             element=element,
             device=device,
             config=config,
@@ -285,11 +285,11 @@ def train_and_evaluate_model(model, train_loader, val_loader, test_loader, eleme
         logger.error(f"训练元素 {element} 时出错: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise
-    
+
 def hyperparameter_tuning(element, train_loader, val_loader, config):
     """
     执行超参数调优 (修改为传递 DataLoader)
-    
+
     Args:
         element (str): 元素名称
         train_loader: 训练数据加载器
@@ -302,8 +302,8 @@ def hyperparameter_tuning(element, train_loader, val_loader, config):
     logger.info(f"开始为元素 {element} 进行超参数调优")
 
     tuning_cfg = config.tuning_config
-        device = config.training_config['device']
-    
+    device = config.training_config['device']
+
     try:
         # 不再需要从DataLoader提取完整数据集
         # logger.info(f"Hyperparameter tuning data prepared:")
@@ -340,8 +340,8 @@ def hyperparameter_tuning(element, train_loader, val_loader, config):
         else:
             logger.warning("超参数调优未能找到最佳参数，将使用默认值。")
             return None
-                    
-            except Exception as e:
+
+    except Exception as e:
         logger.error(f"超参数调优过程中发生错误: {e}", exc_info=True)
         return None
 
@@ -588,7 +588,7 @@ def process_element(element, model_type, input_size, use_gpu=True, config=None):
         # 修改 lambda 表达式以匹配新的 add_noise 签名
         augment_fn = lambda data: add_noise(data, noise_level)
         logger.info(f"数据增强已启用，噪声水平: {noise_level}")
-    
+
     # 检查是否存在训练状态
     state = state_manager.load_state()
     if state and not state.get('training_completed', False):
@@ -756,7 +756,7 @@ def process_element(element, model_type, input_size, use_gpu=True, config=None):
         logger.error(f"为 {element} 生成可视化图表时出错: {plot_err}")
         logger.error(traceback.format_exc())
     # --- 结束可视化代码 ---
-    
+
     return best_model, val_loss, test_metrics
 
 def process_multiple_elements(csv_file, fits_dir, element_columns=None, 
@@ -1533,7 +1533,7 @@ def main():
                      test_loader_element = create_data_loaders(test_data[0], test_element_label, batch_size=config.training_config['batch_size'], shuffle=False)
                      logger.info(f"为元素 {element} 创建特定数据加载器用于训练")
                 # else: 1D labels assumed to be correct, use original loaders
-        else:
+            else:
                  logger.warning(f"训练模式下无法找到元素 {element} 的索引，使用共享数据加载器")
 
             try:
@@ -1577,7 +1577,7 @@ def main():
                     if isinstance(best_params, dict) and best_params: 
                         logger.info(f"[Main Loop Debug] 成功加载并验证 best_params: {best_params}")
                         best_params_loaded = True
-        else:
+                    else:
                         logger.warning(f"[Main Loop Debug] 加载的 best_params.json 文件无效或为空。 best_params: {best_params}")
                         best_params = None 
                         best_params_loaded = False
@@ -1617,8 +1617,8 @@ def main():
                      # 设置设备
                      current_device = determine_device(args.device)
                      logger.info(f"[Main Loop] 为调优设置设备: {current_device}")
-        
-        # 创建数据加载器
+                     
+                     # 创建数据加载器
                      tune_batch_size = getattr(args, 'batch_size_hyperopt', config.tuning_config.get('batch_size', 64))
                      train_loader_tune = create_data_loaders(X_train, y_train, batch_size=tune_batch_size, shuffle=True)
                      val_loader_tune = create_data_loaders(X_val, y_val, batch_size=tune_batch_size, shuffle=False)
@@ -1685,7 +1685,7 @@ def main():
                                with open(best_params_file, 'w') as f:
                                     json.dump(serializable_params, f, indent=4)
                                logger.info(f"[Main Loop] 最佳参数已保存到: {best_params_file}")
-                    else:
+                          else:
                                logger.warning(f"[Main Loop] 调优完成但未找到最佳参数。")
                      except Exception as tune_err:
                           logger.error(f"[Main Loop] 超参数调优过程中发生错误: {tune_err}")
@@ -1727,7 +1727,7 @@ def main():
                 except Exception as config_update_err:
                      logger.error(f"[Main Loop] 使用最佳超参数更新配置时发生错误: {config_update_err}")
                 # --- End re-insert config update --- 
-                else:
+            else:
                  logger.warning(f"[Main Loop] best_params 无效或未找到，跳过配置更新。将使用当前默认/命令行配置。")
             
             # --- Call process_element AFTER tuning/config update only in 'all' mode ---
@@ -1749,9 +1749,9 @@ def main():
                                      )
                  except Exception as process_err:
                      logger.error(f"在调用 process_element 处理元素 {element} 时出错: {str(process_err)}")
-                logger.error(f"Traceback: {traceback.format_exc()}")
+                     logger.error(f"Traceback: {traceback.format_exc()}")
                      logger.info(f"[Main Loop] 跳过元素 {element} 的后续处理，继续下一个元素。")
-                continue
+                     continue 
                  # <<< End Replace Placeholder >>>
             elif args.mode == 'tune':
                  # <<< Fix Indentation Here >>>
@@ -1794,4 +1794,4 @@ def main():
 
 if __name__ == '__main__':
     setup_logging() # 在程序入口处调用日志设置
-    main() 
+    main()
