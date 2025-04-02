@@ -1634,13 +1634,16 @@ def main():
                          if hasattr(config.tuning_config, 'param_grid'):
                              logger.info("[Main Loop Debug] config.tuning_config 有 param_grid 属性")
                          else:
-                             logger.info("[Main Loop Debug] config.tuning_config ***没有*** param_grid 属性")
+                             logger.info("[Main Loop Debug] config.tuning_config ***没有*** param_grid 属性或键 'param_grid'")
                      else:
                          logger.info("[Main Loop Debug] config ***没有*** tuning_config 属性")
-                     # <<< 结束调试日志 >>>                      
-                     if hasattr(config, 'tuning_config') and hasattr(config.tuning_config, 'param_grid'):
-                          base_param_grid = config.tuning_config.param_grid
-                          logger.info(f"[Main Loop] 从配置加载调优网格: {base_param_grid}")
+                     # <<< 结束调试日志 >>>
+                     # --- 修正检查方式：使用 'in' 检查字典键 --- 
+                     if hasattr(config, 'tuning_config') and isinstance(config.tuning_config, dict) and 'param_grid' in config.tuning_config:
+                     # --- 结束修正 --- 
+                          base_param_grid = config.tuning_config.get('param_grid') # 使用 .get() 更安全
+                          if base_param_grid:
+                              logger.info(f"[Main Loop] 从配置加载调优网格: {base_param_grid}")
                      else:
                           logger.info("[Main Loop] 配置中无调优网格，使用默认值。")
                      
