@@ -177,7 +177,7 @@ training_config = {
     'weight_decay': 1e-4,
     'force_new_model': True,
     'num_epochs': 100,
-    'early_stopping_patience': 20,
+    'early_stopping_patience': 120,
     'gradient_clip_val': 1.0, # 添加梯度裁剪阈值
     'device': device_config['device'],  # 使用检测到的设备
     'device_type': device_config['device_type'],  # 设备类型（'cpu', 'cuda', 或 'tpu'）
