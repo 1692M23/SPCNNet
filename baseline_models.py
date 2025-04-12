@@ -285,7 +285,7 @@ class LightGBMModel:
                                                 verbose=True))
 
         start_time = time.time()
-        evals_result = {} # 用于记录历史
+        # evals_result = {} # 不再直接传递给 train，如果需要历史记录，应使用 lgb.record_evaluation 回调
         self.model = lgb.train(
             train_params,
             train_data,
@@ -293,17 +293,17 @@ class LightGBMModel:
             valid_sets=[train_data, val_data], # 提供验证集
             valid_names=['train', 'val'],
             callbacks=callbacks, # 使用回调进行早停和日志记录
-            evals_result=evals_result # 用于记录历史
+            # evals_result=evals_result # 移除此错误参数
         )
         elapsed_time = time.time() - start_time
 
         best_iteration = self.model.best_iteration if hasattr(self.model, 'best_iteration') and self.model.best_iteration > 0 else num_boost_round
-        # 尝试从 evals_result 获取最佳分数 (因为 model.best_score 可能不直接反映早停指标)
+        # 获取最佳分数 - lgb.early_stopping 会将最佳分数存储在 model.best_score 中
+        best_score_dict = self.model.best_score
         best_score = 'N/A'
         metric_key = train_params['metric'][0] # 取第一个指标用于报告
-        if early_stopping_rounds > 0 and 'val' in evals_result and metric_key in evals_result['val']:
-             if best_iteration != 'N/A' and len(evals_result['val'][metric_key]) >= best_iteration:
-                  best_score = evals_result['val'][metric_key][best_iteration-1]
+        if best_score_dict and 'val' in best_score_dict and metric_key in best_score_dict['val']:
+            best_score = best_score_dict['val'][metric_key]
 
 
         logger.info(f"LightGBM 训练完成, 耗时: {elapsed_time:.2f} 秒")
