@@ -136,10 +136,6 @@ class XGBoostModel:
         """
         分批增量训练模型
         """
-        # 初始化模型
-        if self.model is None:
-            self.model = self._create_initial_model()
-        
         # 计算批次索引
         n_samples = X.shape[0]
         n_batches = (n_samples + batch_size - 1) // batch_size
@@ -567,10 +563,6 @@ class LightGBMModel:
         """
         分批增量训练模型
         """
-        # 初始化模型
-        if self.model is None:
-            self.model = self._create_initial_model()
-        
         # 计算批次索引
         n_samples = X.shape[0]
         n_batches = (n_samples + batch_size - 1) // batch_size
