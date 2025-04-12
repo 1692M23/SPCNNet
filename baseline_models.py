@@ -1096,8 +1096,9 @@ def train_and_evaluate_baseline(element, model_type='xgboost',
             model.params.update({'tree_method': 'hist', 'device': 'cuda:0'}) 
             logger.info(f"为 XGBoost 配置 GPU 支持: {{'tree_method': 'hist', 'device': 'cuda:0'}}")
         elif model_type.lower() == 'lightgbm':
-            model.params.update({'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0})
-            logger.info(f"为 LightGBM 配置 GPU 支持: {{'device': 'gpu'}}")
+            # 尝试显式使用 CUDA 而不是通用的 'gpu' (后者可能优先尝试 OpenCL)
+            model.params.update({'device': 'cuda', 'gpu_platform_id': 0, 'gpu_device_id': 0}) 
+            logger.info(f"为 LightGBM 配置 GPU 支持: {{'device': 'cuda'}}")
     elif device and 'xla' in str(device):
         # TPU目前不直接支持这些库，可以考虑用TensorFlow版本替代
         logger.warning("TPU不直接支持XGBoost/LightGBM，将使用CPU")
