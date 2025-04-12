@@ -193,7 +193,7 @@ class XGBoostModel:
                         valid_sets=[train_data, val_data],
                         valid_names=['train', 'val'],
                         init_model=self.model,  # 使用现有模型继续训练
-                        callbacks=[lgb.print_evaluation(period=100)] # 使用回调函数
+                        callbacks=[lgb.log_evaluation(period=100)] # 修正回调函数名称
                     )
                 
                 # 记录已训练的批次
@@ -546,7 +546,7 @@ class LightGBMModel:
             train_data,
             valid_sets=[train_data, val_data],
             valid_names=['train', 'val'],
-            callbacks=[lgb.print_evaluation(period=100)]
+            callbacks=[lgb.log_evaluation(period=100)]
         )
         
         # 获取验证集上的最佳性能
@@ -617,7 +617,7 @@ class LightGBMModel:
                         valid_sets=[train_data, val_data],
                         valid_names=['train', 'val'],
                         init_model=self.model,  # 使用现有模型继续训练
-                        callbacks=[lgb.print_evaluation(period=100)]
+                        callbacks=[lgb.log_evaluation(period=100)] # 修正回调函数名称
                     )
                 
                 # 记录已训练的批次
