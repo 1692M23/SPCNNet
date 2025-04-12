@@ -3,7 +3,7 @@
 
 """
 基线模型模块：使用XGBoost和LightGBM实现基线回归模型
-实现分批处理机制以处理大规模数据集
+使用标准的训练-验证-测试流程
 """
 
 import os
@@ -17,9 +17,7 @@ import pickle
 import gc
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.model_selection import train_test_split
-import joblib
 import time
-from tqdm import tqdm
 import matplotlib.pyplot as plt
 import json
 
@@ -62,16 +60,11 @@ cache_manager = CacheManager(cache_dir=os.path.join(config.output_config['cache_
 
 class XGBoostModel:
     """
-    XGBoost模型
-    特点：
-    1. 优秀的特征处理能力
-    2. 内置正则化，防止过拟合
-    3. 支持并行计算
-    4. 处理高维特征的能力强
+    XGBoost模型 (使用标准训练流程)
     """
-    def __init__(self, config=None, params_update=None):
-        if config is None:
-            config = Config  # 使用直接导入的Config而非config.CONFIG
+    def __init__(self, config_obj=None, params_update=None):
+        if config_obj is None:
+            config_obj = Config
             
         self.params = {
             'objective': 'reg:squarederror',
@@ -80,8 +73,8 @@ class XGBoostModel:
             'min_child_weight': 1,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
-            'n_estimators': 1000,
-            'early_stopping_rounds': 50,
+            'n_estimators': 1000, # 总轮数
+            'early_stopping_rounds': 50, # 早停轮数
             'seed': 42
         }
         if params_update:
@@ -89,307 +82,56 @@ class XGBoostModel:
             logger.info(f"XGBoostModel 使用更新后的参数初始化: {params_update}")
             
         self.model = None
-        self.trained_batches = []
-        
-    def train_on_batch(self, X_train, y_train, X_val, y_val, batch_id=None):
+        # self.trained_batches = [] # 不再需要
+
+    def train(self, X_train, y_train, X_val, y_val):
         """
-        在单个批次上训练XGBoost模型
-        
+        训练 XGBoost 模型 (单次完整训练)
+
         参数:
             X_train: 训练特征
             y_train: 训练标签
             X_val: 验证特征
             y_val: 验证标签
-            batch_id: 批次ID
-        
-        返回:
-            训练结果
         """
-        logger.info(f"在批次 {batch_id} 上训练XGBoost模型")
+        logger.info("训练 XGBoost 模型")
         dtrain = xgb.DMatrix(X_train, label=y_train)
         dval = xgb.DMatrix(X_val, label=y_val)
-        
-        # 使用早停机制训练
+        evals = [(dtrain, 'train'), (dval, 'val')]
+
+        # 从参数中提取训练控制参数
+        num_boost_round = self.params.get('n_estimators', 1000)
+        early_stopping_rounds = self.params.get('early_stopping_rounds', 50)
+
+        # 准备传递给 xgb.train 的参数字典 (移除训练控制参数)
+        train_params = self.params.copy()
+        train_params.pop('n_estimators', None)
+        train_params.pop('early_stopping_rounds', None)
+
+        start_time = time.time()
         evals_result = {}
-        model = xgb.train(
-            self.params,
+        self.model = xgb.train(
+            train_params,
             dtrain,
-            evals=[(dtrain, 'train'), (dval, 'val')],
-            evals_result=evals_result,
-            verbose_eval=100
+            num_boost_round=num_boost_round,
+            evals=evals,
+            early_stopping_rounds=early_stopping_rounds,
+            evals_result=evals_result, # 用于记录历史
+            verbose_eval=100 # 每 100 轮打印一次日志
         )
+        elapsed_time = time.time() - start_time
         
-        # 获取验证集上的最佳性能
-        best_score = model.best_score.get('val', {}).get('rmse', float('inf'))
-        
-        # 记录已训练的批次
-        if batch_id is not None and batch_id not in self.trained_batches:
-            self.trained_batches.append(batch_id)
-        
-        return {
-            'model': model,
-            'batch_id': batch_id,
-            'validation_score': best_score
-        }
-    
-    def train_in_batches(self, X, y, batch_size=Config.BASELINE_BATCH_SIZE, batches_per_round=Config.BASELINE_BATCHES_PER_ROUND, val_size=0.2, element=None):
-        """
-        分批增量训练模型
-        """
-        # 计算批次索引
-        n_samples = X.shape[0]
-        n_batches = (n_samples + batch_size - 1) // batch_size
-        
-        # 确定要处理的批次
-        remaining_batches = [i for i in range(n_batches) if i not in self.trained_batches]
-        if not remaining_batches:
-            logger.info("所有批次已训练完成")
-            return self.model
-        
-        # 仅处理指定数量的批次
-        batch_indices = remaining_batches[:batches_per_round]
-        logger.info(f"将处理 {len(batch_indices)}/{n_batches} 个批次")
-        
-        # 使用进度管理器
-        with ProgressManager(len(batch_indices), desc=f"{self.__class__.__name__}训练 ({element})") as progress:
-            for batch_id in batch_indices:
-                # 获取批次索引
-                start_idx = batch_id * batch_size
-                end_idx = min(start_idx + batch_size, n_samples)
-                
-                # 提取批次数据
-                X_batch = X[start_idx:end_idx]
-                y_batch = y[start_idx:end_idx]
-                
-                # 划分训练集和验证集
-                X_train, X_val, y_train, y_val = train_test_split(
-                    X_batch, y_batch, test_size=val_size, random_state=42
-                )
-                
-                # 准备用于 xgb.train 的参数，移除不适用的参数
-                train_params = self.params.copy()
-                train_params.pop('n_estimators', None)
-                train_params.pop('early_stopping_rounds', None)
-                num_boost_round_per_batch = 10 # 每个批次训练的轮数，可以设为可配置参数
-                
-                # 增量训练
-                if isinstance(self, XGBoostModel):
-                    dtrain = xgb.DMatrix(X_train, label=y_train)
-                    dval = xgb.DMatrix(X_val, label=y_val)
-                    self.model = xgb.train(
-                        train_params, # 使用处理后的参数
-                        dtrain,
-                        evals=[(dtrain, 'train'), (dval, 'val')],
-                        xgb_model=self.model,  # 使用现有模型继续训练
-                        num_boost_round=num_boost_round_per_batch, # 指定本次调用训练的轮数
-                        verbose_eval=100 # verbose_eval 在 xgb.train 中有效
-                    )
-                elif isinstance(self, LightGBMModel):
-                    train_data = lgb.Dataset(X_train, label=y_train)
-                    val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
-                    self.model = lgb.train(
-                        self.params,
-                        train_data,
-                        valid_sets=[train_data, val_data],
-                        valid_names=['train', 'val'],
-                        init_model=self.model,  # 使用现有模型继续训练
-                        callbacks=[lgb.log_evaluation(period=100)] # 修正回调函数名称
-                    )
-                
-                # 记录已训练的批次
-                self.trained_batches.append(batch_id)
-                
-                # 更新进度
-                progress.update(1)
-                
-                # 释放内存
-                del X_batch, y_batch, X_train, X_val, y_train, y_val
-                gc.collect()
-        
-        return self.model
-    
-    def _generate_batch_results(self, model, batch_id, X_val, y_val, element, batch_results_dir):
-        """
-        为每个批次生成评估结果和可视化
-        
-        参数:
-            model: 当前批次训练的模型
-            batch_id: 批次ID
-            X_val: 验证特征
-            y_val: 验证标签
-            element: 元素名称
-            batch_results_dir: 批次结果保存目录
-        """
-        try:
-            # 使用当前批次模型进行预测
-            dval = xgb.DMatrix(X_val)
-            y_pred = model.predict(dval)
-            
-            # 计算评估指标
-            mse = mean_squared_error(y_val, y_pred)
-            rmse = np.sqrt(mse)
-            mae = mean_absolute_error(y_val, y_pred)
-            r2 = r2_score(y_val, y_pred)
-            scatter = np.std(y_pred - y_val)
-            
-            # 保存批次评估指标
-            batch_summary_path = os.path.join(batch_results_dir, f'batch_{batch_id}_summary.txt')
-            with open(batch_summary_path, 'w') as f:
-                f.write(f"XGBoost 批次 {batch_id} 在 {element} 上的评估结果\n")
-                f.write("=" * 50 + "\n")
-                f.write(f"MSE: {mse:.6f}\n")
-                f.write(f"RMSE: {rmse:.6f}\n")
-                f.write(f"MAE: {mae:.6f}\n")
-                f.write(f"R²: {r2:.6f}\n")
-                f.write(f"散度: {scatter:.6f}\n")
-            
-            # 保存预测结果
-            batch_results_path = os.path.join(batch_results_dir, f'batch_{batch_id}_results.csv')
-            pd.DataFrame({
-                'true': y_val,
-                'pred': y_pred,
-                'error': y_pred - y_val
-            }).to_csv(batch_results_path, index=False)
-            
-            # 生成散点图对比真实值和预测值
-            plt.figure(figsize=(10, 6))
-            plt.scatter(y_val, y_pred, alpha=0.5)
-            plt.plot([min(y_val), max(y_val)], [min(y_val), max(y_val)], 'r--')
-            plt.xlabel('真实值')
-            plt.ylabel('预测值')
-            plt.title(f'XGBoost 批次 {batch_id} 预测 vs 真实值 (RMSE: {rmse:.4f})')
-            plt.grid(True)
-            plt.tight_layout()
-            
-            # 保存图表
-            batch_plot_path = os.path.join(batch_results_dir, f'batch_{batch_id}_plot.png')
-            plt.savefig(batch_plot_path)
-            plt.close()
-            
-            # 保存批次信息到批次追踪文件
-            batch_tracking_path = os.path.join(batch_results_dir, 'batch_tracking.csv')
-            
-            # 如果追踪文件不存在，创建一个新的
-            if not os.path.exists(batch_tracking_path):
-                batch_df = pd.DataFrame(columns=['batch_id', 'mse', 'rmse', 'mae', 'r2', 'scatter', 'timestamp'])
-            else:
-                batch_df = pd.read_csv(batch_tracking_path)
-            
-            # 添加新批次的结果
-            new_row = pd.DataFrame({
-                'batch_id': [batch_id],
-                'mse': [mse],
-                'rmse': [rmse],
-                'mae': [mae],
-                'r2': [r2],
-                'scatter': [scatter],
-                'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
-            })
-            
-            batch_df = pd.concat([batch_df, new_row], ignore_index=True)
-            batch_df.to_csv(batch_tracking_path, index=False)
-            
-            # 生成批次进度趋势图
-            if len(batch_df) > 1:
-                plt.figure(figsize=(12, 8))
-                
-                plt.subplot(2, 2, 1)
-                plt.plot(batch_df['batch_id'], batch_df['rmse'], 'o-')
-                plt.xlabel('批次ID')
-                plt.ylabel('RMSE')
-                plt.title('RMSE趋势')
-                plt.grid(True)
-                
-                plt.subplot(2, 2, 2)
-                plt.plot(batch_df['batch_id'], batch_df['mae'], 'o-')
-                plt.xlabel('批次ID')
-                plt.ylabel('MAE')
-                plt.title('MAE趋势')
-                plt.grid(True)
-                
-                plt.subplot(2, 2, 3)
-                plt.plot(batch_df['batch_id'], batch_df['r2'], 'o-')
-                plt.xlabel('批次ID')
-                plt.ylabel('R²')
-                plt.title('R²趋势')
-                plt.grid(True)
-                
-                plt.subplot(2, 2, 4)
-                plt.plot(batch_df['batch_id'], batch_df['scatter'], 'o-')
-                plt.xlabel('批次ID')
-                plt.ylabel('散度')
-                plt.title('散度趋势')
-                plt.grid(True)
-                
-                plt.tight_layout()
-                
-                # 保存趋势图
-                trend_plot_path = os.path.join(batch_results_dir, 'batch_trends.png')
-                plt.savefig(trend_plot_path)
-                plt.close()
-            
-            logger.info(f"成功生成批次 {batch_id} 的结果和可视化")
-            
-        except Exception as e:
-            logger.error(f"生成批次 {batch_id} 结果时出错: {e}")
-    
-    def _generate_final_results(self, element):
-        """
-        生成并更新最终的评估结果
-        
-        参数:
-            element: 元素名称
-        """
-        try:
-            # 检查是否有批次结果
-            batch_results_dir = os.path.join(config.output_config['results_dir'], f'xgboost_{element}_batch_results')
-            batch_tracking_path = os.path.join(batch_results_dir, 'batch_tracking.csv')
-            
-            if not os.path.exists(batch_tracking_path):
-                logger.warning("找不到批次追踪文件，无法生成最终结果")
-                return
-            
-            # 加载批次追踪数据
-            batch_df = pd.read_csv(batch_tracking_path)
-            
-            if len(batch_df) == 0:
-                logger.warning("批次追踪文件为空，无法生成最终结果")
-                return
-            
-            # 计算平均指标
-            avg_mse = batch_df['mse'].mean()
-            avg_rmse = batch_df['rmse'].mean()
-            avg_mae = batch_df['mae'].mean()
-            avg_r2 = batch_df['r2'].mean()
-            avg_scatter = batch_df['scatter'].mean()
-            
-            # 找出最佳批次
-            best_batch_id = batch_df.loc[batch_df['rmse'].idxmin(), 'batch_id']
-            best_rmse = batch_df['rmse'].min()
-            
-            # 保存最终评估摘要
-            final_summary_path = os.path.join(config.output_config['results_dir'], f'xgboost_{element}_final_summary.txt')
-            with open(final_summary_path, 'w') as f:
-                f.write(f"XGBoost 在 {element} 上的最终评估结果\n")
-                f.write("=" * 50 + "\n")
-                f.write(f"已处理批次数: {len(batch_df)}\n")
-                f.write(f"平均 MSE: {avg_mse:.6f}\n")
-                f.write(f"平均 RMSE: {avg_rmse:.6f}\n")
-                f.write(f"平均 MAE: {avg_mae:.6f}\n")
-                f.write(f"平均 R²: {avg_r2:.6f}\n")
-                f.write(f"平均散度: {avg_scatter:.6f}\n")
-                f.write("\n")
-                f.write(f"最佳批次: {best_batch_id} (RMSE: {best_rmse:.6f})\n")
-                f.write("\n")
-                f.write("批次处理时间:\n")
-                for _, row in batch_df.iterrows():
-                    f.write(f"  批次 {int(row['batch_id'])}: {row['timestamp']}\n")
-            
-            logger.info(f"已成功生成并更新最终结果，平均RMSE: {avg_rmse:.6f}，最佳批次: {best_batch_id}")
-            
-        except Exception as e:
-            logger.error(f"生成最终结果时出错: {e}")
-    
+        best_iteration = self.model.best_iteration if hasattr(self.model, 'best_iteration') else 'N/A'
+        best_score = self.model.best_score if hasattr(self.model, 'best_score') else 'N/A'
+
+        logger.info(f"XGBoost 训练完成, 耗时: {elapsed_time:.2f} 秒")
+        logger.info(f"最佳迭代轮数: {best_iteration}, 最佳分数 (验证集RMSE): {best_score}")
+
+        # 可选：保存训练历史
+        # history_path = os.path.join(config.output_config['results_dir'], 'xgb_train_history.json')
+        # with open(history_path, 'w') as f:
+        #    json.dump(evals_result, f)
+
     def predict(self, X):
         """
         预测
@@ -398,18 +140,15 @@ class XGBoostModel:
             raise ValueError("模型未训练")
             
         dtest = xgb.DMatrix(X)
-        return self.model.predict(dtest)
-    
+        # 使用最佳迭代次数进行预测 (如果早停被触发)
+        best_iteration = 0 # 默认值为0，表示使用所有树
+        if hasattr(self.model, 'best_iteration') and self.model.best_iteration > 0:
+            best_iteration = self.model.best_iteration
+        return self.model.predict(dtest, iteration_range=(0, best_iteration + 1))
+
     def predict_in_batches(self, X, batch_size=1000):
         """
-        分批预测
-        
-        参数:
-            X: 特征数据
-            batch_size: 每批大小
-            
-        返回:
-            预测结果
+        分批预测 (适用于大型测试集)
         """
         if self.model is None:
             raise ValueError("模型未训练")
@@ -418,26 +157,22 @@ class XGBoostModel:
         n_batches = (n_samples + batch_size - 1) // batch_size
         
         predictions = np.zeros(n_samples)
-        
-        # 使用进度管理器
+        # 使用最佳迭代次数进行预测
+        best_iteration = 0
+        if hasattr(self.model, 'best_iteration') and self.model.best_iteration > 0:
+             best_iteration = self.model.best_iteration
+
         with ProgressManager(n_batches, desc="XGBoost预测") as progress:
             for i in range(n_batches):
-                # 获取批次索引
                 start_idx = i * batch_size
                 end_idx = min(start_idx + batch_size, n_samples)
-                
-                # 提取批次数据
                 X_batch = X[start_idx:end_idx]
                 
-                # 预测
                 dtest = xgb.DMatrix(X_batch)
-                predictions[start_idx:end_idx] = self.model.predict(dtest)
+                predictions[start_idx:end_idx] = self.model.predict(dtest, iteration_range=(0, best_iteration + 1))
                 
-                # 更新进度
                 progress.update(1)
-                
-                # 释放内存
-                del X_batch
+                del X_batch, dtest
                 gc.collect()
         
         return predictions
@@ -445,9 +180,6 @@ class XGBoostModel:
     def save(self, element):
         """
         保存模型
-        
-        参数:
-            element: 元素名称
         """
         if self.model is None:
             raise ValueError("模型未训练")
@@ -456,21 +188,16 @@ class XGBoostModel:
         model_path = os.path.join(config.output_config['model_dir'], f'xgboost_{element}.json')
         self.model.save_model(model_path)
         
-        # 保存训练状态
-        state_path = os.path.join(config.output_config['model_dir'], f'xgboost_{element}_state.pkl')
-        with open(state_path, 'wb') as f:
-            pickle.dump({
-                'trained_batches': self.trained_batches
-            }, f)
+        # 不再需要保存训练状态
+        # state_path = os.path.join(config.output_config['model_dir'], f'xgboost_{element}_state.pkl')
+        # with open(state_path, 'wb') as f:
+        #     pickle.dump({}, f) # 保存空字典或完全移除
         
         logger.info(f"XGBoost模型已保存: {model_path}")
     
     def load(self, element):
         """
         加载模型
-        
-        参数:
-            element: 元素名称
         """
         model_path = os.path.join(config.output_config['model_dir'], f'xgboost_{element}.json')
         if not os.path.exists(model_path):
@@ -480,39 +207,36 @@ class XGBoostModel:
         self.model = xgb.Booster()
         self.model.load_model(model_path)
         
-        # 加载训练状态
-        state_path = os.path.join(config.output_config['model_dir'], f'xgboost_{element}_state.pkl')
-        if os.path.exists(state_path):
-            with open(state_path, 'rb') as f:
-                state = pickle.load(f)
-                self.trained_batches = state.get('trained_batches', [])
+        # 不再需要加载训练状态
+        # state_path = os.path.join(config.output_config['model_dir'], f'xgboost_{element}_state.pkl')
+        # if os.path.exists(state_path):
+        #     try:
+        #         with open(state_path, 'rb') as f:
+        #            state = pickle.load(f)
+        #     except: # 处理可能的空文件或格式问题
+        #         pass 
         
         logger.info(f"XGBoost模型已加载: {model_path}")
         return True
 
 class LightGBMModel:
     """
-    LightGBM模型
-    特点：
-    1. 更快的训练速度
-    2. 更低的内存消耗
-    3. 更好的准确性
-    4. 支持直接处理类别特征
+    LightGBM模型 (使用标准训练流程)
     """
-    def __init__(self, config=None, params_update=None):
-        if config is None:
-            config = Config  # 使用直接导入的Config而非config.CONFIG
+    def __init__(self, config_obj=None, params_update=None):
+        if config_obj is None:
+            config_obj = Config
             
         self.params = {
             'objective': 'regression',
-            'metric': 'mse',
+            'metric': 'l2', # l2 是 MSE
             'learning_rate': 0.01,
             'num_leaves': 31,
             'max_depth': -1,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
-            'n_estimators': 1000,
-            'early_stopping_rounds': 50,
+            'n_estimators': 1000, # 总轮数
+            'early_stopping_rounds': 50, # 早停轮数 (通过回调实现)
             'seed': 42
         }
         if params_update:
@@ -520,299 +244,76 @@ class LightGBMModel:
             logger.info(f"LightGBMModel 使用更新后的参数初始化: {params_update}")
             
         self.model = None
-        self.trained_batches = []
-    
-    def train_on_batch(self, X_train, y_train, X_val, y_val, batch_id=None):
+        # self.trained_batches = [] # 不再需要
+
+    def train(self, X_train, y_train, X_val, y_val):
         """
-        在单个批次上训练LightGBM模型
-        
+        训练 LightGBM 模型 (单次完整训练)
+
         参数:
             X_train: 训练特征
             y_train: 训练标签
             X_val: 验证特征
             y_val: 验证标签
-            batch_id: 批次ID
-        
-        返回:
-            训练结果
         """
-        logger.info(f"在批次 {batch_id} 上训练LightGBM模型")
+        logger.info("训练 LightGBM 模型")
         train_data = lgb.Dataset(X_train, label=y_train)
         val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
         
-        # 使用早停机制训练
-        model = lgb.train(
-            self.params,
+        # 从参数中提取训练控制参数
+        num_boost_round = self.params.get('n_estimators', 1000)
+        early_stopping_rounds = self.params.get('early_stopping_rounds', 50)
+
+        # 准备传递给 lgb.train 的参数字典 (移除训练控制参数)
+        train_params = self.params.copy()
+        train_params.pop('n_estimators', None)
+        train_params.pop('early_stopping_rounds', None)
+        # 确保 metric 是列表形式
+        metric = train_params.get('metric', 'l2')
+        if not isinstance(metric, list):
+             train_params['metric'] = [metric]
+
+
+        # 准备回调
+        callbacks = [
+            lgb.log_evaluation(period=100) # 每 100 轮打印一次日志
+        ]
+        if early_stopping_rounds > 0:
+            # 使用 lgb.early_stopping 回调
+            callbacks.append(lgb.early_stopping(stopping_rounds=early_stopping_rounds,
+                                                first_metric_only=False, # 基于所有验证指标
+                                                verbose=True))
+
+        start_time = time.time()
+        evals_result = {} # 用于记录历史
+        self.model = lgb.train(
+            train_params,
             train_data,
-            valid_sets=[train_data, val_data],
+            num_boost_round=num_boost_round,
+            valid_sets=[train_data, val_data], # 提供验证集
             valid_names=['train', 'val'],
-            callbacks=[lgb.log_evaluation(period=100)]
+            callbacks=callbacks, # 使用回调进行早停和日志记录
+            evals_result=evals_result # 用于记录历史
         )
-        
-        # 获取验证集上的最佳性能
-        best_score = model.best_score.get('val', {}).get('l2', float('inf'))
-        
-        # 记录已训练的批次
-        if batch_id is not None and batch_id not in self.trained_batches:
-            self.trained_batches.append(batch_id)
-        
-        return {
-            'model': model,
-            'batch_id': batch_id,
-            'validation_score': best_score
-        }
-    
-    def train_in_batches(self, X, y, batch_size=Config.BASELINE_BATCH_SIZE, batches_per_round=Config.BASELINE_BATCHES_PER_ROUND, val_size=0.2, element=None):
-        """
-        分批增量训练模型
-        """
-        # 计算批次索引
-        n_samples = X.shape[0]
-        n_batches = (n_samples + batch_size - 1) // batch_size
-        
-        # 确定要处理的批次
-        remaining_batches = [i for i in range(n_batches) if i not in self.trained_batches]
-        if not remaining_batches:
-            logger.info("所有批次已训练完成")
-            return self.model
-        
-        # 仅处理指定数量的批次
-        batch_indices = remaining_batches[:batches_per_round]
-        logger.info(f"将处理 {len(batch_indices)}/{n_batches} 个批次")
-        
-        # 使用进度管理器
-        with ProgressManager(len(batch_indices), desc=f"{self.__class__.__name__}训练 ({element})") as progress:
-            for batch_id in batch_indices:
-                # 获取批次索引
-                start_idx = batch_id * batch_size
-                end_idx = min(start_idx + batch_size, n_samples)
-                
-                # 提取批次数据
-                X_batch = X[start_idx:end_idx]
-                y_batch = y[start_idx:end_idx]
-                
-                # 划分训练集和验证集
-                X_train, X_val, y_train, y_val = train_test_split(
-                    X_batch, y_batch, test_size=val_size, random_state=42
-                )
-                
-                # 增量训练
-                if isinstance(self, XGBoostModel):
-                    dtrain = xgb.DMatrix(X_train, label=y_train)
-                    dval = xgb.DMatrix(X_val, label=y_val)
-                    self.model = xgb.train(
-                        self.params,
-                        dtrain,
-                        evals=[(dtrain, 'train'), (dval, 'val')],
-                        xgb_model=self.model,  # 使用现有模型继续训练
-                        evals_result={},
-                        verbose_eval=100
-                    )
-                elif isinstance(self, LightGBMModel):
-                    train_data = lgb.Dataset(X_train, label=y_train)
-                    val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
-                    self.model = lgb.train(
-                        self.params,
-                        train_data,
-                        valid_sets=[train_data, val_data],
-                        valid_names=['train', 'val'],
-                        init_model=self.model,  # 使用现有模型继续训练
-                        callbacks=[lgb.log_evaluation(period=100)] # 修正回调函数名称
-                    )
-                
-                # 记录已训练的批次
-                self.trained_batches.append(batch_id)
-                
-                # 更新进度
-                progress.update(1)
-                
-                # 释放内存
-                del X_batch, y_batch, X_train, X_val, y_train, y_val
-                gc.collect()
-        
-        return self.model
-    
-    def _generate_batch_results(self, model, batch_id, X_val, y_val, element, batch_results_dir):
-        """
-        为每个批次生成评估结果和可视化
-        
-        参数:
-            model: 当前批次训练的模型
-            batch_id: 批次ID
-            X_val: 验证特征
-            y_val: 验证标签
-            element: 元素名称
-            batch_results_dir: 批次结果保存目录
-        """
-        try:
-            # 使用当前批次模型进行预测
-            y_pred = model.predict(X_val)
-            
-            # 计算评估指标
-            mse = mean_squared_error(y_val, y_pred)
-            rmse = np.sqrt(mse)
-            mae = mean_absolute_error(y_val, y_pred)
-            r2 = r2_score(y_val, y_pred)
-            scatter = np.std(y_pred - y_val)
-            
-            # 保存批次评估指标
-            batch_summary_path = os.path.join(batch_results_dir, f'batch_{batch_id}_summary.txt')
-            with open(batch_summary_path, 'w') as f:
-                f.write(f"LightGBM 批次 {batch_id} 在 {element} 上的评估结果\n")
-                f.write("=" * 50 + "\n")
-                f.write(f"MSE: {mse:.6f}\n")
-                f.write(f"RMSE: {rmse:.6f}\n")
-                f.write(f"MAE: {mae:.6f}\n")
-                f.write(f"R²: {r2:.6f}\n")
-                f.write(f"散度: {scatter:.6f}\n")
-            
-            # 保存预测结果
-            batch_results_path = os.path.join(batch_results_dir, f'batch_{batch_id}_results.csv')
-            pd.DataFrame({
-                'true': y_val,
-                'pred': y_pred,
-                'error': y_pred - y_val
-            }).to_csv(batch_results_path, index=False)
-            
-            # 生成散点图对比真实值和预测值
-            plt.figure(figsize=(10, 6))
-            plt.scatter(y_val, y_pred, alpha=0.5)
-            plt.plot([min(y_val), max(y_val)], [min(y_val), max(y_val)], 'r--')
-            plt.xlabel('真实值')
-            plt.ylabel('预测值')
-            plt.title(f'LightGBM 批次 {batch_id} 预测 vs 真实值 (RMSE: {rmse:.4f})')
-            plt.grid(True)
-            plt.tight_layout()
-            
-            # 保存图表
-            batch_plot_path = os.path.join(batch_results_dir, f'batch_{batch_id}_plot.png')
-            plt.savefig(batch_plot_path)
-            plt.close()
-            
-            # 保存批次信息到批次追踪文件
-            batch_tracking_path = os.path.join(batch_results_dir, 'batch_tracking.csv')
-            
-            # 如果追踪文件不存在，创建一个新的
-            if not os.path.exists(batch_tracking_path):
-                batch_df = pd.DataFrame(columns=['batch_id', 'mse', 'rmse', 'mae', 'r2', 'scatter', 'timestamp'])
-            else:
-                batch_df = pd.read_csv(batch_tracking_path)
-            
-            # 添加新批次的结果
-            new_row = pd.DataFrame({
-                'batch_id': [batch_id],
-                'mse': [mse],
-                'rmse': [rmse],
-                'mae': [mae],
-                'r2': [r2],
-                'scatter': [scatter],
-                'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
-            })
-            
-            batch_df = pd.concat([batch_df, new_row], ignore_index=True)
-            batch_df.to_csv(batch_tracking_path, index=False)
-            
-            # 生成批次进度趋势图
-            if len(batch_df) > 1:
-                plt.figure(figsize=(12, 8))
-                
-                plt.subplot(2, 2, 1)
-                plt.plot(batch_df['batch_id'], batch_df['rmse'], 'o-')
-                plt.xlabel('批次ID')
-                plt.ylabel('RMSE')
-                plt.title('RMSE趋势')
-                plt.grid(True)
-                
-                plt.subplot(2, 2, 2)
-                plt.plot(batch_df['batch_id'], batch_df['mae'], 'o-')
-                plt.xlabel('批次ID')
-                plt.ylabel('MAE')
-                plt.title('MAE趋势')
-                plt.grid(True)
-                
-                plt.subplot(2, 2, 3)
-                plt.plot(batch_df['batch_id'], batch_df['r2'], 'o-')
-                plt.xlabel('批次ID')
-                plt.ylabel('R²')
-                plt.title('R²趋势')
-                plt.grid(True)
-                
-                plt.subplot(2, 2, 4)
-                plt.plot(batch_df['batch_id'], batch_df['scatter'], 'o-')
-                plt.xlabel('批次ID')
-                plt.ylabel('散度')
-                plt.title('散度趋势')
-                plt.grid(True)
-                
-                plt.tight_layout()
-                
-                # 保存趋势图
-                trend_plot_path = os.path.join(batch_results_dir, 'batch_trends.png')
-                plt.savefig(trend_plot_path)
-                plt.close()
-            
-            logger.info(f"成功生成批次 {batch_id} 的结果和可视化")
-            
-        except Exception as e:
-            logger.error(f"生成批次 {batch_id} 结果时出错: {e}")
-    
-    def _generate_final_results(self, element):
-        """
-        生成并更新最终的评估结果
-        
-        参数:
-            element: 元素名称
-        """
-        try:
-            # 检查是否有批次结果
-            batch_results_dir = os.path.join(config.output_config['results_dir'], f'lightgbm_{element}_batch_results')
-            batch_tracking_path = os.path.join(batch_results_dir, 'batch_tracking.csv')
-            
-            if not os.path.exists(batch_tracking_path):
-                logger.warning("找不到批次追踪文件，无法生成最终结果")
-                return
-            
-            # 加载批次追踪数据
-            batch_df = pd.read_csv(batch_tracking_path)
-            
-            if len(batch_df) == 0:
-                logger.warning("批次追踪文件为空，无法生成最终结果")
-                return
-            
-            # 计算平均指标
-            avg_mse = batch_df['mse'].mean()
-            avg_rmse = batch_df['rmse'].mean()
-            avg_mae = batch_df['mae'].mean()
-            avg_r2 = batch_df['r2'].mean()
-            avg_scatter = batch_df['scatter'].mean()
-            
-            # 找出最佳批次
-            best_batch_id = batch_df.loc[batch_df['rmse'].idxmin(), 'batch_id']
-            best_rmse = batch_df['rmse'].min()
-            
-            # 保存最终评估摘要
-            final_summary_path = os.path.join(config.output_config['results_dir'], f'lightgbm_{element}_final_summary.txt')
-            with open(final_summary_path, 'w') as f:
-                f.write(f"LightGBM 在 {element} 上的最终评估结果\n")
-                f.write("=" * 50 + "\n")
-                f.write(f"已处理批次数: {len(batch_df)}\n")
-                f.write(f"平均 MSE: {avg_mse:.6f}\n")
-                f.write(f"平均 RMSE: {avg_rmse:.6f}\n")
-                f.write(f"平均 MAE: {avg_mae:.6f}\n")
-                f.write(f"平均 R²: {avg_r2:.6f}\n")
-                f.write(f"平均散度: {avg_scatter:.6f}\n")
-                f.write("\n")
-                f.write(f"最佳批次: {best_batch_id} (RMSE: {best_rmse:.6f})\n")
-                f.write("\n")
-                f.write("批次处理时间:\n")
-                for _, row in batch_df.iterrows():
-                    f.write(f"  批次 {int(row['batch_id'])}: {row['timestamp']}\n")
-            
-            logger.info(f"已成功生成并更新最终结果，平均RMSE: {avg_rmse:.6f}，最佳批次: {best_batch_id}")
-            
-        except Exception as e:
-            logger.error(f"生成最终结果时出错: {e}")
-    
+        elapsed_time = time.time() - start_time
+
+        best_iteration = self.model.best_iteration if hasattr(self.model, 'best_iteration') and self.model.best_iteration > 0 else num_boost_round
+        # 尝试从 evals_result 获取最佳分数 (因为 model.best_score 可能不直接反映早停指标)
+        best_score = 'N/A'
+        metric_key = train_params['metric'][0] # 取第一个指标用于报告
+        if early_stopping_rounds > 0 and 'val' in evals_result and metric_key in evals_result['val']:
+             if best_iteration != 'N/A' and len(evals_result['val'][metric_key]) >= best_iteration:
+                  best_score = evals_result['val'][metric_key][best_iteration-1]
+
+
+        logger.info(f"LightGBM 训练完成, 耗时: {elapsed_time:.2f} 秒")
+        logger.info(f"最佳迭代轮数: {best_iteration}, 最佳分数 (验证集 {metric_key}): {best_score}")
+
+        # 可选：保存训练历史
+        # history_path = os.path.join(config.output_config['results_dir'], 'lgb_train_history.json')
+        # with open(history_path, 'w') as f:
+        #    json.dump(evals_result, f)
+
     def predict(self, X):
         """
         预测
@@ -820,18 +321,15 @@ class LightGBMModel:
         if self.model is None:
             raise ValueError("模型未训练")
             
-        return self.model.predict(X)
+        # 使用 best_iteration 进行预测
+        best_iteration = 0
+        if hasattr(self.model, 'best_iteration') and self.model.best_iteration > 0:
+            best_iteration = self.model.best_iteration
+        return self.model.predict(X, num_iteration=best_iteration)
     
     def predict_in_batches(self, X, batch_size=1000):
         """
-        分批预测
-        
-        参数:
-            X: 特征数据
-            batch_size: 每批大小
-            
-        返回:
-            预测结果
+        分批预测 (适用于大型测试集)
         """
         if self.model is None:
             raise ValueError("模型未训练")
@@ -840,24 +338,20 @@ class LightGBMModel:
         n_batches = (n_samples + batch_size - 1) // batch_size
         
         predictions = np.zeros(n_samples)
-        
-        # 使用进度管理器
+        # 使用 best_iteration 进行预测
+        best_iteration = 0
+        if hasattr(self.model, 'best_iteration') and self.model.best_iteration > 0:
+             best_iteration = self.model.best_iteration
+
         with ProgressManager(n_batches, desc="LightGBM预测") as progress:
             for i in range(n_batches):
-                # 获取批次索引
                 start_idx = i * batch_size
                 end_idx = min(start_idx + batch_size, n_samples)
-                
-                # 提取批次数据
                 X_batch = X[start_idx:end_idx]
                 
-                # 预测
-                predictions[start_idx:end_idx] = self.model.predict(X_batch)
+                predictions[start_idx:end_idx] = self.model.predict(X_batch, num_iteration=best_iteration)
                 
-                # 更新进度
                 progress.update(1)
-                
-                # 释放内存
                 del X_batch
                 gc.collect()
         
@@ -866,9 +360,6 @@ class LightGBMModel:
     def save(self, element):
         """
         保存模型
-        
-        参数:
-            element: 元素名称
         """
         if self.model is None:
             raise ValueError("模型未训练")
@@ -877,21 +368,16 @@ class LightGBMModel:
         model_path = os.path.join(config.output_config['model_dir'], f'lightgbm_{element}.txt')
         self.model.save_model(model_path)
         
-        # 保存训练状态
-        state_path = os.path.join(config.output_config['model_dir'], f'lightgbm_{element}_state.pkl')
-        with open(state_path, 'wb') as f:
-            pickle.dump({
-                'trained_batches': self.trained_batches
-            }, f)
-        
+        # 不再需要保存训练状态
+        # state_path = os.path.join(config.output_config['model_dir'], f'lightgbm_{element}_state.pkl')
+        # with open(state_path, 'wb') as f:
+        #     pickle.dump({}, f)
+
         logger.info(f"LightGBM模型已保存: {model_path}")
     
     def load(self, element):
         """
         加载模型
-        
-        参数:
-            element: 元素名称
         """
         model_path = os.path.join(config.output_config['model_dir'], f'lightgbm_{element}.txt')
         if not os.path.exists(model_path):
@@ -900,12 +386,14 @@ class LightGBMModel:
         
         self.model = lgb.Booster(model_file=model_path)
         
-        # 加载训练状态
-        state_path = os.path.join(config.output_config['model_dir'], f'lightgbm_{element}_state.pkl')
-        if os.path.exists(state_path):
-            with open(state_path, 'rb') as f:
-                state = pickle.load(f)
-                self.trained_batches = state.get('trained_batches', [])
+        # 不再需要加载训练状态
+        # state_path = os.path.join(config.output_config['model_dir'], f'lightgbm_{element}_state.pkl')
+        # if os.path.exists(state_path):
+        #     try:
+        #         with open(state_path, 'rb') as f:
+        #            state = pickle.load(f)
+        #     except:
+        #         pass
         
         logger.info(f"LightGBM模型已加载: {model_path}")
         return True
@@ -970,6 +458,19 @@ def evaluate_baseline_model(y_true, y_pred, model_name, element):
     return results
 
 def load_processed_data(element, data_type='train', use_main_dataset=False, dataset_path=None):
+    """
+    加载处理后的数据
+    
+    参数:
+        element: 元素名称
+        data_type: 数据类型 (train, test)
+        use_main_dataset: 是否使用主模型数据集
+        dataset_path: 数据集路径
+        
+    返回:
+        X: 特征数据
+        y: 标签数据
+    """
     if use_main_dataset and dataset_path:
         try:
             # 使用主模型数据集
@@ -1071,93 +572,137 @@ def load_processed_data(element, data_type='train', use_main_dataset=False, data
             return None, None
 
 def train_and_evaluate_baseline(element, model_type='xgboost', 
-                               batch_size=Config.BASELINE_BATCH_SIZE, batches_per_round=Config.BASELINE_BATCHES_PER_ROUND, val_size=0.2,
+                               val_size=0.2, # 保留 val_size 用于划分验证集
                                force_retrain=False, evaluate_only=False, device=None,
-                               xgb_params=None, lgb_params=None):
-    """添加device参数支持不同计算设备"""
-    # 创建模型
+                               xgb_params=None, lgb_params=None,
+                               use_main_dataset=False, dataset_path=None # 保留数据集参数
+                               ):
+    """使用标准训练流程训练和评估基线模型"""
+    # 创建模型实例，并传入参数更新
     model_params_update = None
+    model_config = Config # 传递 Config 对象
     if model_type.lower() == 'xgboost':
         model_params_update = xgb_params
-        model = XGBoostModel(params_update=model_params_update)
+        model = XGBoostModel(config_obj=model_config, params_update=model_params_update) 
         model_name = 'xgboost'
     elif model_type.lower() == 'lightgbm':
         model_params_update = lgb_params
-        model = LightGBMModel(params_update=model_params_update)
+        model = LightGBMModel(config_obj=model_config, params_update=model_params_update)
         model_name = 'lightgbm'
     else:
         logger.error(f"不支持的模型类型: {model_type}")
         return None
-    
-    # XGBoost和LightGBM配置中添加设备支持 - 将设备配置移到模型创建之后
+
+    # 配置GPU/CPU (如果需要)
+    current_params = model.params # 获取当前模型参数
     if device and 'cuda' in str(device):
-        # GPU支持
         if model_type.lower() == 'xgboost':
-            model.params.update({'tree_method': 'hist', 'device': 'cuda:0'}) 
-            logger.info(f"为 XGBoost 配置 GPU 支持: {{'tree_method': 'hist', 'device': 'cuda:0'}}")
+            # 确保tree_method是hist，并设置device
+            current_params['tree_method'] = 'hist'
+            current_params['device'] = 'cuda'
+            logger.info(f"为 XGBoost 配置 GPU 支持: {current_params}")
         elif model_type.lower() == 'lightgbm':
-            # 尝试显式使用 CUDA 而不是通用的 'gpu' (后者可能优先尝试 OpenCL)
-            model.params.update({'device': 'cuda', 'gpu_platform_id': 0, 'gpu_device_id': 0}) 
-            logger.info(f"为 LightGBM 配置 GPU 支持: {{'device': 'cuda'}}")
-    elif device and 'xla' in str(device):
-        # TPU目前不直接支持这些库，可以考虑用TensorFlow版本替代
-        logger.warning("TPU不直接支持XGBoost/LightGBM，将使用CPU")
-    
-    # 如果仅评估且可以加载模型，则加载模型
-    if evaluate_only and not force_retrain:
-        if model.load(element):
-            logger.info(f"已加载 {model_name} 模型")
+            current_params['device'] = 'cuda'
+            logger.info(f"为 LightGBM 配置 GPU 支持: {current_params}")
+    elif device and 'cpu' in str(device):
+         if model_type.lower() == 'xgboost':
+             # 移除GPU特定参数
+             current_params.pop('device', None)
+             # tree_method='hist' 在CPU上通常也是最佳选择，可以保留或移除让其自动选择
+             # current_params.pop('tree_method', None)
+             logger.info(f"为 XGBoost 配置 CPU 支持: {current_params}")
+         elif model_type.lower() == 'lightgbm':
+             current_params.pop('device', None)
+             logger.info(f"为 LightGBM 配置 CPU 支持: {current_params}")
+    # elif device and 'xla' in str(device): ... # TPU 逻辑保持不变
+
+    # 尝试加载预训练模型
+    model_loaded = False
+    if not force_retrain:
+        model_loaded = model.load(element)
+        if model_loaded:
+            logger.info(f"已加载预训练的 {model_name} 模型")
         else:
-            logger.warning(f"无法加载 {model_name} 模型，将训练新模型")
-            evaluate_only = False
-    
-    # 训练模型
-    if not evaluate_only:
-        # 加载训练数据
-        X_train, y_train = load_processed_data(element, 'train')
-        if X_train is None or y_train is None:
-            logger.error(f"加载 {element} 的训练数据失败")
+            logger.info(f"未找到预训练的 {model_name} 模型或需要强制重新训练")
+
+    # 如果模型未加载或需要强制重训，则进行训练
+    if not model_loaded or force_retrain:
+        if evaluate_only:
+             logger.error(f"指定了 evaluate_only 但无法加载模型 {model_name} for {element}")
+             return None
+
+        # 加载完整的训练数据
+        logger.info("加载完整训练数据...")
+        X_train_full, y_train_full = load_processed_data(element, 'train', use_main_dataset, dataset_path)
+        if X_train_full is None or y_train_full is None:
+            logger.error(f"加载 {element} 的完整训练数据失败")
             return None
         
-        # 分批训练模型
-        logger.info(f"分批训练 {model_name} 模型")
-        start_time = time.time()
-        model.train_in_batches(
-            X_train, y_train, 
-            batch_size=batch_size, 
-            batches_per_round=batches_per_round,
-            val_size=val_size,
-            element=element
+        # 检查数据量是否足够划分
+        if len(X_train_full) < 2 or (val_size > 0 and len(X_train_full) * (1 - val_size) < 1) or (val_size > 0 and len(X_train_full) * val_size < 1) :
+             logger.error(f"数据量过少 ({len(X_train_full)})，无法进行有效的训练/验证划分 (val_size={val_size})")
+             return None
+
+        # 划分训练集和验证集
+        logger.info(f"划分训练集和验证集 (验证集比例: {val_size})")
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_train_full, y_train_full, test_size=val_size, random_state=42,
+            stratify=None # 回归任务通常不使用 stratify
         )
-        elapsed_time = time.time() - start_time
-        logger.info(f"训练 {model_name} 耗时: {elapsed_time:.2f}秒")
-        
-        # 保存模型
-        model.save(element)
-    
+        del X_train_full, y_train_full # 释放内存
+        gc.collect()
+
+        logger.info(f"训练集形状: {X_train.shape}, {y_train.shape}")
+        logger.info(f"验证集形状: {X_val.shape}, {y_val.shape}")
+
+        # 训练模型
+        logger.info(f"开始训练 {model_name} 模型...")
+        try:
+            model.train(X_train, y_train, X_val, y_val)
+            # 保存训练好的模型
+            model.save(element)
+        except Exception as e:
+            logger.error(f"训练 {model_name} 模型时出错: {e}", exc_info=True)
+            return None
+        finally:
+            # 确保清理内存
+             del X_train, y_train, X_val, y_val
+             gc.collect()
+    elif evaluate_only and not model_loaded:
+         logger.error(f"指定了 evaluate_only 但无法加载模型 {model_name} for {element}")
+         return None
+
+
     # 评估模型
     # 加载测试数据
-    X_test, y_test = load_processed_data(element, 'test')
+    logger.info("加载测试数据...")
+    X_test, y_test = load_processed_data(element, 'test', use_main_dataset, dataset_path)
     if X_test is None or y_test is None:
         logger.error(f"加载 {element} 的测试数据失败")
-        return None
+        # 即使测试数据加载失败，如果模型已训练或加载，仍然返回一个标记，避免下面比较时出错
+        return {'error': 'Failed to load test data'} if model.model else None 
     
-    # 分批预测
-    logger.info(f"分批预测测试集")
-    y_pred = model.predict_in_batches(X_test, batch_size)
-    
+    logger.info(f"测试集形状: {X_test.shape}, {y_test.shape}")
+
+    # 检查模型是否真的被训练或加载了
+    if model.model is None:
+        logger.error(f"模型 {model_name} for {element} 未被成功训练或加载，无法进行评估。")
+        return {'error': 'Model not available for prediction'}
+
+
+    # 预测测试集 (如果内存允许，可以用 model.predict 替代)
+    logger.info(f"使用 {model_name} 预测测试集...")
+    try:
+        # y_pred = model.predict(X_test) # 如果测试集不大
+        y_pred = model.predict_in_batches(X_test) # 更安全的选择
+    except Exception as e:
+         logger.error(f"使用 {model_name} 预测时出错: {e}", exc_info=True)
+         # 返回错误标记
+         return {'error': 'Prediction failed'}
+
     # 评估模型
+    logger.info(f"评估 {model_name} 模型...")
     results = evaluate_baseline_model(y_test, y_pred, model_name, element)
-    
-    # 显示批次处理结果的位置
-    batch_results_dir = os.path.join(config.output_config['results_dir'], f'{model_name}_{element}_batch_results')
-    if os.path.exists(batch_results_dir):
-        logger.info(f"批次处理结果保存在: {batch_results_dir}")
-        final_summary_path = os.path.join(config.output_config['results_dir'], f'{model_name}_{element}_final_summary.txt')
-        if os.path.exists(final_summary_path):
-            with open(final_summary_path, 'r') as f:
-                summary_content = f.read()
-            logger.info(f"最终汇总结果:\n{summary_content}")
     
     return results 
 
@@ -1171,10 +716,6 @@ def main():
     parser.add_argument('--model', type=str, default='xgboost',
                       choices=['xgboost', 'lightgbm', 'both'],
                       help='模型类型，默认为xgboost')
-    parser.add_argument('--batch_size', type=int, default=Config.BASELINE_BATCH_SIZE,
-                       help='每批大小，默认为1000')
-    parser.add_argument('--batches_per_round', type=int, default=Config.BASELINE_BATCHES_PER_ROUND,
-                       help='每轮处理的批次数，默认为5')
     parser.add_argument('--val_size', type=float, default=0.2,
                        help='验证集比例，默认为0.2')
     parser.add_argument('--force_retrain', action='store_true',
@@ -1183,10 +724,8 @@ def main():
                        help='仅评估，不训练，默认为False')
     parser.add_argument('--clear_cache', action='store_true',
                        help='清除所有缓存，默认为False')
-    parser.add_argument('--show_batch_results', action='store_true',
-                       help='显示批次处理结果，默认为False')
     parser.add_argument('--use_optimal_params', action='store_true',
-                      help='使用主模型的最优超参数')
+                      help='使用主模型的最优超参数 (不推荐用于基线对比)')
     parser.add_argument('--optimal_params_file', type=str,
                       default='results/hyperopt/{element}/best_params.json',
                       help='最优超参数文件路径，{element}会被替换为元素名称')
@@ -1195,258 +734,162 @@ def main():
     parser.add_argument('--dataset_path', type=str,
                       default='processed_data/{type}_dataset.npz',
                       help='数据集路径，{type}会被替换为train/val/test')
-    parser.add_argument('--device', type=str, default=None,
-                       help='计算设备，可选值: cpu, cuda, tpu')
+    parser.add_argument('--device', type=str, default='cpu', # 默认使用 CPU
+                       help='计算设备，可选值: cpu, cuda')
     
-    # 添加直接设置超参数的命令行参数
-    parser.add_argument('--lr', type=float, default=None,
-                       help='学习率')
-    parser.add_argument('--weight_decay', type=float, default=None,
-                       help='权重衰减')
-    parser.add_argument('--max_depth', type=int, default=None,
-                       help='XGBoost/LightGBM的最大树深度')
-    parser.add_argument('--n_estimators', type=int, default=None,
-                       help='XGBoost/LightGBM的树数量')
-    parser.add_argument('--subsample', type=float, default=None,
-                       help='XGBoost/LightGBM的样本抽样比例')
-    parser.add_argument('--colsample_bytree', type=float, default=None,
-                       help='XGBoost/LightGBM的特征抽样比例')
-    parser.add_argument('--early_stopping_rounds', type=int, default=None,
-                       help='XGBoost/LightGBM的早停轮数')
-    parser.add_argument('--min_child_weight', type=int, default=None,
-                       help='XGBoost的最小子节点权重')
-    parser.add_argument('--num_leaves', type=int, default=None,
-                       help='LightGBM的叶子节点数')
-    parser.add_argument('--seed', type=int, default=None,
-                       help='随机种子')
+    # 添加直接设置超参数的命令行参数 (保持不变)
+    parser.add_argument('--lr', type=float, default=None, help='学习率')
+    parser.add_argument('--weight_decay', type=float, default=None, help='权重衰减 (L2正则)')
+    parser.add_argument('--max_depth', type=int, default=None, help='XGBoost/LightGBM的最大树深度')
+    parser.add_argument('--n_estimators', type=int, default=None, help='XGBoost/LightGBM的树数量 (总轮数)')
+    parser.add_argument('--subsample', type=float, default=None, help='XGBoost/LightGBM的样本抽样比例')
+    parser.add_argument('--colsample_bytree', type=float, default=None, help='XGBoost/LightGBM的特征抽样比例')
+    parser.add_argument('--early_stopping_rounds', type=int, default=None, help='XGBoost/LightGBM的早停轮数')
+    parser.add_argument('--min_child_weight', type=int, default=None, help='XGBoost的最小子节点权重')
+    parser.add_argument('--num_leaves', type=int, default=None, help='LightGBM的叶子节点数')
+    parser.add_argument('--seed', type=int, default=None, help='随机种子')
     
     args = parser.parse_args()
     
-    # 处理缓存
+    # 处理缓存 (保持不变)
     if args.clear_cache:
         cache_manager.clear_cache()
         logger.info("已清除所有缓存")
     else:
-        # 询问是否清除缓存
         ask_clear_cache(cache_manager)
     
-    # 创建必要的目录
+    # 创建必要的目录 (保持不变)
     os.makedirs(config.output_config['model_dir'], exist_ok=True)
     os.makedirs(config.output_config['results_dir'], exist_ok=True)
     
-    # 如果只是显示批次结果，则显示结果并退出
-    if args.show_batch_results:
-        show_batch_results(args.element, args.model)
-        return
-    
-    # 处理设备选择
-    device = None
-    if args.device:
-        if args.device.lower() == 'tpu':
-            try:
-                import torch_xla
-                import torch_xla.core.xla_model as xm
-                device = xm.xla_device()
-            except ImportError:
-                logger.warning("无法导入torch_xla，回退到CPU")
-                device = 'cpu'
-        else:
-            device = args.device
-    
-    # 设置通过命令行指定的超参数
-    xgb_params = {}
-    lgb_params = {}
+    # 处理设备选择 (移除TPU逻辑，简化为cpu/cuda)
+    device = args.device.lower() if args.device else 'cpu'
+    if device not in ['cpu', 'cuda']:
+        logger.warning(f"不支持的设备 '{args.device}', 回退到 CPU.")
+        device = 'cpu'
+
+    # 设置通过命令行指定的超参数 (逻辑保持不变, 但注意 weight_decay 映射)
+    xgb_params_update = {}
+    lgb_params_update = {}
     
     if args.lr is not None:
-        xgb_params['learning_rate'] = args.lr
-        lgb_params['learning_rate'] = args.lr
+        xgb_params_update['learning_rate'] = args.lr
+        lgb_params_update['learning_rate'] = args.lr
     
     if args.weight_decay is not None:
-        xgb_params['reg_lambda'] = args.weight_decay * 1000
-        lgb_params['reg_lambda'] = args.weight_decay * 1000
+        # XGBoost: reg_lambda 是 L2 正则化权重
+        # LightGBM: lambda_l2 是 L2 正则化权重
+        xgb_params_update['reg_lambda'] = args.weight_decay 
+        lgb_params_update['lambda_l2'] = args.weight_decay 
     
     if args.max_depth is not None:
-        xgb_params['max_depth'] = args.max_depth
-        # LightGBM中-1表示无限制
-        lgb_params['max_depth'] = args.max_depth
+        xgb_params_update['max_depth'] = args.max_depth
+        lgb_params_update['max_depth'] = args.max_depth
     
     if args.n_estimators is not None:
-        xgb_params['n_estimators'] = args.n_estimators
-        lgb_params['n_estimators'] = args.n_estimators
+        xgb_params_update['n_estimators'] = args.n_estimators
+        lgb_params_update['n_estimators'] = args.n_estimators
     
     if args.subsample is not None:
-        xgb_params['subsample'] = args.subsample
-        lgb_params['subsample'] = args.subsample
+        xgb_params_update['subsample'] = args.subsample
+        lgb_params_update['subsample'] = args.subsample
     
     if args.colsample_bytree is not None:
-        xgb_params['colsample_bytree'] = args.colsample_bytree
-        lgb_params['colsample_bytree'] = args.colsample_bytree
+        xgb_params_update['colsample_bytree'] = args.colsample_bytree
+        lgb_params_update['colsample_bytree'] = args.colsample_bytree
     
     if args.early_stopping_rounds is not None:
-        xgb_params['early_stopping_rounds'] = args.early_stopping_rounds
-        lgb_params['early_stopping_rounds'] = args.early_stopping_rounds
+        xgb_params_update['early_stopping_rounds'] = args.early_stopping_rounds
+        lgb_params_update['early_stopping_rounds'] = args.early_stopping_rounds
     
     if args.min_child_weight is not None:
-        xgb_params['min_child_weight'] = args.min_child_weight
+        xgb_params_update['min_child_weight'] = args.min_child_weight
     
     if args.num_leaves is not None:
-        lgb_params['num_leaves'] = args.num_leaves
+        lgb_params_update['num_leaves'] = args.num_leaves
     
     if args.seed is not None:
-        xgb_params['seed'] = args.seed
-        lgb_params['seed'] = args.seed
-    
-    # 如果有命令行参数，则更新模型参数
-    if xgb_params:
-        logger.info(f"使用命令行指定的XGBoost参数: {xgb_params}")
-    
-    if lgb_params:
-        logger.info(f"使用命令行指定的LightGBM参数: {lgb_params}")
+        xgb_params_update['seed'] = args.seed
+        lgb_params_update['seed'] = args.seed
             
-    # 加载最优超参数（只有在未通过命令行指定参数时才使用最优参数）
-    if args.use_optimal_params and not xgb_params and not lgb_params:
+    # 加载最优超参数 (如果指定了 use_optimal_params 且未通过命令行指定参数)
+    if args.use_optimal_params and not any([args.lr, args.weight_decay, args.max_depth, args.n_estimators, args.subsample, args.colsample_bytree, args.early_stopping_rounds, args.min_child_weight, args.num_leaves]):
         params_file = args.optimal_params_file.replace('{element}', args.element)
         if os.path.exists(params_file):
             with open(params_file, 'r') as f:
                 optimal_params = json.load(f)
                 logger.info(f"加载最优超参数: {optimal_params}")
                 
-                # 更新模型参数
+                # 转换并更新参数 (注意: 这里的转换逻辑可能需要适配基线模型)
                 if args.model.lower() in ['xgboost', 'both']:
-                    optimal_xgb_params = translate_params_to_xgboost(optimal_params)
-                    logger.info(f"转换后的XGBoost参数: {optimal_xgb_params}")
-                    xgb_params.update(optimal_xgb_params)
+                    translated_xgb = translate_params_to_xgboost(optimal_params)
+                    logger.info(f"转换后的XGBoost参数: {translated_xgb}")
+                    xgb_params_update.update(translated_xgb) 
                 
                 if args.model.lower() in ['lightgbm', 'both']:
-                    optimal_lgb_params = translate_params_to_lightgbm(optimal_params)
-                    logger.info(f"转换后的LightGBM参数: {optimal_lgb_params}")
-                    lgb_params.update(optimal_lgb_params)
+                    translated_lgb = translate_params_to_lightgbm(optimal_params)
+                    logger.info(f"转换后的LightGBM参数: {translated_lgb}")
+                    lgb_params_update.update(translated_lgb) 
         else:
             logger.warning(f"找不到最优超参数文件: {params_file}")
     
     # 训练和评估模型
-    if args.model.lower() == 'both':
-        # 训练和评估两种模型
-        logger.info(f"将训练和评估 XGBoost 和 LightGBM 模型用于 {args.element}")
-        
-        # XGBoost
+    xgb_results = None
+    lgb_results = None
+
+    if args.model.lower() in ['xgboost', 'both']:
+        logger.info(f"开始处理 XGBoost 模型 for {args.element}")
         xgb_results = train_and_evaluate_baseline(
             args.element, 'xgboost',
-            batch_size=args.batch_size,
-            batches_per_round=args.batches_per_round,
             val_size=args.val_size,
             force_retrain=args.force_retrain,
             evaluate_only=args.evaluate_only,
             device=device,
-            xgb_params=xgb_params,
-            lgb_params=lgb_params
+            xgb_params=xgb_params_update, # 传递更新字典
+            use_main_dataset=args.use_main_dataset,
+            dataset_path=args.dataset_path
         )
         
-        # LightGBM
+    if args.model.lower() in ['lightgbm', 'both']:
+        logger.info(f"开始处理 LightGBM 模型 for {args.element}")
         lgb_results = train_and_evaluate_baseline(
             args.element, 'lightgbm',
-            batch_size=args.batch_size,
-            batches_per_round=args.batches_per_round,
             val_size=args.val_size,
             force_retrain=args.force_retrain,
             evaluate_only=args.evaluate_only,
             device=device,
-            xgb_params=xgb_params,
-            lgb_params=lgb_params
+            lgb_params=lgb_params_update, # 传递更新字典
+            use_main_dataset=args.use_main_dataset,
+            dataset_path=args.dataset_path
         )
         
-        # 比较两种模型
-        if xgb_results and lgb_results:
-            logger.info(f"模型比较 ({args.element}):")
-            logger.info(f"  XGBoost RMSE: {xgb_results['rmse']:.6f}, MAE: {xgb_results['mae']:.6f}")
-            logger.info(f"  LightGBM RMSE: {lgb_results['rmse']:.6f}, MAE: {lgb_results['mae']:.6f}")
+    # 比较两种模型 (仅在两个模型都成功运行后)
+    if xgb_results and lgb_results and 'error' not in xgb_results and 'error' not in lgb_results:
+        logger.info(f"模型比较 ({args.element}):")
+        logger.info(f"  XGBoost RMSE: {xgb_results['rmse']:.6f}, MAE: {xgb_results['mae']:.6f}, R²: {xgb_results['r2']:.6f}")
+        logger.info(f"  LightGBM RMSE: {lgb_results['rmse']:.6f}, MAE: {lgb_results['mae']:.6f}, R²: {lgb_results['r2']:.6f}")
             
-            # 确定胜者
-            if xgb_results['rmse'] < lgb_results['rmse']:
-                winner = "XGBoost"
-                winner_rmse = xgb_results['rmse']
-                loser = "LightGBM"
-                loser_rmse = lgb_results['rmse']
-            else:
-                winner = "LightGBM"
-                winner_rmse = lgb_results['rmse']
-                loser = "XGBoost"
-                loser_rmse = xgb_results['rmse']
-                
-            improvement = (loser_rmse - winner_rmse) / loser_rmse * 100
-            logger.info(f"  胜者: {winner}，提升了 {improvement:.2f}% 的RMSE")
-            
-            # 比较结果可视化
-            compare_models(args.element, xgb_results, lgb_results)
-    else:
-        # 只训练和评估一种模型
-        results = train_and_evaluate_baseline(
-            args.element, args.model,
-            batch_size=args.batch_size,
-            batches_per_round=args.batches_per_round,
-            val_size=args.val_size,
-            force_retrain=args.force_retrain,
-            evaluate_only=args.evaluate_only,
-            device=device,
-            xgb_params=xgb_params,
-            lgb_params=lgb_params
-        )
+        # 确定胜者
+        winner = "XGBoost" if xgb_results['rmse'] < lgb_results['rmse'] else "LightGBM"
+        loser = "LightGBM" if winner == "XGBoost" else "XGBoost"
+        winner_rmse = min(xgb_results['rmse'], lgb_results['rmse'])
+        loser_rmse = max(xgb_results['rmse'], lgb_results['rmse'])
 
-def show_batch_results(element, model_type='both'):
-    """
-    显示批次处理结果
-    
-    参数:
-        element: 元素名称
-        model_type: 模型类型
-    """
-    models = []
-    if model_type.lower() == 'both':
-        models = ['xgboost', 'lightgbm']
-    else:
-        models = [model_type.lower()]
-    
-    for model_name in models:
-        batch_results_dir = os.path.join(config.output_config['results_dir'], f'{model_name}_{element}_batch_results')
-        if not os.path.exists(batch_results_dir):
-            logger.warning(f"找不到 {model_name} 的批次结果目录: {batch_results_dir}")
-            continue
-        
-        batch_tracking_path = os.path.join(batch_results_dir, 'batch_tracking.csv')
-        if not os.path.exists(batch_tracking_path):
-            logger.warning(f"找不到 {model_name} 的批次追踪文件: {batch_tracking_path}")
-            continue
-        
-        # 显示批次追踪数据
-        batch_df = pd.read_csv(batch_tracking_path)
-        logger.info(f"{model_name} 在 {element} 上的批次处理结果:")
-        logger.info(f"总批次数: {len(batch_df)}")
-        
-        if len(batch_df) > 0:
-            # 找出最佳批次
-            best_batch_id = batch_df.loc[batch_df['rmse'].idxmin(), 'batch_id']
-            best_rmse = batch_df['rmse'].min()
-            logger.info(f"最佳批次: {best_batch_id} (RMSE: {best_rmse:.6f})")
+        improvement = 0
+        if loser_rmse > 1e-9: # 避免除零或极小值错误
+             improvement = abs(loser_rmse - winner_rmse) / loser_rmse * 100
+        logger.info(f"  胜者 (基于RMSE): {winner}，提升了 {improvement:.2f}%")
             
-            # 显示每个批次的指标
-            for i, row in batch_df.iterrows():
-                batch_id = int(row['batch_id'])
-                logger.info(f"批次 {batch_id}: RMSE={row['rmse']:.6f}, MAE={row['mae']:.6f}, R²={row['r2']:.6f}, 时间={row['timestamp']}")
-                
-            # 显示批次结果文件的位置
-            logger.info(f"批次评估指标摘要文件位于: {batch_results_dir}/batch_*_summary.txt")
-            logger.info(f"批次预测结果CSV文件位于: {batch_results_dir}/batch_*_results.csv")
-            logger.info(f"批次散点图位于: {batch_results_dir}/batch_*_plot.png")
-            logger.info(f"批次趋势图位于: {batch_results_dir}/batch_trends.png")
+        # 比较结果可视化
+        compare_models(args.element, xgb_results, lgb_results)
+    elif xgb_results and 'error' in xgb_results:
+         logger.error(f"XGBoost 处理失败: {xgb_results['error']}")
+    elif lgb_results and 'error' in lgb_results:
+         logger.error(f"LightGBM 处理失败: {lgb_results['error']}")
 
 def compare_models(element, xgb_results, lgb_results):
     """
-    比较XGBoost和LightGBM模型的性能，生成对比图表
-    
-    参数:
-        element: 元素名称
-        xgb_results: XGBoost评估结果
-        lgb_results: LightGBM评估结果
+    比较XGBoost和LightGBM模型的性能
     """
     try:
         # 创建比较目录
@@ -1455,8 +898,8 @@ def compare_models(element, xgb_results, lgb_results):
         
         # 准备比较数据
         metrics = ['mse', 'rmse', 'mae', 'r2', 'scatter']
-        xgb_values = [xgb_results[m] for m in metrics]
-        lgb_values = [lgb_results[m] for m in metrics]
+        xgb_values = [xgb_results.get(m, float('nan')) for m in metrics] # 使用 .get 以防万一
+        lgb_values = [lgb_results.get(m, float('nan')) for m in metrics]
         
         # 创建性能对比图
         plt.figure(figsize=(12, 8))
@@ -1466,8 +909,8 @@ def compare_models(element, xgb_results, lgb_results):
         models = ['XGBoost', 'LightGBM']
         x = np.arange(len(models))
         width = 0.35
-        plt.bar(x - width/2, [xgb_results['rmse'], lgb_results['rmse']], width, label='RMSE')
-        plt.bar(x + width/2, [xgb_results['mae'], lgb_results['mae']], width, label='MAE')
+        plt.bar(x - width/2, [xgb_values[1], lgb_values[1]], width, label='RMSE')
+        plt.bar(x + width/2, [xgb_values[2], lgb_values[2]], width, label='MAE')
         plt.xlabel('模型')
         plt.ylabel('误差')
         plt.title('RMSE和MAE对比')
@@ -1477,15 +920,19 @@ def compare_models(element, xgb_results, lgb_results):
         
         # R²对比
         plt.subplot(2, 2, 2)
-        plt.bar(models, [xgb_results['r2'], lgb_results['r2']], color=['blue', 'orange'])
+        plt.bar(models, [xgb_values[3], lgb_values[3]], color=['blue', 'orange'])
         plt.xlabel('模型')
         plt.ylabel('R²')
         plt.title('R²对比')
+        # 动态调整Y轴范围以更好地显示R2，特别是当它是负数时
+        min_r2 = min(xgb_values[3], lgb_values[3], 0) - 0.1
+        max_r2 = max(xgb_values[3], lgb_values[3], 0) + 0.1
+        plt.ylim(min_r2, max_r2)
         plt.grid(True, axis='y')
         
         # 散度对比
         plt.subplot(2, 2, 3)
-        plt.bar(models, [xgb_results['scatter'], lgb_results['scatter']], color=['blue', 'orange'])
+        plt.bar(models, [xgb_values[4], lgb_values[4]], color=['blue', 'orange'])
         plt.xlabel('模型')
         plt.ylabel('散度')
         plt.title('散度对比')
@@ -1493,42 +940,61 @@ def compare_models(element, xgb_results, lgb_results):
         
         # 雷达图对比
         plt.subplot(2, 2, 4, polar=True)
-        # 标准化指标，使得较小的值更好
-        normalized_metrics = ['mse', 'rmse', 'mae', 'scatter', 'r2']
-        max_values = {
-            'mse': max(xgb_results['mse'], lgb_results['mse']),
-            'rmse': max(xgb_results['rmse'], lgb_results['rmse']),
-            'mae': max(xgb_results['mae'], lgb_results['mae']),
-            'scatter': max(xgb_results['scatter'], lgb_results['scatter']),
-            'r2': 1.0  # R²的最大值是1
-        }
-        
-        # 对R²进行特殊处理，因为它越接近1越好
-        normalized_xgb = [xgb_results[m]/max_values[m] if m != 'r2' else 1-xgb_results[m] for m in normalized_metrics]
-        normalized_lgb = [lgb_results[m]/max_values[m] if m != 'r2' else 1-lgb_results[m] for m in normalized_metrics]
-        
+        # 指标: rmse, mae, scatter, 1-r2 (值越小越好)
+        radar_metrics = ['RMSE', 'MAE', 'Scatter', '1-R²']
+        # 获取数据，处理可能的 NaN 或 None
+        xgb_r2 = xgb_values[3] if xgb_values[3] is not None and not np.isnan(xgb_values[3]) else -1 # 惩罚无效R2
+        lgb_r2 = lgb_values[3] if lgb_values[3] is not None and not np.isnan(lgb_values[3]) else -1
+
+        xgb_radar_raw = [
+            xgb_values[1] if not np.isnan(xgb_values[1]) else float('inf'),
+            xgb_values[2] if not np.isnan(xgb_values[2]) else float('inf'),
+            xgb_values[4] if not np.isnan(xgb_values[4]) else float('inf'),
+            1 - xgb_r2 # 值越小越好
+        ]
+        lgb_radar_raw = [
+            lgb_values[1] if not np.isnan(lgb_values[1]) else float('inf'),
+            lgb_values[2] if not np.isnan(lgb_values[2]) else float('inf'),
+            lgb_values[4] if not np.isnan(lgb_values[4]) else float('inf'),
+            1 - lgb_r2
+        ]
+
+        # 找出每个指标的最大值用于归一化 (确保非负)
+        max_radar_values = [max(xgb_radar_raw[i], lgb_radar_raw[i], 0.00001) for i in range(len(radar_metrics))]
+
+        # 归一化 (值越小越好，所以直接除以最大值)
+        normalized_xgb = [xgb_radar_raw[i] / max_radar_values[i] for i in range(len(radar_metrics))]
+        normalized_lgb = [lgb_radar_raw[i] / max_radar_values[i] for i in range(len(radar_metrics))]
+
+        # 防止值超出1 (可能因为最大值计算方式)
+        normalized_xgb = [min(v, 1.0) for v in normalized_xgb]
+        normalized_lgb = [min(v, 1.0) for v in normalized_lgb]
+
+
         # 完成雷达图的圆形
-        normalized_xgb.append(normalized_xgb[0])
-        normalized_lgb.append(normalized_lgb[0])
-        
+        normalized_xgb += normalized_xgb[:1]
+        normalized_lgb += normalized_lgb[:1]
+
         # 设置角度
-        angles = np.linspace(0, 2*np.pi, len(normalized_metrics), endpoint=False).tolist()
+        angles = np.linspace(0, 2*np.pi, len(radar_metrics), endpoint=False).tolist()
         angles += angles[:1]  # 闭合多边形
-        
+
         # 绘制雷达图
-        plt.polar(angles, normalized_xgb, 'b-', label='XGBoost')
-        plt.polar(angles, normalized_lgb, 'r-', label='LightGBM')
-        plt.fill(angles, normalized_xgb, 'b', alpha=0.1)
-        plt.fill(angles, normalized_lgb, 'r', alpha=0.1)
-        
-        # 设置雷达图标签
-        labels = normalized_metrics + [normalized_metrics[0]]  # 添加第一个标签再次闭合
-        plt.xticks(angles, labels)
-        plt.title('性能雷达图对比')
-        plt.legend(loc='upper right')
-        
+        ax = plt.gca()
+        ax.plot(angles, normalized_xgb, 'o-', linewidth=2, label='XGBoost')
+        ax.fill(angles, normalized_xgb, 'blue', alpha=0.25)
+        ax.plot(angles, normalized_lgb, 'o-', linewidth=2, label='LightGBM')
+        ax.fill(angles, normalized_lgb, 'red', alpha=0.25)
+
+        # 设置雷达图标签和刻度
+        ax.set_thetagrids(np.degrees(angles[:-1]), radar_metrics)
+        ax.set_yticks(np.linspace(0, 1, 6)) # 0, 0.2, ..., 1.0
+        ax.set_ylim(0, 1.0) # Y轴范围设为0到1.0
+        plt.title('归一化性能雷达图 (值越接近0越好)')
+        ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
+
         plt.tight_layout()
-        
+
         # 保存比较图表
         compare_plot_path = os.path.join(compare_dir, f'model_comparison_{element}.png')
         plt.savefig(compare_plot_path)
@@ -1540,54 +1006,60 @@ def compare_models(element, xgb_results, lgb_results):
             f.write(f"XGBoost和LightGBM在{element}上的性能比较\n")
             f.write("=" * 50 + "\n")
             f.write("\nXGBoost性能指标:\n")
-            f.write(f"  MSE: {xgb_results['mse']:.6f}\n")
-            f.write(f"  RMSE: {xgb_results['rmse']:.6f}\n")
-            f.write(f"  MAE: {xgb_results['mae']:.6f}\n")
-            f.write(f"  R²: {xgb_results['r2']:.6f}\n")
-            f.write(f"  散度: {xgb_results['scatter']:.6f}\n")
+            f.write(f"  MSE: {xgb_values[0]:.6f}\n")
+            f.write(f"  RMSE: {xgb_values[1]:.6f}\n")
+            f.write(f"  MAE: {xgb_values[2]:.6f}\n")
+            f.write(f"  R²: {xgb_values[3]:.6f}\n")
+            f.write(f"  散度: {xgb_values[4]:.6f}\n")
             
             f.write("\nLightGBM性能指标:\n")
-            f.write(f"  MSE: {lgb_results['mse']:.6f}\n")
-            f.write(f"  RMSE: {lgb_results['rmse']:.6f}\n")
-            f.write(f"  MAE: {lgb_results['mae']:.6f}\n")
-            f.write(f"  R²: {lgb_results['r2']:.6f}\n")
-            f.write(f"  散度: {lgb_results['scatter']:.6f}\n")
+            f.write(f"  MSE: {lgb_values[0]:.6f}\n")
+            f.write(f"  RMSE: {lgb_values[1]:.6f}\n")
+            f.write(f"  MAE: {lgb_values[2]:.6f}\n")
+            f.write(f"  R²: {lgb_values[3]:.6f}\n")
+            f.write(f"  散度: {lgb_values[4]:.6f}\n")
             
-            # 计算性能提升
-            if xgb_results['rmse'] < lgb_results['rmse']:
-                winner = "XGBoost"
-                improvement = (lgb_results['rmse'] - xgb_results['rmse']) / lgb_results['rmse'] * 100
-            else:
-                winner = "LightGBM"
-                improvement = (xgb_results['rmse'] - lgb_results['rmse']) / xgb_results['rmse'] * 100
-                
+            # 计算性能提升 (基于RMSE)
+            winner = "XGBoost" if xgb_values[1] < lgb_values[1] else "LightGBM"
+            loser = "LightGBM" if winner == "XGBoost" else "XGBoost"
+            winner_rmse = min(xgb_values[1], lgb_values[1])
+            loser_rmse = max(xgb_values[1], lgb_values[1])
+            improvement = 0
+            if loser_rmse > 1e-9: # 避免除零或极小值错误
+                 improvement = abs(loser_rmse - winner_rmse) / loser_rmse * 100
+
             f.write(f"\n总结: {winner}在RMSE指标上表现更好，提升了{improvement:.2f}%。\n")
         
         logger.info(f"已生成模型比较结果，保存在: {compare_dir}")
         
     except Exception as e:
-        logger.error(f"生成模型比较结果时出错: {e}")
+        logger.error(f"生成模型比较结果时出错: {e}", exc_info=True)
 
 def translate_params_to_xgboost(optimal_params):
-    """将主模型参数转换为XGBoost参数"""
-    return {
-        'learning_rate': optimal_params.get('lr', 0.01),
-        'max_depth': 6,  # 可以映射其他参数
-        'subsample': 0.8,
-        'colsample_bytree': 0.8,
-        'reg_lambda': optimal_params.get('weight_decay', 1e-4) * 1000,
-    }
+    """
+    将主模型参数转换为XGBoost参数 (需要根据实际情况调整映射关系)
+    """
+    params = {}
+    params['learning_rate'] = optimal_params.get('lr', 0.01) # 直接映射学习率
+    # params['max_depth'] = optimal_params.get('some_nn_param', 6) # 神经网络参数可能无法直接映射到树深度
+    params['reg_lambda'] = optimal_params.get('weight_decay', 0.0) # 映射 L2 正则化
+    # params['reg_alpha'] = optimal_params.get('l1_decay', 0.0) # 映射 L1 正则化 (如果需要)
+    # 其他参数如 n_estimators, early_stopping_rounds 最好使用基线模型自己的默认值或单独调整
+    logger.warning("translate_params_to_xgboost 使用的映射可能不准确")
+    return params
 
 def translate_params_to_lightgbm(optimal_params):
-    """将主模型参数转换为LightGBM参数"""
-    return {
-        'learning_rate': optimal_params.get('lr', 0.01),
-        'num_leaves': 31,
-        'max_depth': -1,
-        'subsample': 0.8,
-        'colsample_bytree': 0.8,
-        'reg_lambda': optimal_params.get('weight_decay', 1e-4) * 1000,
-    }
+    """
+    将主模型参数转换为LightGBM参数 (需要根据实际情况调整映射关系)
+    """
+    params = {}
+    params['learning_rate'] = optimal_params.get('lr', 0.01) # 直接映射学习率
+    # params['max_depth'] = optimal_params.get('some_nn_param', -1)
+    # params['num_leaves'] = optimal_params.get('other_nn_param', 31)
+    params['lambda_l2'] = optimal_params.get('weight_decay', 0.0) # 映射 L2 正则化
+    # params['lambda_l1'] = optimal_params.get('l1_decay', 0.0) # 映射 L1 正则化
+    logger.warning("translate_params_to_lightgbm 使用的映射可能不准确")
+    return params
 
 if __name__ == '__main__':
     main() 
