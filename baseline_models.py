@@ -120,7 +120,7 @@ class XGBoostModel:
         )
         
         # 获取验证集上的最佳性能
-        best_score = min(evals_result['val']['rmse'])
+        best_score = model.best_score.get('val', {}).get('rmse', float('inf'))
         
         # 记录已训练的批次
         if batch_id is not None and batch_id not in self.trained_batches:
@@ -166,17 +166,23 @@ class XGBoostModel:
                     X_batch, y_batch, test_size=val_size, random_state=42
                 )
                 
+                # 准备用于 xgb.train 的参数，移除不适用的参数
+                train_params = self.params.copy()
+                train_params.pop('n_estimators', None)
+                train_params.pop('early_stopping_rounds', None)
+                num_boost_round_per_batch = 10 # 每个批次训练的轮数，可以设为可配置参数
+                
                 # 增量训练
                 if isinstance(self, XGBoostModel):
                     dtrain = xgb.DMatrix(X_train, label=y_train)
                     dval = xgb.DMatrix(X_val, label=y_val)
                     self.model = xgb.train(
-                        self.params,
+                        train_params, # 使用处理后的参数
                         dtrain,
                         evals=[(dtrain, 'train'), (dval, 'val')],
                         xgb_model=self.model,  # 使用现有模型继续训练
-                        evals_result={},
-                        verbose_eval=100
+                        num_boost_round=num_boost_round_per_batch, # 指定本次调用训练的轮数
+                        verbose_eval=100 # verbose_eval 在 xgb.train 中有效
                     )
                 elif isinstance(self, LightGBMModel):
                     train_data = lgb.Dataset(X_train, label=y_train)
@@ -187,7 +193,7 @@ class XGBoostModel:
                         valid_sets=[train_data, val_data],
                         valid_names=['train', 'val'],
                         init_model=self.model,  # 使用现有模型继续训练
-                        verbose_eval=100
+                        callbacks=[lgb.print_evaluation(period=100)] # 使用回调函数
                     )
                 
                 # 记录已训练的批次
@@ -540,11 +546,11 @@ class LightGBMModel:
             train_data,
             valid_sets=[train_data, val_data],
             valid_names=['train', 'val'],
-            verbose_eval=100
+            callbacks=[lgb.print_evaluation(period=100)]
         )
         
         # 获取验证集上的最佳性能
-        best_score = min(evals_result['val']['l2'])
+        best_score = model.best_score.get('val', {}).get('l2', float('inf'))
         
         # 记录已训练的批次
         if batch_id is not None and batch_id not in self.trained_batches:
@@ -611,7 +617,7 @@ class LightGBMModel:
                         valid_sets=[train_data, val_data],
                         valid_names=['train', 'val'],
                         init_model=self.model,  # 使用现有模型继续训练
-                        verbose_eval=100
+                        callbacks=[lgb.print_evaluation(period=100)]
                     )
                 
                 # 记录已训练的批次
