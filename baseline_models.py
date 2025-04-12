@@ -187,7 +187,6 @@ class XGBoostModel:
                         valid_sets=[train_data, val_data],
                         valid_names=['train', 'val'],
                         init_model=self.model,  # 使用现有模型继续训练
-                        evals_result={},
                         verbose_eval=100
                     )
                 
@@ -536,13 +535,11 @@ class LightGBMModel:
         val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
         
         # 使用早停机制训练
-        evals_result = {}
         model = lgb.train(
             self.params,
             train_data,
             valid_sets=[train_data, val_data],
             valid_names=['train', 'val'],
-            evals_result=evals_result,
             verbose_eval=100
         )
         
@@ -614,7 +611,6 @@ class LightGBMModel:
                         valid_sets=[train_data, val_data],
                         valid_names=['train', 'val'],
                         init_model=self.model,  # 使用现有模型继续训练
-                        evals_result={},
                         verbose_eval=100
                     )
                 
@@ -1091,9 +1087,11 @@ def train_and_evaluate_baseline(element, model_type='xgboost',
     if device and 'cuda' in str(device):
         # GPU支持
         if model_type.lower() == 'xgboost':
-            model.params.update({'tree_method': 'gpu_hist', 'gpu_id': 0})
+            model.params.update({'tree_method': 'hist', 'device': 'cuda:0'}) 
+            logger.info(f"为 XGBoost 配置 GPU 支持: {{'tree_method': 'hist', 'device': 'cuda:0'}}")
         elif model_type.lower() == 'lightgbm':
             model.params.update({'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0})
+            logger.info(f"为 LightGBM 配置 GPU 支持: {{'device': 'gpu'}}")
     elif device and 'xla' in str(device):
         # TPU目前不直接支持这些库，可以考虑用TensorFlow版本替代
         logger.warning("TPU不直接支持XGBoost/LightGBM，将使用CPU")
