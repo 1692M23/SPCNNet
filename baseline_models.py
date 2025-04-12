@@ -69,7 +69,7 @@ class XGBoostModel:
     3. 支持并行计算
     4. 处理高维特征的能力强
     """
-    def __init__(self, config=None):
+    def __init__(self, config=None, params_update=None):
         if config is None:
             config = Config  # 使用直接导入的Config而非config.CONFIG
             
@@ -84,6 +84,10 @@ class XGBoostModel:
             'early_stopping_rounds': 50,
             'seed': 42
         }
+        if params_update:
+            self.params.update(params_update)
+            logger.info(f"XGBoostModel 使用更新后的参数初始化: {params_update}")
+            
         self.model = None
         self.trained_batches = []
         
@@ -494,7 +498,7 @@ class LightGBMModel:
     3. 更好的准确性
     4. 支持直接处理类别特征
     """
-    def __init__(self, config=None):
+    def __init__(self, config=None, params_update=None):
         if config is None:
             config = Config  # 使用直接导入的Config而非config.CONFIG
             
@@ -510,6 +514,10 @@ class LightGBMModel:
             'early_stopping_rounds': 50,
             'seed': 42
         }
+        if params_update:
+            self.params.update(params_update)
+            logger.info(f"LightGBMModel 使用更新后的参数初始化: {params_update}")
+            
         self.model = None
         self.trained_batches = []
     
@@ -1070,14 +1078,18 @@ def load_processed_data(element, data_type='train', use_main_dataset=False, data
 
 def train_and_evaluate_baseline(element, model_type='xgboost', 
                                batch_size=Config.BASELINE_BATCH_SIZE, batches_per_round=Config.BASELINE_BATCHES_PER_ROUND, val_size=0.2,
-                               force_retrain=False, evaluate_only=False, device=None):
+                               force_retrain=False, evaluate_only=False, device=None,
+                               xgb_params=None, lgb_params=None):
     """添加device参数支持不同计算设备"""
     # 创建模型
+    model_params_update = None
     if model_type.lower() == 'xgboost':
-        model = XGBoostModel()
+        model_params_update = xgb_params
+        model = XGBoostModel(params_update=model_params_update)
         model_name = 'xgboost'
     elif model_type.lower() == 'lightgbm':
-        model = LightGBMModel()
+        model_params_update = lgb_params
+        model = LightGBMModel(params_update=model_params_update)
         model_name = 'lightgbm'
     else:
         logger.error(f"不支持的模型类型: {model_type}")
@@ -1290,11 +1302,9 @@ def main():
     # 如果有命令行参数，则更新模型参数
     if xgb_params:
         logger.info(f"使用命令行指定的XGBoost参数: {xgb_params}")
-        XGBoostModel.params.update(xgb_params)
     
     if lgb_params:
         logger.info(f"使用命令行指定的LightGBM参数: {lgb_params}")
-        LightGBMModel.params.update(lgb_params)
             
     # 加载最优超参数（只有在未通过命令行指定参数时才使用最优参数）
     if args.use_optimal_params and not xgb_params and not lgb_params:
@@ -1306,14 +1316,14 @@ def main():
                 
                 # 更新模型参数
                 if args.model.lower() in ['xgboost', 'both']:
-                    xgb_params = translate_params_to_xgboost(optimal_params)
-                    logger.info(f"转换后的XGBoost参数: {xgb_params}")
-                    XGBoostModel.params.update(xgb_params)
+                    optimal_xgb_params = translate_params_to_xgboost(optimal_params)
+                    logger.info(f"转换后的XGBoost参数: {optimal_xgb_params}")
+                    xgb_params.update(optimal_xgb_params)
                 
                 if args.model.lower() in ['lightgbm', 'both']:
-                    lgb_params = translate_params_to_lightgbm(optimal_params)
-                    logger.info(f"转换后的LightGBM参数: {lgb_params}")
-                    LightGBMModel.params.update(lgb_params)
+                    optimal_lgb_params = translate_params_to_lightgbm(optimal_params)
+                    logger.info(f"转换后的LightGBM参数: {optimal_lgb_params}")
+                    lgb_params.update(optimal_lgb_params)
         else:
             logger.warning(f"找不到最优超参数文件: {params_file}")
     
@@ -1330,7 +1340,9 @@ def main():
             val_size=args.val_size,
             force_retrain=args.force_retrain,
             evaluate_only=args.evaluate_only,
-            device=device
+            device=device,
+            xgb_params=xgb_params,
+            lgb_params=lgb_params
         )
         
         # LightGBM
@@ -1341,7 +1353,9 @@ def main():
             val_size=args.val_size,
             force_retrain=args.force_retrain,
             evaluate_only=args.evaluate_only,
-            device=device
+            device=device,
+            xgb_params=xgb_params,
+            lgb_params=lgb_params
         )
         
         # 比较两种模型
@@ -1376,7 +1390,9 @@ def main():
             val_size=args.val_size,
             force_retrain=args.force_retrain,
             evaluate_only=args.evaluate_only,
-            device=device
+            device=device,
+            xgb_params=xgb_params,
+            lgb_params=lgb_params
         )
 
 def show_batch_results(element, model_type='both'):
