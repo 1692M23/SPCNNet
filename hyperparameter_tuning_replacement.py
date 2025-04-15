@@ -49,7 +49,7 @@ def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None,
                 'dropout_rate': [0.3, 0.5, 0.7],
                 'weight_decay': [1e-4, 1e-5, 1e-6],
                 'use_gru': [True, False],
-                'use_gcn': [True, False]
+                # 'use_gcn': [True, False] # Removed as GCN is no longer used
             }
 
     # 添加固定参数 (从config模块获取)

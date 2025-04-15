@@ -207,7 +207,7 @@ tuning_config = {
         'batch_size': [32, 64, 128],
         'weight_decay': [1e-6, 1e-5, 1e-4],
         'use_gru': [True, False],
-        'use_gcn': [True, False]
+        # 'use_gcn': [True, False] # Removed as GCN is no longer used
     },
     'early_stopping_patience': 20,     # 调优时的早停耐心值
     
