@@ -21,7 +21,7 @@ from torchvision import transforms
 
 # 导入自定义模块
 import config
-from model import SpectralResCNN, SpectralResCNN_GCN, SpectralResCNNEnsemble, train, evaluate_model, load_trained_model, save_model, load_checkpoint, handle_nan_values
+from model import SpectralResCNN_GCN, SpectralResCNNEnsemble, train, evaluate_model, load_trained_model, save_model, load_checkpoint, handle_nan_values
 from evaluation import evaluate_all_elements, plot_predictions_vs_true, plot_metrics_comparison
 from utils import CacheManager, ProgressManager, ask_clear_cache, setup_analysis_directories, set_seed
 from multi_element_processor import MultiElementProcessor
