@@ -3713,6 +3713,15 @@ def main():
     # 询问用户是否清理缓存
     preprocessor.clean_cache()
     
+    # 添加路径诊断
+    preprocessor.check_and_fix_file_paths()
+    
+    # === Move dataset split question here ===
+    split_data = input("是否要在处理完成后划分数据集？(y/n): ").strip().lower() == 'y'
+    
+    # === Move visualize examples question here ===
+    visualize_examples = input("是否要在处理完成后生成示例光谱可视化图？(y/n): ").strip().lower() == 'y'
+    
     # 询问用户是否继续
     user_input = input("是否继续处理数据? (y/n): ").strip().lower()
     if user_input != 'y':
@@ -3727,11 +3736,15 @@ def main():
         return
         
     # 分割数据集
-    preprocessor.split_dataset(X, y, elements)
+    preprocessor.split_dataset(X, y, elements, split_data=split_data)
     
     # 清理缓存文件查找记录
     preprocessor._save_files_cache()
     
+    # === Conditionally visualize examples based on earlier input ===
+    if visualize_examples:
+        preprocessor.visualize_example_spectra() # Call visualization if user agreed
+        
     # 计算并显示总耗时
     elapsed_time = time.time() - start_time
     hours, remainder = divmod(elapsed_time, 3600)
