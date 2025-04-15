@@ -455,8 +455,20 @@ class LAMOSTPreprocessor:
             self.fits_file_cache[fits_file] = None
             return None
     
-    def read_fits_file(self, fits_file):
-        """读取FITS文件并返回波长和流量数据"""
+    def read_fits_file(self, fits_file, read_mode='full'):
+        """读取FITS文件并根据read_mode返回数据
+        
+        Args:
+            fits_file (str): FITS文件的路径或标识符。
+            read_mode (str): 读取模式。
+                'full': 读取所有数据（波长、流量、头信息等）。
+                'wavelength_only': 只读取波长数据和必要的头信息 (v_helio, z)。
+        
+        Returns:
+            tuple: 根据read_mode返回不同内容。
+                'full': (wavelength, flux, v_helio, z, snr, snr_bands)
+                'wavelength_only': (wavelength, None, v_helio, z, 0, {})
+        """
         # 获取正确的文件路径
         file_path = self._get_file_extension(fits_file)
         if file_path is None:
@@ -535,137 +547,142 @@ class LAMOSTPreprocessor:
                             print(f"从FITS头信息中找到{band}波段信噪比: {snr_bands[band]}")
                             break
                 
-                # 优先获取第一个HDU的数据(如果是主要光谱数据)
+                # ===== Conditional Flux Reading based on read_mode =====
                 flux = None
                 wavelength = None
                 
-                # 规则1: 如果主HDU是PrimaryHDU且包含数据，直接使用
-                if isinstance(hdul[0], fits.PrimaryHDU) and hdul[0].data is not None:
-                    if len(hdul[0].data.shape) == 1:  # 一维数据
-                        flux = hdul[0].data
-                        # 从头信息创建波长数组
-                        if 'CRVAL1' in header and 'CDELT1' in header and 'NAXIS1' in header:
-                            crval1 = header['CRVAL1']  # 起始波长
-                            cdelt1 = header['CDELT1']  # 波长步长
-                            naxis1 = header['NAXIS1']  # 波长点数
-                            wavelength = np.arange(crval1, crval1 + cdelt1 * naxis1, cdelt1)[:naxis1]
-                        print(f"使用主HDU的一维数据: 点数={len(flux)}")
-                        
-                    elif len(hdul[0].data.shape) == 2:  # 二维数据
-                        # 取第一行或列，取决于哪个更长
-                        if hdul[0].data.shape[0] > hdul[0].data.shape[1]:
-                            flux = hdul[0].data[0]
-                        else:
-                            flux = hdul[0].data[:, 0]
-                        print(f"使用主HDU的二维数据的第一行/列: 点数={len(flux)}")
-                
-                # 规则2: 如果数据在表格HDU中
-                if flux is None and len(hdul) > 1:
-                    for i in range(1, len(hdul)):
-                        if isinstance(hdul[i], fits.BinTableHDU):
-                            table_hdu = hdul[i]
-                            column_names = table_hdu.columns.names
-                            print(f"检查表格HDU{i}, 列名: {column_names}")
+                # --- Always read wavelength if possible --- 
+                # Attempt to create wavelength from header first (often sufficient for wavelength_only)
+                if 'CRVAL1' in header and 'CDELT1' in header and 'NAXIS1' in header:
+                    crval1 = header['CRVAL1']
+                    cdelt1 = header['CDELT1']
+                    naxis1 = header['NAXIS1']
+                    wavelength = np.arange(crval1, crval1 + cdelt1 * naxis1, cdelt1)[:naxis1]
+                    print(f"从头信息创建了初始波长数组: 点数={len(wavelength)}")
+
+                # --- Read Flux only if read_mode is 'full' --- 
+                if read_mode == 'full':
+                    # 规则1: 如果主HDU是PrimaryHDU且包含数据，直接使用
+                    if isinstance(hdul[0], fits.PrimaryHDU) and hdul[0].data is not None:
+                        if len(hdul[0].data.shape) == 1:  # 一维数据
+                            flux = hdul[0].data
+                            # If wavelength wasn't created from header, try now based on flux length
+                            if wavelength is None and 'CRVAL1' in header and 'CDELT1' in header and 'NAXIS1' in header:
+                                if header['NAXIS1'] == len(flux):
+                                     wavelength = np.arange(header['CRVAL1'], header['CRVAL1'] + header['CDELT1'] * len(flux), header['CDELT1'])[:len(flux)]
+                                     print(f"从主HDU数据长度和头信息创建波长数组")
+                            print(f"使用主HDU的一维数据: 点数={len(flux)}")
                             
-                            # 查找光谱数据列
-                            flux_col = None
-                            wave_col = None
-                            
-                            # 寻找光谱流量列
-                            for col_name in ['FLUX', 'SPEC', 'DATA', 'INTENSITY', 'COUNTS', 'flux']:
-                                if col_name in column_names:
-                                    flux_col = col_name
-                                    break
-                            
-                            # 寻找波长列
-                            for wave_name in ['WAVE', 'WAVELENGTH', 'LAMBDA', 'wave', 'wavelength']:
-                                if wave_name in column_names:
-                                    wave_col = wave_name
-                                    break
-                            
-                            # 如果找到流量列
-                            if flux_col is not None:
-                                try:
-                                    # 读取流量数据
-                                    flux_data = table_hdu.data[flux_col]
-                                    
-                                    # 如果流量是一个二维数组，取第一行
-                                    if hasattr(flux_data, 'shape') and len(flux_data.shape) > 1:
-                                        flux = flux_data[0].astype(np.float64)
-                                    else:
-                                        # 确保flux是一维数组
-                                        flux = np.array(flux_data, dtype=np.float64).flatten()
-                                    
-                                    print(f"从列 '{flux_col}' 提取流量数据, 点数={len(flux)}")
-                                    
-                                    # 如果找到波长列，读取波长数据
-                                    if wave_col is not None:
+                        elif len(hdul[0].data.shape) == 2:  # 二维数据
+                            # 取第一行或列，取决于哪个更长
+                            if hdul[0].data.shape[0] > hdul[0].data.shape[1]:
+                                flux = hdul[0].data[0]
+                            else:
+                                flux = hdul[0].data[:, 0]
+                            # Similar wavelength check as above
+                            if wavelength is None and 'CRVAL1' in header and 'CDELT1' in header and 'NAXIS1' in header:
+                                if header['NAXIS1'] == len(flux):
+                                     wavelength = np.arange(header['CRVAL1'], header['CRVAL1'] + header['CDELT1'] * len(flux), header['CDELT1'])[:len(flux)]
+                                     print(f"从主HDU数据长度和头信息创建波长数组")
+                            print(f"使用主HDU的二维数据的第一行/列: 点数={len(flux)}")
+
+                # --- Read from Table HDU --- 
+                # Always check for WAVELENGTH column if wavelength is still None OR if mode is 'full' (to get FLUX)
+                if wavelength is None or read_mode == 'full':
+                    if len(hdul) > 1:
+                        for i in range(1, len(hdul)):
+                            if isinstance(hdul[i], fits.BinTableHDU):
+                                table_hdu = hdul[i]
+                                column_names = table_hdu.columns.names
+                                print(f"检查表格HDU{i}, 列名: {column_names}")
+                                
+                                flux_col = None
+                                wave_col = None
+                                
+                                # Find FLUX column only if mode is 'full'
+                                if read_mode == 'full':
+                                    for col_name in ['FLUX', 'SPEC', 'DATA', 'INTENSITY', 'COUNTS', 'flux']:
+                                        if col_name in column_names:
+                                            flux_col = col_name
+                                            break
+                                
+                                # Always find WAVELENGTH column
+                                for wave_name in ['WAVE', 'WAVELENGTH', 'LAMBDA', 'wave', 'wavelength']:
+                                    if wave_name in column_names:
+                                        wave_col = wave_name
+                                        break
+                                
+                                # Read FLUX if found and mode is 'full'
+                                if flux_col is not None and read_mode == 'full':
+                                    try:
+                                        flux_data = table_hdu.data[flux_col]
+                                        if hasattr(flux_data, 'shape') and len(flux_data.shape) > 1:
+                                            flux = flux_data[0].astype(np.float64)
+                                        else:
+                                            flux = np.array(flux_data, dtype=np.float64).flatten()
+                                        print(f"从列 '{flux_col}' 提取流量数据, 点数={len(flux)}")
+                                    except Exception as e:
+                                        print(f"从表格提取流量出错: {e}")
+                                        flux = None
+                                        
+                                # Read WAVELENGTH if found (overwrite header version if necessary)
+                                if wave_col is not None:
+                                    try:
                                         wave_data = table_hdu.data[wave_col]
                                         if hasattr(wave_data, 'shape') and len(wave_data.shape) > 1:
                                             wavelength = wave_data[0].astype(np.float64)
                                         else:
                                             wavelength = np.array(wave_data, dtype=np.float64).flatten()
                                         print(f"从列 '{wave_col}' 提取波长数据, 点数={len(wavelength)}")
-                                        
-                                        # 确保波长和流量数组长度匹配
-                                        if len(wavelength) != len(flux):
-                                            min_len = min(len(wavelength), len(flux))
-                                            wavelength = wavelength[:min_len]
-                                            flux = flux[:min_len]
-                                            print(f"调整数组长度为匹配长度: {min_len}")
-                                    
-                                    break  # 找到数据后退出循环
-                                except Exception as e:
-                                    print(f"从表格提取数据出错: {e}")
-                                    flux = None  # 重置，尝试其他HDU
-                
-                # 如果没有找到波长数据，但有流量数据
-                if wavelength is None and flux is not None:
-                    # 尝试从头信息创建波长数组
-                    if 'CRVAL1' in header and 'CDELT1' in header and 'NAXIS1' in header:
-                        crval1 = header['CRVAL1']  # 起始波长
-                        cdelt1 = header['CDELT1']  # 波长步长
-                        naxis1 = header['NAXIS1']  # 波长点数
-                        
-                        # 确保naxis1与flux长度匹配
-                        if naxis1 != len(flux):
-                            naxis1 = len(flux)
-                            print(f"调整NAXIS1值为与流量数组匹配: {naxis1}")
-                        
-                        wavelength = np.arange(crval1, crval1 + cdelt1 * naxis1, cdelt1)[:naxis1]
-                        print(f"从头信息创建波长数组: 范围={wavelength[0]:.2f}~{wavelength[-1]:.2f}")
-                    else:
-                        # 如果没有头信息，使用默认波长范围
-                        print("头信息中没有波长参数，使用默认波长范围")
-                        naxis1 = len(flux)
-                        # LAMOST DR10光谱的典型波长范围约为3700-9000Å
-                        crval1 = 3700.0  # 起始波长
-                        cdelt1 = (9000.0 - 3700.0) / naxis1  # 波长步长
-                        wavelength = np.arange(crval1, crval1 + cdelt1 * naxis1, cdelt1)[:naxis1]
-                        print(f"创建默认波长数组: 范围={wavelength[0]:.2f}~{wavelength[-1]:.2f}")
-                
-                # 进行最后的数据检查
-                if flux is None:
-                    print("无法从FITS文件提取流量数据")
-                    return None, None, 0, 0, 0, {}
-                
+                                    except Exception as e:
+                                        print(f"从表格提取波长出错: {e}")
+                                        # Keep header wavelength if table read fails
+                                
+                                # If we needed full data and found at least wavelength or flux, break
+                                if read_mode == 'full' and (flux is not None or wavelength is not None):
+                                    break 
+                                # If we only needed wavelength and found it, break
+                                elif read_mode == 'wavelength_only' and wavelength is not None:
+                                     break
+
+                # --- Final Checks --- 
+                # Check if wavelength was obtained
                 if wavelength is None:
-                    print("无法生成波长数据")
-                    return None, None, 0, 0, 0, {}
-                
-                # 确保数据类型是浮点数
-                flux = flux.astype(np.float64)
+                    print("无法生成或读取波长数据")
+                    # Return format based on read_mode
+                    if read_mode == 'wavelength_only': return None, None, v_helio, z, 0, {}
+                    else: return None, None, v_helio, z, snr, snr_bands
+
                 wavelength = wavelength.astype(np.float64)
+
+                # Handle flux only if read_mode is 'full'
+                if read_mode == 'full':
+                    if flux is None:
+                        print("无法从FITS文件提取流量数据")
+                        return wavelength, None, v_helio, z, snr, snr_bands # Return wavelength even if flux fails
+                    
+                    flux = flux.astype(np.float64)
+                    
+                    # Ensure wavelength and flux match length if both exist
+                    if wavelength is not None and flux is not None and len(wavelength) != len(flux):
+                         min_len = min(len(wavelength), len(flux))
+                         wavelength = wavelength[:min_len]
+                         flux = flux[:min_len]
+                         print(f"调整数组长度为匹配长度: {min_len}")
+
+                    if np.isnan(flux).any() or np.isinf(flux).any():
+                        nan_count = np.isnan(flux).sum()
+                        inf_count = np.isinf(flux).sum()
+                        print(f"数据中包含{nan_count}个NaN和{inf_count}个无限值，尝试替换")
+                        flux = np.nan_to_num(flux, nan=0.0, posinf=0.0, neginf=0.0)
                 
-                # 检查是否有NaN或无限值
-                if np.isnan(flux).any() or np.isinf(flux).any():
-                    nan_count = np.isnan(flux).sum()
-                    inf_count = np.isinf(flux).sum()
-                    print(f"数据中包含{nan_count}个NaN和{inf_count}个无限值，尝试替换")
-                    flux = np.nan_to_num(flux, nan=0.0, posinf=0.0, neginf=0.0)
-                
-                print(f"成功提取光谱数据: 点数={len(wavelength)}, 波长范围={wavelength[0]:.2f}~{wavelength[-1]:.2f}")
-                return wavelength, flux, v_helio, z, snr, snr_bands
+                # Return based on mode
+                if read_mode == 'full':
+                    print(f"成功提取光谱数据: 点数={len(wavelength)}, 波长范围={wavelength[0]:.2f}~{wavelength[-1]:.2f}")
+                    return wavelength, flux, v_helio, z, snr, snr_bands
+                else: # wavelength_only mode
+                    print(f"成功提取波长数据: 点数={len(wavelength)}, 波长范围={wavelength[0]:.2f}~{wavelength[-1]:.2f}")
+                    return wavelength, None, v_helio, z, 0, {} # Return None for flux, 0/empty for snr
                 
         except Exception as e:
             print(f"读取{file_path}出错: {e}")
@@ -869,12 +886,8 @@ class LAMOSTPreprocessor:
                     cp.get_default_memory_pool().free_all_blocks()
                     
                 except Exception as e:
-                    if self.disable_gpu_warnings:
-                        # 发生错误时切换到CPU处理
-                        flux_new = np.interp(wavelength_new, wavelength_valid, flux_valid)
-                    else:
-                        print(f"GPU插值失败，切换到CPU: {e}")
-                        flux_new = np.interp(wavelength_new, wavelength_valid, flux_valid)
+                    print(f"GPU插值失败，切换到CPU: {e}")
+                    flux_new = np.interp(wavelength_new, wavelength_valid, flux_valid)
             else:
                 # 在CPU上进行线性插值
                 flux_new = np.interp(wavelength_new, wavelength_valid, flux_valid)
@@ -2151,10 +2164,10 @@ class LAMOSTPreprocessor:
                                 print(f"无法找到文件: {spec_file}")
                                 continue
                                 
-                            # 读取FITS文件，获取波长和流量
-                            wavelength, flux, v_helio, z, snr, snr_bands = self.read_fits_file(file_path)
-                            if wavelength is None or flux is None:
-                                print(f"无法读取波长和流量数据: {file_path}")
+                            # 读取FITS文件，获取波长和流量 (Call with read_mode='wavelength_only')
+                            wavelength, _, _, _, _, _ = self.read_fits_file(file_path, read_mode='wavelength_only')
+                            if wavelength is None:
+                                print(f"无法读取波长数据: {file_path}")
                                 continue
                             
                             # 检查并过滤无效值
@@ -2939,7 +2952,7 @@ class LAMOSTPreprocessor:
             # 从FITS文件读取视向速度
             v_helio = 0  # 默认值
             try:
-                _, _, v_helio, _, _, _ = self.read_fits_file(spec_file)
+                _, _, v_helio, _, _, _ = self.read_fits_file(spec_file, read_mode='wavelength_only')
             except Exception as e:
                 print(f"读取FITS文件获取视向速度时出错: {e}")
             
