@@ -237,14 +237,32 @@ def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None,
             # 记录传递给 train 函数的配置信息
             logger.info(f"  [Tune Result] 参数: {params} -> Val Loss: {val_loss:.6f}, Val R2: {val_metric:.4f}")
             
-            # 更新最佳参数
-            if val_loss < best_val_metric:
-                best_val_metric = val_loss
-                # 从 params 复制，但排除 'use_gcn' 和可能存在的临时键
-                best_params = {k: v for k, v in params.items() if k not in ['use_gcn', 'trial_num', 'num_epochs', 'patience']}
-                best_params['val_loss'] = val_loss # 添加对应的验证损失
-                logger.info(f"找到新的最佳参数: {best_params}，验证损失: {val_loss:.6f}")
+            # 更新最佳参数 (基于 R²)
+            if not np.isnan(val_metric) and val_metric > best_val_metric:
+                best_val_metric = val_metric
+                best_params = params.copy()
+                logger.info(f"找到新的最佳参数(基于R²): {best_params}, 验证 R²: {best_val_metric:.4f}")
                 
+                # 记录传递给 train 函数的配置信息 (记录最佳R²)
+                logger.info(f"    [Tune Best Update] 新最佳参数: {best_params}, 新最佳验证 R²: {best_val_metric:.4f}")
+            
+                # 保存最佳参数 (仍然保存最佳参数，即使标准变了)
+                best_params_file = os.path.join(results_dir, 'best_params.pkl')
+                with open(best_params_file, 'wb') as f:
+                    pickle.dump(best_params, f)
+                
+                # 也保存为JSON格式方便查看
+                best_params_path = os.path.join(results_dir, 'best_params.json')
+                if best_params is not None:
+                    best_params.pop('use_gcn', None)
+                    with open(best_params_path, 'w') as f:
+                        json.dump(best_params, f, indent=4)
+                    logger.info(f"最佳超参数已保存到: {best_params_path}")
+                    logger.info(f"最佳参数: {best_params}")
+                    logger.info(f"对应的最低验证损失: {val_loss:.6f}")
+                else:
+                    logger.warning("最佳参数为空，无法保存。")
+            
             # 记录参数和结果
             result = {
                 'params': params,
@@ -292,4 +310,8 @@ def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None,
     logger.info(f"最佳参数: {best_params}")
     logger.info(f"最佳验证 R²: {best_val_metric:.4f}")
     
+    # 确保返回的字典也不包含 use_gcn
+    if best_params is not None:
+        best_params.pop('use_gcn', None)
+        
     return best_params 
