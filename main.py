@@ -559,9 +559,8 @@ def process_element(element, config, architecture_params={}):
         logger.info(f"使用实际输入大小: {config.model_config['input_size']}")
     
     # 创建模型
-    if config.model_config.get('model_type') is None:
-        # 使用配置中的模型类型
-        model_type = config.model_config.get('model_type', 'SpectralResCNN_GCN')
+    # 使用配置中的模型类型，如果未指定则默认为 'SpectralResCNN_GCN'
+    model_type = config.model_config.get('model_type', 'SpectralResCNN_GCN')
     
     logger.info(f"为元素 {element} 创建 {model_type} 模型，输入大小: {config.model_config['input_size']}")
     
