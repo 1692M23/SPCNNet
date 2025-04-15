@@ -1359,9 +1359,10 @@ def main():
     
     # 将GRU和GCN设置添加到配置中
     config.use_gru = use_gru
-    config.use_gcn = use_gcn
+    # GCN已被移除，强制设为False以避免混淆
+    config.use_gcn = False 
     
-    logger.info(f"模型配置: 使用GRU={use_gru}, 使用GCN={use_gcn}")
+    logger.info(f"模型配置: 使用GRU={use_gru}, 使用GCN={config.use_gcn}") # Log the forced value
     
     # 更新分析配置
     if args.perform_analysis:
@@ -1674,6 +1675,8 @@ def main():
                                config_module=config_module,
                                param_grid=base_param_grid 
                           )
+                          # <<< 添加详细日志 >>>
+                          logger.info(f"[Main Loop Debug] run_grid_search_tuning 返回结果: {tuning_result_params}")
                           best_params = tuning_result_params 
                           logger.info("[Main Loop] run_grid_search_tuning 调用结束")
                           
