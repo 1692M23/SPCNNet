@@ -495,16 +495,31 @@ class TrainingStateManager:
             os.remove(self.checkpoint_file)
         return True
 
-def process_element(element, model_type, input_size, use_gpu=True, config=None):
+# --- 修改 process_element 函数签名以接收 architecture_params ---
+def process_element(element, config, architecture_params={}):
     # 在函数开始处添加
-    print(f"正在处理元素: {element}", flush=True)
+    logger = logging.getLogger('process_element')
     logger.info(f"正在处理元素: {element}")
     
-    # 获取命令行参数中的GRU和GCN设置
-    use_gru = getattr(config, 'use_gru', True)  # 默认使用GRU
-    use_gcn = getattr(config, 'use_gcn', True)  # 默认使用GCN
+    # 从更新后的 config 或 命令行参数 获取 use_gru, use_gcn
+    # 注意: GCN已被移除, use_gcn 始终为 False
+    use_gru = getattr(config, 'use_gru', True)  
+    use_gcn = False # GCN is removed from the model
     
-    logger.info(f"模型配置: 使用GRU={use_gru}, 使用GCN={use_gcn}")
+    # 获取模型输入大小 (如果模型需要)
+    # input_size = config.model_config.get('input_size') # 如果需要显式传递
+    
+    logger.info(f"模型配置: 使用GRU={use_gru}")
+    if architecture_params:
+         logger.info(f"使用架构参数: {architecture_params}")
+    else:
+         logger.info("使用默认模型架构")
+     
+    # 检查GPU可用性
+    if config.training_config['device'].type == 'cuda':
+        logger.info("GPU可用，使用GPU")
+    else:
+        logger.info("GPU不可用，使用CPU")
     
     # 创建训练状态管理器
     state_manager = TrainingStateManager(
@@ -513,25 +528,12 @@ def process_element(element, model_type, input_size, use_gpu=True, config=None):
     )
     
     # 配置设备
-    if use_gpu:
-        if torch.cuda.is_available():
-            device = torch.device('cuda')
-            logger.info(f"使用GPU: {torch.cuda.get_device_name(0)}")
-        else:
-            device = torch.device('cpu')
-            logger.info("GPU不可用，使用CPU")
+    if config.training_config['device'].type == 'cuda':
+        device = torch.device('cuda')
+        logger.info(f"使用GPU: {torch.cuda.get_device_name(0)}")
     else:
-        # 如果明确不使用GPU，尝试使用TPU
-        try:
-            if HAS_XLA:
-                device = xm.xla_device()
-                logger.info(f"使用TPU设备: {device}")
-            else:
-                logger.info("TPU不可用（未安装PyTorch XLA），使用CPU")
-                device = torch.device('cpu')
-        except Exception as e:
-            logger.warning(f"TPU初始化失败: {str(e)}，使用CPU")
-            device = torch.device('cpu')
+        device = torch.device('cpu')
+        logger.info("使用CPU")
     
     # 设置配置中的设备
     config.training_config['device'] = device
@@ -552,23 +554,28 @@ def process_element(element, model_type, input_size, use_gpu=True, config=None):
     
     # 获取实际输入大小
     actual_input_size = X_train.shape[1] if len(X_train.shape) == 2 else X_train.shape[2]
-    if input_size is None:
-        input_size = actual_input_size
-        logger.info(f"使用实际输入大小: {input_size}")
+    if config.model_config.get('input_size') is None:
+        config.model_config['input_size'] = actual_input_size
+        logger.info(f"使用实际输入大小: {config.model_config['input_size']}")
     
     # 创建模型
-    if model_type is None:
+    if config.model_config.get('model_type') is None:
         # 使用配置中的模型类型
         model_type = config.model_config.get('model_type', 'SpectralResCNN_GCN')
     
-    logger.info(f"为元素 {element} 创建 {model_type} 模型，输入大小: {input_size}")
+    logger.info(f"为元素 {element} 创建 {model_type} 模型，输入大小: {config.model_config['input_size']}")
     
     if model_type == 'SpectralResCNN_GCN':
-        model = SpectralResCNN_GCN(input_size=input_size, device=device, use_gru=use_gru, use_gcn=use_gcn)
+        model = SpectralResCNN_GCN(
+            device=device, 
+            use_gru=use_gru, 
+            # use_gcn=use_gcn
+            **architecture_params # 使用字典解包传递架构参数
+        )
     elif model_type == 'SpectralResCNN':
-        model = SpectralResCNN(input_size=input_size)
+        model = SpectralResCNN(input_size=config.model_config['input_size'])
     elif model_type == 'SpectralResCNNEnsemble':
-        model = SpectralResCNNEnsemble(input_size=input_size)
+        model = SpectralResCNNEnsemble(input_size=config.model_config['input_size'])
     else:
         logger.error(f"未知的模型类型: {model_type}")
         raise ValueError(f"未知的模型类型: {model_type}")
@@ -874,7 +881,7 @@ def process_multiple_elements(csv_file, fits_dir, element_columns=None,
         
         try:
             # 训练模型
-            best_model, test_metrics = process_element(element, config.model_config.get('model_type'), config.model_config.get('input_size'), config.training_config['device'] == 'cuda', config=config)
+            best_model, test_metrics = process_element(element, config, architecture_params=config.model_config.get('architecture_params', {}))
             
             # 保存结果
             result_info = {
@@ -1741,11 +1748,24 @@ def main():
                      final_use_gcn = getattr(config, 'use_gcn', True)
                      logger.info(f"[Main Loop] 调用 process_element 前确认配置: use_gru={final_use_gru}, use_gcn={final_use_gcn}")
                      
+                     # <<< 添加架构参数传递 >>>
+                     arch_params = {}
+                     if best_params: # 假设 best_params 包含已调优的架构参数
+                         # 从 best_params 提取架构相关的键值对
+                         arch_keys = ['initial_channels', 'initial_kernel_size', 'initial_dropout',
+                                      'num_res_blocks', 'res_channels', 'res_kernel_size', 'res_dropout',
+                                      'gru_hidden_size', 'gru_num_layers', 'gru_dropout',
+                                      'fc_hidden_layers', 'fc_dropout', 'use_adaptive_pooling']
+                         for key in arch_keys:
+                             if key in best_params:
+                                 arch_params[key] = best_params[key]
+                         if arch_params:
+                              logger.info(f"[Main Loop] 检测到架构参数，传递给 process_element: {arch_params}")
+                     # <<< 结束架构参数传递 >>>
+                     
                      process_element(element, 
-                                     config.model_config.get('model_type'), 
-                                     config.model_config.get('input_size'), 
-                                     (final_device.type == 'cuda'), 
-                                     config=config 
+                                     config=config, # 直接传递config对象
+                                     architecture_params=arch_params # 传递架构参数字典
                                      )
                  except Exception as process_err:
                      logger.error(f"在调用 process_element 处理元素 {element} 时出错: {str(process_err)}")

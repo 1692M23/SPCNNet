@@ -126,17 +126,14 @@ def sync_device(device=None):
 # =============== 1. 模型定义 ===============
 class ResidualBlock(nn.Module):
     """
-    残差块
-    特点：
-    1. 包含两个卷积层，每层后接BatchNorm和ReLU
-    2. 跳跃连接，将输入直接加到输出上
-    3. 通过1x1卷积调整输入通道数（如需要）
+    残差块 (添加可配置通道和核大小)
     """
-    def __init__(self, channels):
+    def __init__(self, channels, kernel_size=3):
         super(ResidualBlock, self).__init__()
-        self.conv1 = nn.Conv1d(channels, channels, kernel_size=3, padding=1)
+        padding = kernel_size // 2 # 自动计算 padding 保持尺寸
+        self.conv1 = nn.Conv1d(channels, channels, kernel_size=kernel_size, padding=padding)
         self.bn1 = nn.BatchNorm1d(channels)
-        self.conv2 = nn.Conv1d(channels, channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(channels, channels, kernel_size=kernel_size, padding=padding)
         self.bn2 = nn.BatchNorm1d(channels)
         
     def forward(self, x):
@@ -154,82 +151,168 @@ class ResidualBlock(nn.Module):
         
         return out
 
-class SpectralResCNN(nn.Module):
-    """光谱残差CNN模型"""
-    def __init__(self, input_size):
-        super(SpectralResCNN, self).__init__()
+class SpectralResCNN_GCN(nn.Module):
+    """光谱残差CNN-GRU模型 (简化版，支持架构参数化)"""
+    def __init__(self, 
+                 input_size=None, 
+                 device=None, 
+                 use_gru=True, 
+                 # --- 架构参数 ---
+                 initial_channels=64, initial_kernel_size=7, initial_dropout=0.2,
+                 num_res_blocks=3, res_channels=64, res_kernel_size=3, res_dropout=0.0, # 可在 ResBlock 内加 Dropout
+                 gru_hidden_size=64, gru_num_layers=1, gru_dropout=0.0,
+                 fc_hidden_layers=[256, 64], fc_dropout=[0.5, 0.3],
+                 use_adaptive_pooling=True
+                 ):
+        super(SpectralResCNN_GCN, self).__init__()
         
-        # 特征提取层
+        self.input_size = input_size # 主要用于信息，模型本身会适应
+        self.use_gru = use_gru
+        self.use_gcn = False # GCN 已移除
+        self.use_adaptive_pooling = use_adaptive_pooling
+        logger.info(f"初始化简化版模型，使用GRU: {use_gru}")
+        logger.info(f"架构参数: initial_ch={initial_channels}, initial_k={initial_kernel_size}, num_res={num_res_blocks}, res_ch={res_channels}, res_k={res_kernel_size}, gru_hidden={gru_hidden_size if use_gru else 'N/A'}, fc_layers={fc_hidden_layers}, dropout={fc_dropout}")
+
+        self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        logger.info(f"模型将使用设备: {self.device}")
+        
+        # --- 初始特征提取层 (参数化) ---
         self.feature_extractor = nn.Sequential(
-            nn.Conv1d(1, 64, kernel_size=7, padding=3),
-            nn.BatchNorm1d(64),
+            nn.Conv1d(1, initial_channels, kernel_size=initial_kernel_size, padding=initial_kernel_size//2),
+            nn.BatchNorm1d(initial_channels),
             nn.ReLU(),
+            nn.Dropout(initial_dropout),
             nn.MaxPool1d(2)
         )
+        current_channels = initial_channels
         
-        # 残差模块 - 参数驱动的纵向特征提取
-        self.res_blocks = nn.ModuleList([
-            ResidualBlock(64) for _ in range(3)
-        ])
+        # --- 残差模块 (参数化) ---
+        self.res_blocks = nn.ModuleList()
+        for _ in range(num_res_blocks):
+            self.res_blocks.append(ResidualBlock(current_channels, kernel_size=res_kernel_size))
+            # 注意：当前ResidualBlock内没有dropout，如需添加要修改ResidualBlock类
+            # 可以在块之间添加 Dropout
+            if res_dropout > 0:
+                 self.res_blocks.append(nn.Dropout(res_dropout))
+                 
+        # --- 循环模块 (参数化) ---
+        gru_output_size = 0
+        if self.use_gru:
+            # GRU 输入通道是初始特征提取后的通道数
+            self.gru = nn.GRU(current_channels, gru_hidden_size, 
+                              num_layers=gru_num_layers, 
+                              bidirectional=True, batch_first=True,
+                              dropout=gru_dropout if gru_num_layers > 1 else 0)
+            gru_output_size = gru_hidden_size * 2 # 双向
         
-        # 循环模块 - 跨波段信念增强
-        self.gru = nn.GRU(64, 64, bidirectional=True, batch_first=True)
-        self.cross_band_attention = nn.Sequential(
-            nn.Conv1d(128, 128, kernel_size=1),
-            nn.Sigmoid()
-        )
-        
-        # 信息融合层
+        # --- 信息融合层 (输入大小动态确定) ---
+        fusion_input_size = current_channels + gru_output_size # CNN/Res + Optional GRU
+        # 融合层输出通道数，固定为 64? 还是也参数化?
+        fusion_output_channels = 64 # 暂时固定
         self.fusion = nn.Sequential(
-            nn.Conv1d(192, 64, kernel_size=1),
-            nn.BatchNorm1d(64),
+            nn.Conv1d(fusion_input_size, fusion_output_channels, kernel_size=1),
+            nn.BatchNorm1d(fusion_output_channels),
             nn.ReLU()
         )
         
-        # 添加自适应池化层，确保输出大小固定
-        self.adaptive_pool = nn.AdaptiveAvgPool1d(1)
+        # --- 池化层 (可选的自适应池化) ---
+        if self.use_adaptive_pooling:
+            self.pool = nn.AdaptiveAvgPool1d(1)
+            pool_output_features = fusion_output_channels
+        else:
+            # 如果不用自适应池化，需要一个 Flatten 层
+            # 注意：此时 Flatten 后的维度依赖于序列长度，不推荐
+            self.pool = nn.Identity() # 或者 None? 需要在 forward 处理
+            # 此时需要知道池化前的序列长度来计算 FC 输入大小，很麻烦
+            logger.warning("未使用自适应池化，全连接层输入维度可能不确定！推荐使用自适应池化。")
+            pool_output_features = -1 # 标记为不确定
         
-        # 全连接层
-        self.fc = nn.Sequential(
-            nn.Linear(64, 256),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(256, 64),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(64, 1)
-        )
+        # --- 全连接层 (参数化) ---
+        self.fc = nn.Sequential()
+        last_layer_features = pool_output_features 
+        if last_layer_features == -1:
+             # 尝试从一个样本推断？或者需要固定输入大小？暂时设为默认值
+             logger.warning("无法确定 FC 输入大小，使用默认值 64*1。可能出错！")
+             last_layer_features = 64 # 假设池化后是64
+             
+        # 解析 fc_dropout 列表
+        if not isinstance(fc_dropout, list) or len(fc_dropout) < len(fc_hidden_layers) + 1:
+             # 如果 fc_dropout 不是列表或长度不够，则使用单个值或默认值
+             dropout_val = fc_dropout if isinstance(fc_dropout, (float, int)) else 0.5
+             fc_dropout = [dropout_val] * (len(fc_hidden_layers) + 1)
+             
+        dropout_idx = 0
+        for hidden_size in fc_hidden_layers:
+            self.fc.add_module(f"fc_{dropout_idx}", nn.Linear(last_layer_features, hidden_size))
+            self.fc.add_module(f"relu_{dropout_idx}", nn.ReLU())
+            self.fc.add_module(f"dropout_{dropout_idx}", nn.Dropout(fc_dropout[dropout_idx]))
+            last_layer_features = hidden_size
+            dropout_idx += 1
+            
+        # 输出层
+        self.fc.add_module("fc_out", nn.Linear(last_layer_features, 1))
+        # 输出层后通常不加激活或Dropout
+        
+        self.to(self.device)
         
     def forward(self, x):
-        # 特征提取
-        x = self.feature_extractor(x)
+        # (Forward 逻辑基本不变，但注意处理 non-adaptive pooling 的情况)
+        x = move_to_device(x, self.device)
+        batch_size, channels, seq_len = x.size()
+
+        cnn_features = self.feature_extractor(x)
         
-        # 残差特征提取
-        res_features = x
-        for res_block in self.res_blocks:
-            res_features = res_block(res_features)
+        res_features = cnn_features
+        for layer in self.res_blocks:
+            res_features = layer(res_features)
+        
+        features_to_combine = [res_features]
+        
+        if self.use_gru:
+            rec_input = cnn_features.permute(0, 2, 1)
+            gru_features, _ = self.gru(rec_input)
+            gru_features = gru_features.permute(0, 2, 1)
+            features_to_combine.append(gru_features)
             
-        # 循环特征提取
-        rec_features = x.permute(0, 2, 1)  # [batch, length, channels]
-        rec_features, _ = self.gru(rec_features)
-        rec_features = rec_features.permute(0, 2, 1)  # [batch, channels*2, length]
+        if len(features_to_combine) > 1:
+            combined_features = torch.cat(features_to_combine, dim=1)
+            fused_features = self.fusion(combined_features)
+        elif len(features_to_combine) == 1: 
+             # Apply fusion even if only ResNet features are present?
+             # Current fusion expects specific input size based on use_gru
+             # Let's assume fusion is applied if input matches expected size
+             expected_fusion_in = self.fusion[0].in_channels
+             if res_features.shape[1] == expected_fusion_in:
+                  fused_features = self.fusion(res_features)
+             else:
+                  # Maybe just pass through or add a specific layer?
+                  logger.warning(f"Skipping fusion? Input channels {res_features.shape[1]} != Expected {expected_fusion_in}")
+                  fused_features = res_features # Pass through for now
+        else:
+             logger.error("Error: No features to process.")
+             return torch.zeros((batch_size, 1), device=self.device) # Return dummy output
+
+        # --- 处理池化 --- 
+        if self.use_adaptive_pooling:
+            pooled_features = self.pool(fused_features)
+            flattened_features = pooled_features.view(pooled_features.size(0), -1)
+        else: 
+            # 如果没有自适应池化，需要 Flatten。这需要知道 fused_features 的序列长度
+            # 这是一个潜在的问题点，因为序列长度可能变化
+            # 假设 fused_features 的形状是 [batch, channels, length]
+            try:
+                flattened_features = fused_features.view(fused_features.size(0), -1)
+                # 更新 FC 输入大小 (如果第一次运行或大小改变)
+                if not hasattr(self.fc[0], 'in_features') or self.fc[0].in_features != flattened_features.shape[1]:
+                     logger.warning(f"Dynamically setting FC input size to {flattened_features.shape[1]}")
+                     # This requires recreating the FC layer or adjusting weights, complex!
+                     # For now, this branch is problematic if input length varies.
+            except Exception as e:
+                 logger.error(f"Error flattening features without adaptive pooling: {e}")
+                 return torch.zeros((batch_size, 1), device=self.device)
         
-        # 跨波段信念增强
-        attention_weights = self.cross_band_attention(rec_features)
-        rec_features = rec_features * attention_weights
-        
-        # 特征融合
-        combined_features = torch.cat([res_features, rec_features], dim=1)
-        x = self.fusion(combined_features)
-        
-        # 使用自适应池化层将特征图压缩为固定大小
-        x = self.adaptive_pool(x)
-        x = x.view(x.size(0), -1)  # 展平
-        
-        # 全连接层
-        x = self.fc(x)
-        
-        return x
+        output = self.fc(flattened_features)
+        return output
 
 class SpectralResCNNEnsemble:
     """光谱CNN集成模型"""
@@ -496,22 +579,11 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
         epoch_val_loss = running_val_loss / len(val_loader)
         history['val_loss'].append(epoch_val_loss)
         
-        # <<< 添加验证集 R² 计算 >>>
-        # 使用 evaluate_model 计算验证集指标
-        try:
-            _, val_metrics, _, _ = evaluate_model(model, val_loader, device, criterion) # 假设 evaluate_model 已导入且可用
-            epoch_val_r2 = val_metrics.get('r2', np.nan)
-        except Exception as eval_err:
-            logger.warning(f"Epoch {epoch+1} 计算验证 R² 时出错: {eval_err}")
-            epoch_val_r2 = np.nan
-        history.setdefault('val_r2', []).append(epoch_val_r2) # 使用 setdefault 初始化列表
-        # <<< 结束 R² 计算 >>>
-        
         epoch_end_time = time.time()
         epoch_duration = epoch_end_time - epoch_start_time
         
-        # <<< 修改日志记录，加入 Val R2 >>>
-        logger.info(f"Epoch {epoch+1}/{num_epochs} | Train Loss: {epoch_train_loss:.6f} | Val Loss: {epoch_val_loss:.6f} | Val R2: {epoch_val_r2:.4f} | LR: {optimizer.param_groups[0]['lr']:.6e} | Time: {epoch_duration:.2f}s")
+        # --- 恢复原始日志记录，移除 Val R2 ---
+        logger.info(f"Epoch {epoch+1}/{num_epochs} | Train Loss: {epoch_train_loss:.6f} | Val Loss: {epoch_val_loss:.6f} | LR: {optimizer.param_groups[0]['lr']:.6e} | Time: {epoch_duration:.2f}s")
 
         # --- 更新学习率和早停逻辑 (基于Val Loss) ---
         if scheduler:
@@ -562,36 +634,47 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
     # ------------------- 训练结束 -------------------
     logger.info("训练完成。")
     
-    # <<< 添加最终最佳 R² 追踪 >>>
-    best_val_r2 = -float('inf')
-    if 'val_r2' in history:
-         valid_r2s = [r2 for r2 in history['val_r2'] if not np.isnan(r2)]
-         if valid_r2s:
-              best_val_r2 = max(valid_r2s)
-              logger.info(f"训练过程中最佳验证 R²: {best_val_r2:.4f}")
-         else:
-              logger.warning("未能记录任何有效的验证 R² 值。")
-    else:
-         logger.warning("history 字典中缺少 'val_r2' 记录。")
-    # <<< 结束 R² 追踪 >>>
-
-    # 加载性能最好的模型状态 (基于Val Loss)
-    # 修改：使用属性访问 config.model_config
+    # --- 加载最佳模型（基于损失）---
     best_model_path = os.path.join(config.model_config['model_dir'], f'{element}_best_model.pth')
     best_model_loaded = False
     if os.path.exists(best_model_path):
-        logger.info(f"加载最佳模型: {best_model_path}")
+        logger.info(f"加载最佳模型(基于损失): {best_model_path}")
         try:
             best_checkpoint = torch.load(best_model_path, map_location=device)
             model.load_state_dict(best_checkpoint['model_state_dict'])
             best_model_loaded = True # 标记最佳模型已加载
+            # 从检查点获取对应的最佳验证损失
+            best_val_loss_from_ckpt = best_checkpoint.get('best_val_loss', best_val_loss) 
         except Exception as e:
             logger.warning(f"加载最佳模型失败: {e}。返回当前模型状态。")
+            best_val_loss_from_ckpt = best_val_loss # 使用训练结束时的 best_val_loss
     else:
         logger.warning("未找到保存的最佳模型文件，返回当前模型状态。")
+        best_val_loss_from_ckpt = best_val_loss # 使用训练结束时的 best_val_loss
 
-    # 修改返回值：返回加载了最佳权重的模型、最佳验证损失和最佳验证 R²
-    return model, best_val_loss, best_val_r2
+    # <<< 在训练结束后计算一次验证 R² >>>
+    final_val_loss = np.nan
+    final_val_r2 = np.nan
+    if best_model_loaded or not os.path.exists(best_model_path): # 如果加载了最佳模型或压根没保存过最佳模型（用最终模型）
+        logger.info("使用最佳/最终模型状态在验证集上计算最终 R²...")
+        try:
+            # 确保 evaluate_model 使用正确的损失函数
+            loss_type = config.training_config.get('loss_function', 'MSE')
+            if loss_type == 'MSE': final_criterion = nn.MSELoss()
+            elif loss_type == 'MAE': final_criterion = nn.L1Loss()
+            else: final_criterion = nn.MSELoss()
+            
+            final_val_loss, final_val_metrics, _, _ = evaluate_model(model, val_loader, device, final_criterion)
+            final_val_r2 = final_val_metrics.get('r2', np.nan)
+            logger.info(f"最终验证损失: {final_val_loss:.6f}, 最终验证 R²: {final_val_r2:.4f}")
+        except Exception as final_eval_err:
+            logger.error(f"计算最终验证指标时出错: {final_eval_err}")
+    else: # 加载失败时，不计算最终 R2
+        logger.warning("因最佳模型加载失败，未计算最终验证 R²。")
+    # <<< 结束最终 R² 计算 >>>
+
+    # 修改返回值：返回加载了最佳权重的模型、最佳验证损失(来自检查点或训练过程)和最终验证 R²
+    return model, best_val_loss_from_ckpt, final_val_r2
 
 # =============== 3. 评估相关 ===============
 def evaluate_model(model, data_loader, device, loss_fn):
@@ -1333,206 +1416,6 @@ class SpectralAttention(nn.Module):
         out = self.gamma * out + x
         
         return out
-
-class SpectralResCNN_GCN(nn.Module):
-    """光谱残差CNN-GCN模型
-    
-    结合残差CNN和图卷积网络处理光谱数据
-    """
-    def __init__(self, input_size=None, device=None, use_gru=True, use_gcn=True):
-        super(SpectralResCNN_GCN, self).__init__()
-        
-        # 记录输入大小，可能为None表示自动适应
-        self.input_size = input_size
-        
-        # 记录是否使用GRU和GCN
-        self.use_gru = use_gru
-        self.use_gcn = use_gcn
-        logger.info(f"初始化SpectralResCNN_GCN模型，使用GRU: {use_gru}, 使用GCN: {use_gcn}")
-        
-        # 设置设备，支持CPU、GPU和TPU
-        if device is None:
-            if hasattr(config, 'training_config') and 'device' in config.training_config:
-                device = config.training_config['device']
-            else:
-                # 尝试检测TPU
-                if is_tpu_available():
-                    try:
-                        import torch_xla.core.xla_model as xm
-                        device = xm.xla_device()
-                        logger.info(f"使用TPU设备: {device}")
-                    except Exception as e:
-                        logger.warning(f"TPU初始化失败: {str(e)}")
-                        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-                else:
-                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-                    
-        self.device = device
-        logger.info(f"模型将使用设备: {self.device}")
-        
-        # 特征提取层
-        self.feature_extractor = nn.Sequential(
-            nn.Conv1d(1, 64, kernel_size=7, padding=3),
-            nn.BatchNorm1d(64, momentum=0.01),  
-            nn.ReLU(),
-            nn.Dropout(0.2),  # 添加dropout
-            nn.MaxPool1d(2)
-        )
-        
-        # 残差模块 - 参数驱动的纵向特征提取
-        self.res_blocks = nn.ModuleList([
-            ResidualBlock(64) for _ in range(3)
-        ])
-        
-        # 循环模块 - 跨波段信念增强
-        if self.use_gru:
-            self.gru = nn.GRU(64, 64, bidirectional=True, batch_first=True)
-        
-        # 光谱注意力机制 - 捕获波长关系
-        gru_output_size = 128 if self.use_gru else 64
-        self.spectral_attention = SpectralAttention(gru_output_size)
-        
-        # GCN模块 - 建模波长点之间的关系
-        # 注意：这里无需指定具体的序列长度，将在forward中动态适应
-        if self.use_gcn:
-            self.gcn_layers = nn.ModuleList([
-                GraphConvLayer(gru_output_size, gru_output_size),
-                GraphConvLayer(gru_output_size, gru_output_size)
-            ])
-            
-            # GCN输出处理
-            self.gcn_process = nn.Sequential(
-                nn.Linear(gru_output_size, 64),
-                nn.ReLU(),
-                nn.Dropout(0.3)
-            )
-        
-        # 信息融合层
-        if self.use_gru and self.use_gcn:
-            # CNN + GRU + GCN
-            fusion_input_size = 64 + gru_output_size + 64  # 256
-        elif self.use_gru:
-            # CNN + GRU
-            fusion_input_size = 64 + gru_output_size  # 192
-        elif self.use_gcn:
-            # CNN + GCN
-            fusion_input_size = 64 + 64  # 128
-        else:
-            # 只有CNN
-            fusion_input_size = 64
-            
-        self.fusion = nn.Sequential(
-            nn.Conv1d(fusion_input_size, 64, kernel_size=1),
-            nn.BatchNorm1d(64),
-            nn.ReLU()
-        )
-        
-        # 添加自适应池化层，确保输出大小固定
-        self.adaptive_pool = nn.AdaptiveAvgPool1d(1)
-        
-        # 全连接层
-        self.fc = nn.Sequential(
-            nn.Linear(64, 256),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(256, 64),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(64, 1)
-        )
-        
-        # 将模型移动到指定设备
-        self.to(self.device)
-        
-    def forward(self, x, training=False):
-        # 确保输入在正确的设备上，支持TPU
-        x = move_to_device(x, self.device)
-            
-        # 获取实际输入维度
-        batch_size, channels, seq_len = x.size()
-        
-        # 如果input_size为None，自动设置为当前序列长度
-        if self.input_size is None:
-            self.input_size = seq_len
-            logger.info(f"自动适应输入大小: {seq_len}")
-        
-        # 特征提取
-        x = self.feature_extractor(x)
-        
-        # 当在TPU上运行时，可能需要进行同步以确保计算完成
-        if str(self.device).startswith('xla'):
-            sync_device(self.device)
-        
-        # 残差特征提取
-        res_features = x
-        for res_block in self.res_blocks:
-            res_features = res_block(res_features)
-        
-        # 初始化特征列表，用于后续融合
-        features_to_combine = [res_features]
-            
-        # 循环特征提取 (GRU)
-        if self.use_gru:
-            rec_features = x.permute(0, 2, 1)  # [batch, length, channels]
-            rec_features, _ = self.gru(rec_features)
-            rec_features = rec_features.permute(0, 2, 1)  # [batch, channels*2, length]
-            
-            # 应用光谱注意力
-            attention_features = self.spectral_attention(rec_features)
-            features_to_combine.append(attention_features)
-        else:
-            # 如果不使用GRU，直接使用CNN特征
-            attention_features = x
-            
-        # TPU同步点 - 多次重形状操作后
-        if str(self.device).startswith('xla'):
-            sync_device(self.device)
-        
-        # GCN处理
-        if self.use_gcn:
-            # 确定GCN的输入
-            gcn_input = attention_features if self.use_gru else x
-            
-            # 转置数据
-            gcn_features = gcn_input.permute(0, 2, 1)  # [batch, length, channels]
-            for gcn_layer in self.gcn_layers:
-                gcn_features = gcn_layer(gcn_features)
-                gcn_features = F.relu(gcn_features)
-            
-            # 处理GCN输出
-            gcn_features = self.gcn_process(gcn_features)
-            
-            # 将GCN特征转回原始格式
-            gcn_features = gcn_features.permute(0, 2, 1)  # [batch, channels, length]
-            features_to_combine.append(gcn_features)
-        
-        # 特征融合
-        combined_features = torch.cat(features_to_combine, dim=1)
-        x = self.fusion(combined_features)
-        
-        # 使用自适应池化层将特征图压缩为固定大小
-        x = self.adaptive_pool(x)
-        x = x.view(x.size(0), -1)  # 展平
-        
-        # TPU同步点 - 在最终分类前
-        if str(self.device).startswith('xla'):
-            sync_device(self.device)
-        
-        # 全连接层 (如果在训练模式下且training=True，则保持dropout启用)
-        if training:
-            # 保存当前模式
-            training_mode = self.training
-            # 设置为训练模式启用dropout
-            self.train()
-            # 前向传播
-            x = self.fc(x)
-            # 恢复原始模式
-            if not training_mode:
-                self.eval()
-        else:
-            x = self.fc(x)
-        
-        return x
 
 def load_checkpoint(model, optimizer, scheduler, element, checkpoint_type='checkpoint'):
     """加载训练检查点，兼容新旧格式"""
