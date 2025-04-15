@@ -1619,13 +1619,15 @@ class LAMOSTPreprocessor:
                 print(f"去噪{spec_file}失败")
                 return None
             
-            # 4. 红移校正
-            wavelength_rest = self.correct_redshift(wavelength_corrected, flux_denoised, z)
-            print(f"红移校正后: 波长范围{wavelength_rest[0]}~{wavelength_rest[-1]}")
+            # 4. 红移校正 (REMOVED)
+            # wavelength_rest = self.correct_redshift(wavelength_corrected, flux_denoised, z)
+            # print(f"红移校正后: 波长范围{wavelength_rest[0]}~{wavelength_rest[-1]}")
+            # === Use wavelength_corrected instead of wavelength_rest for next step ===
             
             # 5. 重采样
             print(f"重采样到波长范围: {self.wavelength_range}, 点数={self.n_points}")
-            wavelength_resampled, flux_resampled = self.resample_spectrum(wavelength_rest, flux_denoised)
+            # === Pass wavelength_corrected to resample_spectrum ===
+            wavelength_resampled, flux_resampled = self.resample_spectrum(wavelength_corrected, flux_denoised) 
             if wavelength_resampled is None or flux_resampled is None:
                 print(f"重采样{spec_file}失败")
                 return None
@@ -1670,9 +1672,9 @@ class LAMOSTPreprocessor:
                     'original_wavelength': wavelength,
                     'original_flux': flux,
                     'wavelength_calibrated': wavelength_calibrated,
-                    'wavelength_corrected': wavelength_corrected,
+                    'wavelength_corrected': wavelength_corrected, # Keep this
                     'denoised_flux': flux_denoised,
-                    'wavelength_rest': wavelength_rest,
+                    # 'wavelength_rest': wavelength_rest, # REMOVED
                     'wavelength_resampled': wavelength_resampled, 
                     'flux_resampled': flux_resampled,
                     'flux_continuum': flux_continuum,
