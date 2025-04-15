@@ -456,7 +456,7 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
             verbose=True,
             min_lr=lr_min
         )
-    else:
+        else:
         logger.warning(f"不支持的学习率调度器类型: {scheduler_type}，将不使用调度器。")
     
     # 损失函数
@@ -481,9 +481,9 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
     if train_cfg.get('resume_training', True) and os.path.exists(checkpoint_path):
         try:
             logger.info(f"从检查点加载状态: {checkpoint_path}")
-            checkpoint = torch.load(checkpoint_path, map_location=device)
-            model.load_state_dict(checkpoint['model_state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                checkpoint = torch.load(checkpoint_path, map_location=device)
+                model.load_state_dict(checkpoint['model_state_dict'])
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             if scheduler and 'scheduler_state_dict' in checkpoint:
                 scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             start_epoch = checkpoint.get('epoch', 0) + 1
@@ -493,12 +493,12 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
             if scaler and 'scaler_state_dict' in checkpoint:
                  scaler.load_state_dict(checkpoint['scaler_state_dict'])
             logger.info(f"从 epoch {start_epoch} 继续训练")
-        except Exception as e:
+            except Exception as e:
             logger.warning(f"加载检查点失败: {e}，将从头开始训练。")
             start_epoch = 0
             best_val_loss = float('inf')
             patience_counter = 0
-    else:
+        else:
          logger.info("未找到检查点或未启用恢复，将从头开始训练。")
          start_epoch = 0
          best_val_loss = float('inf')
@@ -510,7 +510,7 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
         epoch_start_time = time.time()
         
         # --- 训练阶段 ---
-        model.train()
+            model.train()
         running_train_loss = 0.0
         train_pbar = tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1}/{num_epochs} [Train]")
         
@@ -521,8 +521,8 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
             if augment_fn:
                 inputs = augment_fn(inputs)
 
-            optimizer.zero_grad()
-            
+                optimizer.zero_grad()
+                
             # 混合精度
             if scaler:
                 with autocast():
@@ -551,7 +551,7 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
                 if gradient_clip_val > 0:
                     torch_utils.clip_grad_norm_(model.parameters(), gradient_clip_val)
                 optimizer.step()
-            
+                
             running_train_loss += loss.item()
             train_pbar.set_postfix(loss=f'{loss.item():.4f}')
         
@@ -560,10 +560,10 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
         history['lr'].append(optimizer.param_groups[0]['lr'])
 
         # --- 验证阶段 ---
-        model.eval()
+            model.eval()
         running_val_loss = 0.0
         val_pbar = tqdm(enumerate(val_loader), total=len(val_loader), desc=f"Epoch {epoch+1}/{num_epochs} [Val]")
-        with torch.no_grad():
+            with torch.no_grad():
             for i, (inputs, targets) in val_pbar:
                 inputs, targets = inputs.to(device), targets.to(device)
                 if scaler:
@@ -602,7 +602,7 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
             save_dict = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
-                'best_val_loss': best_val_loss,
+            'best_val_loss': best_val_loss,
             }
             torch.save(save_dict, best_model_path)
         else:
@@ -645,7 +645,7 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
             best_model_loaded = True # 标记最佳模型已加载
             # 从检查点获取对应的最佳验证损失
             best_val_loss_from_ckpt = best_checkpoint.get('best_val_loss', best_val_loss) 
-        except Exception as e:
+    except Exception as e:
             logger.warning(f"加载最佳模型失败: {e}。返回当前模型状态。")
             best_val_loss_from_ckpt = best_val_loss # 使用训练结束时的 best_val_loss
     else:
@@ -687,7 +687,7 @@ def evaluate_model(model, data_loader, device, loss_fn):
     # Determine if AMP should be enabled based on device
     amp_enabled = (str(device).startswith('cuda'))
     logger.info(f"[Evaluate V3] AMP enabled: {amp_enabled}")
-
+    
     with torch.no_grad():
         for i, (inputs, targets) in enumerate(data_loader):
             inputs = inputs.to(device, non_blocking=True) 
@@ -768,7 +768,7 @@ def evaluate_model(model, data_loader, device, loss_fn):
             metrics['rmse'] = np.sqrt(metrics['mse'])
             metrics['mae'] = mean_absolute_error(y_true_valid, y_pred_valid)
             metrics['r2'] = r2_score(y_true_valid, y_pred_valid)
-        except Exception as e:
+            except Exception as e:
             logger.error(f"计算评估指标时出错: {e}")
             metrics = {k: np.nan for k in ['mse', 'rmse', 'mae', 'r2']}
     else:
