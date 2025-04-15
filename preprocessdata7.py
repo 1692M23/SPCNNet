@@ -2912,13 +2912,13 @@ class LAMOSTPreprocessor:
         
         # 如果是处理后的光谱，显示处理效果
         if processed:
-            # 校准、速度校正、去噪、红移校正和重采样后的结果
+            # 校准、速度校正、去噪、和重采样后的结果
             ax2 = plt.subplot(4, 1, 2)
             plot_with_labels(ax2, wavelength_resampled, flux_resampled, 
                             (min(wavelength_resampled), max(wavelength_resampled)), 
-                            absorption_lines, color='green', label_name='Calibrated, Velocity Corrected, Denoised, Redshift Corrected & Resampled')
+                            absorption_lines, color='green', label_name='Calibrated, Velocity Corrected, Denoised & Resampled') # Removed Redshift Correction
             ax2.set_ylabel('Flux')
-            ax2.set_title("Spectrum after Calibration, Velocity Correction, Denoising, Redshift Correction & Resampling")
+            ax2.set_title("Spectrum after Calibration, Velocity Correction, Denoising & Resampling") # Removed Redshift Correction
             
             # 连续谱归一化 - 这是第三张图
             ax3 = plt.subplot(4, 1, 3)
@@ -2994,12 +2994,12 @@ class LAMOSTPreprocessor:
             
             # 显示处理过程 - 调整为符合要求的格式
             ax2 = plt.subplot(4, 1, 2)
-            # 校准、速度校正、去噪、红移校正和重采样后的结果
+            # 校准、速度校正、去噪、和重采样后的结果
             plot_with_labels(ax2, wavelength_resampled, flux_resampled, 
                            (min(wavelength_resampled), max(wavelength_resampled)), 
-                           absorption_lines, color='green', label_name='Calibrated, Velocity Corrected, Denoised, Redshift Corrected & Resampled')
+                           absorption_lines, color='green', label_name='Calibrated, Velocity Corrected, Denoised & Resampled') # Removed Redshift Correction
             ax2.set_ylabel('Flux')
-            ax2.set_title("Spectrum after Calibration, Velocity Correction, Denoising, Redshift Correction & Resampling")
+            ax2.set_title("Spectrum after Calibration, Velocity Correction, Denoising & Resampling") # Removed Redshift Correction
             
             # 连续谱归一化后的光谱
             ax3 = plt.subplot(4, 1, 3)
@@ -3491,7 +3491,7 @@ class LAMOSTPreprocessor:
                         continue
                     
                     # 检查缓存和处理该光谱
-                    cache_key = f"processed_{str(spec).replace('/', '_')}"
+                    cache_key = f"processed_spectrum_{str(spec).replace('/', '_')}"
                     cached_data = self.cache_manager.get_cache(cache_key)
                     
                     if cached_data is None:
