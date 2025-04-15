@@ -3435,34 +3435,34 @@ class LAMOSTPreprocessor:
         """
         print(f"准备可视化示例光谱...")
         
-        # 定义要处理的元素列表
-        elements_to_process = []
+        # === Use self.csv_files for robust path finding ===
+        csv_files_to_process = []
         if element:
-            elements_to_process = [element]
+            target_filename = f"{element}.csv"
+            found = False
+            for csv_path in self.csv_files:
+                if os.path.basename(csv_path) == target_filename:
+                    csv_files_to_process.append(csv_path)
+                    found = True
+                    break
+            if not found:
+                 print(f"错误: 在预处理器已知的CSV文件列表 {self.csv_files} 中找不到元素 '{element}' 对应的文件 '{target_filename}'")
+                 return
         else:
-            # 尝试从已知的CSV文件中获取元素列表
-            standard_elements = ['C_FE', 'MG_FE', 'CA_FE']
-            for elem in standard_elements:
-                if os.path.exists(f"{elem}.csv"):
-                    elements_to_process.append(elem)
+            csv_files_to_process = self.csv_files
         
-        if not elements_to_process:
-            print("未找到指定元素或任何标准元素的CSV文件")
+        if not csv_files_to_process:
+            print("错误: 没有找到有效的CSV文件进行可视化处理")
             return
         
-        print(f"将处理以下元素: {', '.join(elements_to_process)}")
+        print(f"将处理以下CSV文件进行可视化: {', '.join([os.path.basename(p) for p in csv_files_to_process])}")
         
-        # 处理每个元素
-        for elem in elements_to_process:
-            print(f"\n===== 处理元素: {elem} =====")
+        # 处理每个元素 (CSV文件)
+        for csv_path in csv_files_to_process:
+            element_name = os.path.basename(csv_path).split('.')[0]
+            print(f"\n===== 可视化元素: {element_name} (来自 {csv_path}) =====")
             
-            # 1. 查找该元素的CSV文件
-            csv_path = f"{elem}.csv"
-            if not os.path.exists(csv_path):
-                print(f"找不到{csv_path}，跳过此元素")
-                continue
-                
-            # 2. 读取CSV文件获取光谱文件列表
+            # 1. 读取CSV文件获取光谱文件列表 (No change needed here, uses correct csv_path)
             try:
                 import pandas as pd
                 df = pd.read_csv(csv_path)
@@ -3525,7 +3525,7 @@ class LAMOSTPreprocessor:
                         traceback.print_exc()
                         
             except Exception as e:
-                print(f"处理元素{elem}时出错: {e}")
+                print(f"处理元素{element}时出错: {e}")
                 import traceback
                 traceback.print_exc()
                 
