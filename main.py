@@ -706,12 +706,11 @@ def process_element(element, config, architecture_params={}):
                 # Calculate limits based on valid data
                 min_val = min(np.min(y_true), np.min(y_pred)) if len(y_true)>0 else 0
                 max_val = max(np.max(y_true), np.max(y_pred)) if len(y_true)>0 else 1
-                plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Ideal (y=x)')
+                plt.plot([min_val, max_val], [min_val, max_val], 'r--') # Removed label
                 plt.title(f'Prediction vs True for {element}')
                 plt.xlabel('True Values')
                 plt.ylabel('Predicted Values')
-                plt.grid(True)
-                plt.legend()
+                plt.legend() # Keep legend if other elements are added later
                 # Use defined element_plot_dir
                 scatter_path = os.path.join(element_plot_dir, f'{element}_scatter_pred_true.png') 
                 plt.savefig(scatter_path)
@@ -726,7 +725,7 @@ def process_element(element, config, architecture_params={}):
                 plt.title(f'Residuals vs True for {element}')
                 plt.xlabel('True Values')
                 plt.ylabel('Residuals (True - Predicted)')
-                plt.grid(True)
+                plt.legend() # Keep legend if other elements are added later
                 # Use defined element_plot_dir
                 residual_path = os.path.join(element_plot_dir, f'{element}_residuals.png') 
                 plt.savefig(residual_path)
@@ -744,7 +743,6 @@ def process_element(element, config, architecture_params={}):
                 plt.title(f'Residual Distribution for {element} (Mean: {mean_residual:.4f}, Std: {std_residual:.4f})')
                 plt.xlabel('Residual Value')
                 plt.ylabel('Frequency')
-                plt.grid(True)
                 plt.legend()
                 # Use defined element_plot_dir
                 hist_path = os.path.join(element_plot_dir, f'{element}_residuals_hist.png') 

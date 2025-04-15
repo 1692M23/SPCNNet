@@ -150,7 +150,14 @@ def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None,
                  logger.error("请在 config.py 中设置 model_config['input_size']")
                  continue # 跳过此参数组合
 
-        from model import SpectralResCNN, SpectralResCNN_GCN
+        # 导入模型
+        try:
+            # 尝试从项目根目录下的 model.py 导入
+            from model import SpectralResCNN_GCN
+        except ImportError:
+            # 如果失败，尝试从当前目录导入（可能作为独立脚本运行）
+            pass
+
         use_gru = params.get('use_gru', True)
         use_gcn = params.get('use_gcn', True)
         dropout_rate = params.get('dropout_rate', 0.5)
