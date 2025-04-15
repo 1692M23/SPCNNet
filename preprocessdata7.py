@@ -3491,7 +3491,7 @@ class LAMOSTPreprocessor:
                         continue
                     
                     # 检查缓存和处理该光谱
-                    cache_key = f"processed_{spec.replace('/', '_')}"
+                    cache_key = f"processed_{str(spec).replace('/', '_')}"
                     cached_data = self.cache_manager.get_cache(cache_key)
                     
                     if cached_data is None:
