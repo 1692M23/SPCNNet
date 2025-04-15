@@ -530,22 +530,22 @@ class LAMOSTPreprocessor:
                             if z != 0:
                                 break
                 
-                # 获取信噪比信息(尝试多种可能的关键字)
+                # --- Read SNR info only if read_mode is 'full' ---
                 snr = 0
-                for key in ['SNR', 'SNRATIO', 'SN', 'S/N', 'snr']:
-                    if key in header:
-                        snr = header.get(key, 0)
-                        print(f"从FITS头信息中找到信噪比: {key} = {snr}")
-                        break
-                
-                # 获取五段区间的信噪比信息
                 snr_bands = {'snru': 0, 'snrg': 0, 'snrr': 0, 'snri': 0, 'snrz': 0}
-                for band in snr_bands:
-                    for variation in [band, band.upper(), band.capitalize()]:
-                        if variation in header:
-                            snr_bands[band] = header.get(variation, 0)
-                            print(f"从FITS头信息中找到{band}波段信噪比: {snr_bands[band]}")
+                if read_mode == 'full':
+                    for key in ['SNR', 'SNRATIO', 'SN', 'S/N', 'snr']:
+                        if key in header:
+                            snr = header.get(key, 0)
+                            print(f"从FITS头信息中找到信噪比: {key} = {snr}")
                             break
+                    
+                    for band in snr_bands:
+                        for variation in [band, band.upper(), band.capitalize()]:
+                            if variation in header:
+                                snr_bands[band] = header.get(variation, 0)
+                                print(f"从FITS头信息中找到{band}波段信噪比: {snr_bands[band]}")
+                                break
                 
                 # ===== Conditional Flux Reading based on read_mode =====
                 flux = None
@@ -620,7 +620,8 @@ class LAMOSTPreprocessor:
                                             flux = flux_data[0].astype(np.float64)
                                         else:
                                             flux = np.array(flux_data, dtype=np.float64).flatten()
-                                        print(f"从列 '{flux_col}' 提取流量数据, 点数={len(flux)}")
+                                        # === Log flux extraction only if successful ===
+                                        print(f"从列 '{flux_col}' 提取流量数据, 点数={len(flux)}") 
                                     except Exception as e:
                                         print(f"从表格提取流量出错: {e}")
                                         flux = None
@@ -2164,25 +2165,21 @@ class LAMOSTPreprocessor:
                                 print(f"无法找到文件: {spec_file}")
                                 continue
                                 
-                            # 读取FITS文件，获取波长和流量 (Call with read_mode='wavelength_only')
+                            # 读取FITS文件，获取波长 (只读波长模式)
                             wavelength, _, _, _, _, _ = self.read_fits_file(file_path, read_mode='wavelength_only')
-                            if wavelength is None:
-                                print(f"无法读取波长数据: {file_path}")
-                                continue
                             
-                            # 检查并过滤无效值
-                            valid_mask = ~np.isnan(flux) & ~np.isinf(flux)
-                            if not np.any(valid_mask):
-                                print(f"所有流量值都是无效的: {file_path}")
+                            # === Use wavelength directly, remove flux dependency ===
+                            if wavelength is None or len(wavelength) < 2:
+                                print(f"无法读取有效波长或点数太少: {file_path}")
+                                continue
+
+                            # Check for NaN/Inf in wavelength itself
+                            if np.isnan(wavelength).any() or np.isinf(wavelength).any():
+                                print(f"警告: 文件 {spec_file} 的波长数据包含无效值，跳过此文件")
                                 continue
                                 
-                            wavelength_valid = wavelength[valid_mask]
-                            if len(wavelength_valid) < 2:
-                                print(f"有效波长点数太少: {file_path}")
-                                continue
-                                
-                            # 获取波长范围
-                            w_min, w_max = wavelength_valid.min(), wavelength_valid.max()
+                            # 获取波长范围 (removed flux dependency)
+                            w_min, w_max = wavelength.min(), wavelength.max()
                             self.processed_ranges.append((w_min, w_max))
                             
                             # 保存波长范围到缓存 - 使用字典格式
