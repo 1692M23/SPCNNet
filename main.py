@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
@@ -702,23 +701,24 @@ def process_element(element, config, architecture_params={}):
                 # 绘制散点图: 预测值 vs 真实值
                 plt.figure(figsize=(10, 6))
                 # Use valid data for plotting
-                plt.scatter(y_true, y_pred, alpha=0.5) 
+                plt.scatter(y_true, y_pred, alpha=0.5, color='black') # Change color to black
                 # 添加 y=x 对角线作为参考
                 # Calculate limits based on valid data
                 min_val = min(np.min(y_true), np.min(y_pred)) if len(y_true)>0 else 0
                 max_val = max(np.max(y_true), np.max(y_pred)) if len(y_true)>0 else 1
-                plt.plot([min_val, max_val], [min_val, max_val], 'r--') # Removed label
+                plt.plot([min_val, max_val], [min_val, max_val], 'r--') # Change color to red
                 plt.title(f'Prediction vs True for {element}')
                 plt.xlabel('True Values')
                 plt.ylabel('Predicted Values')
-                plt.legend() # Keep legend if other elements are added later
+                # plt.legend() # Removed legend as only one line
+                # plt.grid(True, alpha=0.3) # Remove grid
                 # Use defined element_plot_dir
                 scatter_path = os.path.join(element_plot_dir, f'{element}_scatter_pred_true.png') 
                 plt.savefig(scatter_path)
                 plt.close()
                 logger.info(f"散点图已保存至: {scatter_path}")
 
-                # 绘制残差图: 残差 vs 真实值
+                # 绘制残差图: 残差 vs 真实值 (Original)
                 residuals = y_true - y_pred
                 plt.figure(figsize=(10, 6))
                 plt.scatter(y_true, residuals, alpha=0.5)
@@ -726,30 +726,50 @@ def process_element(element, config, architecture_params={}):
                 plt.title(f'Residuals vs True for {element}')
                 plt.xlabel('True Values')
                 plt.ylabel('Residuals (True - Predicted)')
-                plt.legend() # Keep legend if other elements are added later
+                # plt.legend() # Removed legend
+                # plt.grid(True, alpha=0.3) # Remove grid
                 # Use defined element_plot_dir
-                residual_path = os.path.join(element_plot_dir, f'{element}_residuals.png') 
-                plt.savefig(residual_path)
+                residual_true_path = os.path.join(element_plot_dir, f'{element}_residuals_vs_true.png') 
+                plt.savefig(residual_true_path)
                 plt.close()
-                logger.info(f"残差图已保存至: {residual_path}")
-                
-                # 绘制残差分布直方图
+                logger.info(f"残差图 (vs True) 已保存至: {residual_true_path}")
+
+                # --- 添加残差图: 残差 vs 预测值 --- 
                 plt.figure(figsize=(10, 6))
-                plt.hist(residuals, bins=30, alpha=0.7, density=True)
-                # 添加均值和标准差信息
+                plt.scatter(y_pred, residuals, alpha=0.5, color='blue') # Use blue color
+                plt.axhline(0, color='red', linestyle='--')
+                plt.title(f'Residuals vs Predicted for {element}')
+                plt.xlabel('Predicted Values')
+                plt.ylabel('Residuals (True - Predicted)')
+                # plt.grid(True, alpha=0.3) # Remove grid
+                residual_pred_path = os.path.join(element_plot_dir, f'{element}_residuals_vs_pred.png')
+                plt.savefig(residual_pred_path)
+                plt.close()
+                logger.info(f"残差图 (vs Predicted) 已保存至: {residual_pred_path}")
+                # --- 结束添加残差图 ---
+                
+                # 绘制残差分布直方图 (多颜色版本)
+                hist_colors = ['orange', 'blue', 'green']
                 mean_residual = np.mean(residuals)
                 std_residual = np.std(residuals)
-                plt.axvline(mean_residual, color='red', linestyle='--', label=f'Mean: {mean_residual:.4f}')
-                plt.axvline(0, color='green', linestyle='-', label='Zero Error') # Add zero line
-                plt.title(f'Residual Distribution for {element} (Mean: {mean_residual:.4f}, Std: {std_residual:.4f})')
-                plt.xlabel('Residual Value')
-                plt.ylabel('Frequency')
-                plt.legend()
-                # Use defined element_plot_dir
-                hist_path = os.path.join(element_plot_dir, f'{element}_residuals_hist.png') 
-                plt.savefig(hist_path)
-                plt.close()
-                logger.info(f"残差直方图已保存至: {hist_path}")
+                
+                for color in hist_colors:
+                    plt.figure(figsize=(10, 6))
+                    # 使用 density=True 来绘制频率密度而不是频数
+                    plt.hist(residuals, bins=30, alpha=0.7, density=True, color=color, label=f'{color.capitalize()} Histogram')
+                    # 添加均值和标准差信息
+                    plt.axvline(mean_residual, color='red', linestyle='--', label=f'Mean: {mean_residual:.4f}')
+                    plt.axvline(0, color='black', linestyle='-', label='Zero Error') # Change zero line color to black
+                    plt.title(f'Residual Distribution for {element} (Mean: {mean_residual:.4f}, Std: {std_residual:.4f})')
+                    plt.xlabel('Residual Value')
+                    plt.ylabel('Density') # Y-axis is Density now
+                    plt.legend()
+                    # plt.grid(True, alpha=0.3) # Remove grid
+                    # Use defined element_plot_dir and add color to filename
+                    hist_path = os.path.join(element_plot_dir, f'{element}_residuals_hist_{color}.png') 
+                    plt.savefig(hist_path)
+                    plt.close()
+                    logger.info(f"残差直方图 ({color}) 已保存至: {hist_path}")
 
             else:
                  logger.warning(f"元素 {element} 没有有效的预测数据，无法生成可视化图表。")
