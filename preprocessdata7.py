@@ -95,7 +95,7 @@ class LAMOSTPreprocessor:
                  wavelength_range=[3690, 9100],  # 修改为固定值[3690,9100]，强制使用此波长范围
                  n_points=None,  # 修改为None，点数将根据波长范围和步长自动计算
                  log_step=0.0001,  # 新增：对数空间中的重采样步长（dex）
-                 compute_common_range=False,  # 修改为False，不再计算公共波长范围
+                 compute_common_range=True,  # 修改为True，不再计算公共波长范围
                  n_splits=5,     # 交叉验证折数
                  max_workers=None,  # 最大工作进程数，None表示自动确定
                  batch_size=20,  # 批处理大小
@@ -821,7 +821,20 @@ class LAMOSTPreprocessor:
             
             # 使用固定的波长范围，不再计算公共范围
             # 即使设置了compute_common_range，也忽略它
-            w_min, w_max = 3690, 9100  # 强制使用固定范围
+            # w_min, w_max = 3690, 9100  # 强制使用固定范围
+            # === Use self.wavelength_range determined in stage 1 or default ===
+            if not hasattr(self, 'wavelength_range') or self.wavelength_range is None or len(self.wavelength_range) != 2:
+                print("警告：未设置有效的公共波长范围，使用默认值 [3690, 9100]")
+                w_min, w_max = 3690, 9100
+            else:
+                # 确保从元组解包的是数字
+                try:
+                    w_min = float(self.wavelength_range[0])
+                    w_max = float(self.wavelength_range[1])
+                    print(f"使用公共波长范围进行重采样: {w_min:.2f}~{w_max:.2f}")
+                except (TypeError, ValueError):
+                    print(f"警告：存储的波长范围无效 {self.wavelength_range}，使用默认值 [3690, 9100]")
+                    w_min, w_max = 3690, 9100
             
             # 在对数空间中进行重采样
             log_w_min = np.log10(w_min)
@@ -3696,7 +3709,7 @@ def main():
         wavelength_range=[3690, 9100],  # 使用固定值[3690,9100]，强制使用此波长范围
         n_points=None,  # 修改为None，点数将根据波长范围和步长自动计算
         log_step=0.0001,  # 新增：对数空间中的重采样步长（dex）
-        compute_common_range=False,  # 修改为False，不再计算公共波长范围
+        compute_common_range=True,  # 修改为True，不再计算公共波长范围
         max_workers=args.max_workers if args.max_workers is not None else (1 if low_memory_mode else 2),
         batch_size=5 if low_memory_mode else args.batch_size,
         memory_limit=args.memory_limit,
