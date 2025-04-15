@@ -159,15 +159,12 @@ def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None,
             pass
 
         use_gru = params.get('use_gru', True)
-        use_gcn = params.get('use_gcn', True)
+        # use_gcn = params.get('use_gcn', True) # Removed, GCN is no longer part of the model
         dropout_rate = params.get('dropout_rate', 0.5)
         
-        # 创建模型实例
-        if use_gcn:
-             model = SpectralResCNN_GCN(input_size=input_size, device=device, use_gru=use_gru, use_gcn=use_gcn)
-        else:
-             model = SpectralResCNN(input_size=input_size)
-             model = model.to(device)
+        # 创建模型实例 (GCN is removed, always create SpectralResCNN_GCN)
+        model = SpectralResCNN_GCN(input_size=input_size, device=device, use_gru=use_gru)
+        
         # 设置dropout率 (需要确保模型创建后设置)
         for module in model.modules():
              if isinstance(module, torch.nn.Dropout):
@@ -200,7 +197,7 @@ def hyperparameter_tuning(element, train_loader, val_loader, param_grid=None,
                 'model_config': {
                     'model_dir': os.path.join(results_dir, 'models'),
                     'use_gru': use_gru,
-                    'use_gcn': use_gcn
+                    'use_gcn': False
                 }
             }
             # Ensure that the lr value is not None if neither key was found
