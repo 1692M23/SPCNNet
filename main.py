@@ -756,7 +756,21 @@ def process_element(element, config, architecture_params={}):
                 for color in hist_colors:
                     plt.figure(figsize=(10, 6))
                     # 使用 density=True 来绘制频率密度而不是频数
-                    plt.hist(residuals, bins=30, alpha=0.7, density=True, color=color, label=f'{color.capitalize()} Histogram')
+                    n, bins, patches = plt.hist(residuals, bins=30, alpha=0.7, density=True, color=color, label=f'{color.capitalize()} Histogram')
+                    
+                    # --- 添加 KDE 曲线 --- 
+                    try:
+                        from scipy.stats import gaussian_kde
+                        kde = gaussian_kde(residuals)
+                        x_range = np.linspace(bins[0], bins[-1], 500)
+                        kde_y = kde(x_range)
+                        plt.plot(x_range, kde_y, color='black', linestyle='-', linewidth=1.5, label='KDE')
+                    except ImportError:
+                        logger.warning("Scipy 未安装，无法绘制 KDE 曲线。请运行 'pip install scipy'")
+                    except Exception as kde_err:
+                        logger.warning(f"绘制 KDE 曲线时出错: {kde_err}")
+                    # --- 结束添加 KDE --- 
+
                     # 添加均值和标准差信息
                     plt.axvline(mean_residual, color='red', linestyle='--', label=f'Mean: {mean_residual:.4f}')
                     plt.axvline(0, color='black', linestyle='-', label='Zero Error') # Change zero line color to black
@@ -770,6 +784,71 @@ def process_element(element, config, architecture_params={}):
                     plt.savefig(hist_path)
                     plt.close()
                     logger.info(f"残差直方图 ({color}) 已保存至: {hist_path}")
+
+                # --- 添加箱线图 --- 
+                plt.figure(figsize=(8, 6))
+                plt.boxplot(residuals, vert=True, patch_artist=True, showmeans=True)
+                plt.title(f'Residual Box Plot for {element}')
+                plt.ylabel('Residual Value')
+                plt.xticks([1], ['Residuals']) # Label the x-axis category
+                # plt.grid(axis='y', linestyle='--', alpha=0.7) # Optionally add horizontal grid
+                boxplot_path = os.path.join(element_plot_dir, f'{element}_residuals_boxplot.png')
+                plt.savefig(boxplot_path)
+                plt.close()
+                logger.info(f"残差箱线图已保存至: {boxplot_path}")
+                # --- 结束添加箱线图 --- 
+
+                # --- 添加误差棒图 (方案四：按预测值分箱) --- 
+                try:
+                    num_bins = 10 # 可以调整分箱数量
+                    # 创建预测值的分箱边界
+                    bin_edges = np.linspace(np.min(y_pred), np.max(y_pred), num_bins + 1)
+                    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                    
+                    # 计算每个箱子内残差的均值和标准差
+                    bin_means = np.zeros(num_bins)
+                    bin_stds = np.zeros(num_bins)
+                    bin_counts = np.zeros(num_bins, dtype=int)
+                    
+                    # 使用 pandas 更方便地进行分箱计算
+                    df_temp = pd.DataFrame({'y_pred': y_pred, 'residuals': residuals})
+                    df_temp['bin'] = pd.cut(df_temp['y_pred'], bins=bin_edges, include_lowest=True, labels=False)
+                    
+                    grouped = df_temp.groupby('bin')['residuals']
+                    bin_means = grouped.mean().fillna(0) # Fill NaN if a bin is empty
+                    bin_stds = grouped.std().fillna(0)  # Fill NaN if a bin is empty
+                    bin_counts = grouped.count()
+                    
+                    # 仅绘制包含数据的箱子
+                    valid_bins_mask = bin_counts > 0
+                    valid_bin_centers = bin_centers[valid_bins_mask]
+                    valid_bin_means = bin_means[valid_bins_mask]
+                    valid_bin_stds = bin_stds[valid_bins_mask]
+
+                    if len(valid_bin_centers) > 0:
+                        plt.figure(figsize=(12, 7))
+                        plt.errorbar(valid_bin_centers, valid_bin_means, yerr=valid_bin_stds, 
+                                     fmt='o', # 点标记
+                                     capsize=5, # 误差棒末端帽子的大小
+                                     linestyle='-', # 连接点的线
+                                     label='Mean Residual ± Std Dev')
+                        plt.axhline(0, color='red', linestyle='--', label='Zero Error')
+                        plt.title(f'Mean Residual vs. Binned Predicted Value for {element}')
+                        plt.xlabel('Predicted Value Bins')
+                        plt.ylabel('Mean Residual in Bin')
+                        plt.legend()
+                        # plt.grid(True, linestyle='--', alpha=0.5)
+                        errorbar_path = os.path.join(element_plot_dir, f'{element}_residuals_errorbar_vs_pred_bins.png')
+                        plt.savefig(errorbar_path)
+                        plt.close()
+                        logger.info(f"残差误差棒图 (按预测值分箱) 已保存至: {errorbar_path}")
+                    else:
+                         logger.warning(f"元素 {element} 没有足够的有效分箱数据，无法生成误差棒图。")
+
+                except Exception as e:
+                    logger.error(f"绘制误差棒图时出错: {e}")
+                    logger.error(traceback.format_exc())
+                # --- 结束添加误差棒图 --- 
 
             else:
                  logger.warning(f"元素 {element} 没有有效的预测数据，无法生成可视化图表。")
