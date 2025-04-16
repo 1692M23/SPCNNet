@@ -811,7 +811,8 @@ def process_element(element, config, architecture_params={}):
                     bin_counts = np.zeros(num_bins, dtype=int)
                     
                     # 使用 pandas 更方便地进行分箱计算
-                    df_temp = pd.DataFrame({'y_pred': y_pred, 'residuals': residuals})
+                    # --- Convert y_pred to float32 before creating DataFrame --- 
+                    df_temp = pd.DataFrame({'y_pred': y_pred.astype(np.float32), 'residuals': residuals})
                     df_temp['bin'] = pd.cut(df_temp['y_pred'], bins=bin_edges, include_lowest=True, labels=False)
                     
                     grouped = df_temp.groupby('bin')['residuals']
