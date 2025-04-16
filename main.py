@@ -79,7 +79,8 @@ def add_noise(data, noise_level=0.01):
 def load_data(data_path, element=None):
     """加载数据集并返回numpy数组"""
     try:
-        data = np.load(data_path)
+        # <<< MODIFIED: Added allow_pickle=True >>>
+        data = np.load(data_path, allow_pickle=True)
         # 检查并适应不同的键名约定
         if 'spectra' in data:
             X = data['spectra']
