@@ -860,6 +860,13 @@ def process_element(element, config, architecture_params={}):
                     bin_stds = grouped.std().fillna(0)  # Fill NaN if a bin is empty
                     bin_counts = grouped.count()
                     
+                    # --- Reindex to ensure arrays have size num_bins --- 
+                    full_index = pd.RangeIndex(num_bins) # Index from 0 to num_bins-1
+                    bin_means = bin_means.reindex(full_index, fill_value=0)
+                    bin_stds = bin_stds.reindex(full_index, fill_value=0)
+                    bin_counts = bin_counts.reindex(full_index, fill_value=0)
+                    # --- End Reindex --- 
+
                     # 仅绘制包含数据的箱子
                     valid_bins_mask = bin_counts > 0
                     valid_bin_centers = bin_centers[valid_bins_mask]
