@@ -244,7 +244,7 @@ def train_and_evaluate_model(model, train_loader, val_loader, test_loader, eleme
             logger.info("未找到训练状态文件，从头开始训练")
         
         # 训练模型
-        best_model, val_loss, val_r2 = train(
+        best_model, val_loss, val_r2, history = train(
             model=model,
             train_loader=train_loader,
             val_loader=val_loader,
@@ -279,12 +279,12 @@ def train_and_evaluate_model(model, train_loader, val_loader, test_loader, eleme
             logger.warning(f"元素 {element} 未能训练出有效模型，无法进行测试评估")
             test_metrics = {'mse': float('nan'), 'mae': float('nan'), 'r2': float('nan')} # 或者其他表示失败的值
 
-        return best_model, val_loss, test_metrics
+        return best_model, val_loss, test_metrics, history
         
     except Exception as e:
         logger.error(f"训练元素 {element} 时出错: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
-        raise
+        raise # Re-raise the exception after logging
 
 def hyperparameter_tuning(element, train_loader, val_loader, config):
     """
@@ -345,50 +345,87 @@ def hyperparameter_tuning(element, train_loader, val_loader, config):
         logger.error(f"超参数调优过程中发生错误: {e}", exc_info=True)
         return None
 
-def visualize_training(element, train_metrics, val_metrics, output_dir=None):
+def visualize_training_progress(element, history, output_dir):
     """
-    可视化训练过程
-    
-    参数:
+    可视化训练过程中的损失和指标
+
+    Args:
         element (str): 元素名称
-        train_metrics (dict): 训练指标
-        val_metrics (dict): 验证指标
-        output_dir (str): 输出目录
+        history (dict): 包含训练/验证指标历史的字典
+                       (e.g., {'train_loss': [], 'val_loss': [], 'val_mae': [], 'val_r2': [], 'lr': []})
+        output_dir (str): 保存绘图的目录
     """
-    if output_dir is None:
-        output_dir = config.output_config['plots_dir']
-    
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # 绘制损失曲线
-    plt.figure(figsize=(10, 6))
-    plt.plot(train_metrics['loss'], label='Training Loss')
-    plt.plot(val_metrics['loss'], label='Validation Loss')
-    plt.title(f'Training Process for {element}')
+    epochs = range(1, len(history['train_loss']) + 1)
+
+    plt.style.use('seaborn-v0_8-whitegrid') # Use a clean style
+
+    # 1. Plot Loss (Train vs Val)
+    plt.figure(figsize=(12, 7))
+    plt.plot(epochs, history['train_loss'], 'o-', label='Training Loss')
+    plt.plot(epochs, history['val_loss'], 'o-', label='Validation Loss')
+    plt.title(f'{element} - Training & Validation Loss')
     plt.xlabel('Epoch')
-    plt.ylabel('Loss')
+    plt.ylabel('Loss (MSE)')
     plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    # 保存图表
-    plt.savefig(os.path.join(output_dir, f'{element}_training_loss.png'), dpi=300, bbox_inches='tight')
+    plt.tight_layout()
+    loss_plot_path = os.path.join(output_dir, f'{element}_loss_curve.png')
+    plt.savefig(loss_plot_path)
     plt.close()
-    
-    # 绘制MAE曲线
-    plt.figure(figsize=(10, 6))
-    plt.plot(train_metrics['mae'], label='Training MAE')
-    plt.plot(val_metrics['mae'], label='Validation MAE')
-    plt.title(f'Training Process for {element}')
-    plt.xlabel('Epoch')
-    plt.ylabel('MAE')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    # 保存图表
-    plt.savefig(os.path.join(output_dir, f'{element}_training_mae.png'), dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    logger.info(f"已保存训练过程可视化图表")
+    logger.info(f"训练/验证损失曲线已保存: {loss_plot_path}")
+
+    # 2. Plot Validation R2
+    if 'val_r2' in history and any(not np.isnan(r2) for r2 in history['val_r2']):
+        plt.figure(figsize=(12, 7))
+        plt.plot(epochs, history['val_r2'], 'o-', label='Validation R²', color='green')
+        plt.title(f'{element} - Validation R² Score')
+        plt.xlabel('Epoch')
+        plt.ylabel('R² Score')
+        # Adjust y-axis limits to focus on meaningful range, handling potential NaNs
+        valid_r2 = [r2 for r2 in history['val_r2'] if not np.isnan(r2)]
+        if valid_r2:
+             min_r2 = min(valid_r2)
+             plt.ylim(bottom=max(-1, min_r2 - 0.1)) # Adjust y-axis bottom limit, ensure not lower than -1
+        else:
+             plt.ylim(bottom=-1.1) # Default if no valid R2
+        plt.legend()
+        plt.tight_layout()
+        r2_plot_path = os.path.join(output_dir, f'{element}_val_r2_curve.png')
+        plt.savefig(r2_plot_path)
+        plt.close()
+        logger.info(f"验证 R² 曲线已保存: {r2_plot_path}")
+    else:
+        logger.warning(f"元素 {element} 缺少有效的验证 R² 数据，跳过绘图。")
+
+    # 3. Plot Validation MAE
+    if 'val_mae' in history and any(not np.isnan(mae) for mae in history['val_mae']):
+        plt.figure(figsize=(12, 7))
+        plt.plot(epochs, history['val_mae'], 'o-', label='Validation MAE', color='orange')
+        plt.title(f'{element} - Validation MAE')
+        plt.xlabel('Epoch')
+        plt.ylabel('Mean Absolute Error')
+        plt.legend()
+        plt.tight_layout()
+        mae_plot_path = os.path.join(output_dir, f'{element}_val_mae_curve.png')
+        plt.savefig(mae_plot_path)
+        plt.close()
+        logger.info(f"验证 MAE 曲线已保存: {mae_plot_path}")
+    else:
+         logger.warning(f"元素 {element} 缺少有效的验证 MAE 数据，跳过绘图。")
+
+    # 4. Plot Learning Rate
+    if 'lr' in history and history['lr']:
+        plt.figure(figsize=(12, 7))
+        plt.plot(epochs, history['lr'], 'o-', label='Learning Rate', color='purple')
+        plt.title(f'{element} - Learning Rate Schedule')
+        plt.xlabel('Epoch')
+        plt.ylabel('Learning Rate')
+        plt.yscale('log') # Use log scale for LR typically
+        plt.legend()
+        plt.tight_layout()
+        lr_plot_path = os.path.join(output_dir, f'{element}_lr_curve.png')
+        plt.savefig(lr_plot_path)
+        plt.close()
+        logger.info(f"学习率曲线已保存: {lr_plot_path}")
 
 class TrainingStateManager:
     """
@@ -631,7 +668,7 @@ def process_element(element, config, architecture_params={}):
             logger.warning("无法使用TPU并行数据加载器，使用标准加载器")
     
     # 进行训练和评估
-    best_model, val_loss, test_metrics = train_and_evaluate_model(
+    best_model, val_loss, test_metrics, training_history = train_and_evaluate_model(
         model, train_loader, val_loader, test_loader, element, device, config, augment_fn=augment_fn
     )
     
@@ -801,8 +838,11 @@ def process_element(element, config, architecture_params={}):
                 # --- 添加误差棒图 (方案四：按预测值分箱) --- 
                 try:
                     num_bins = 10 # 可以调整分箱数量
-                    # 创建预测值的分箱边界
-                    bin_edges = np.linspace(np.min(y_pred), np.max(y_pred), num_bins + 1)
+                    # --- Ensure bin_edges are float64 --- 
+                    pred_min = np.min(y_pred).astype(np.float64) # Convert min to float64
+                    pred_max = np.max(y_pred).astype(np.float64) # Convert max to float64
+                    # 创建预测值的分箱边界, specify dtype=float64
+                    bin_edges = np.linspace(pred_min, pred_max, num_bins + 1, dtype=np.float64)
                     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
                     
                     # 计算每个箱子内残差的均值和标准差
@@ -853,6 +893,10 @@ def process_element(element, config, architecture_params={}):
 
             else:
                  logger.warning(f"元素 {element} 没有有效的预测数据，无法生成可视化图表。")
+
+        # <<< Plot training progress using the history >>> 
+        if training_history:
+             visualize_training_progress(element, training_history, element_plot_dir)
 
     except NameError as ne:
         logger.error(f"生成可视化图表时变量未定义: {ne}") # Specific logging for NameError

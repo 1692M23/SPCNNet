@@ -473,7 +473,8 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
     # 状态变量
     best_val_loss = initial_best_val_loss
     patience_counter = initial_patience
-    history = {'train_loss': [], 'val_loss': [], 'lr': []}
+    # <<< Initialize history dict >>>
+    history = {'train_loss': [], 'val_loss': [], 'val_mae': [], 'val_r2': [], 'lr': []}
     
     # 加载检查点 (如果存在且需要)
     model_cfg = config.model_config # 修改：使用属性访问
@@ -582,8 +583,42 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
         epoch_end_time = time.time()
         epoch_duration = epoch_end_time - epoch_start_time
         
-        # --- 恢复原始日志记录，移除 Val R2 ---
-        logger.info(f"Epoch {epoch+1}/{num_epochs} | Train Loss: {epoch_train_loss:.6f} | Val Loss: {epoch_val_loss:.6f} | LR: {optimizer.param_groups[0]['lr']:.6e} | Time: {epoch_duration:.2f}s")
+        # --- Calculate and Log Validation MAE and R2 --- 
+        epoch_val_mae = np.nan
+        epoch_val_r2 = np.nan
+        all_val_outputs = []
+        all_val_targets = []
+        model.eval() # Ensure model is in eval mode
+        with torch.no_grad():
+             for inputs, targets in val_loader:
+                 inputs, targets = inputs.to(device), targets.to(device)
+                 if scaler:
+                     with autocast():
+                         outputs = model(inputs)
+                 else:
+                     outputs = model(inputs)
+                 all_val_outputs.append(outputs.cpu().float().numpy())
+                 all_val_targets.append(targets.cpu().float().numpy())
+        
+        try:
+            if all_val_outputs and all_val_targets:
+                y_pred_val = np.vstack(all_val_outputs).astype(np.float32).flatten()
+                y_true_val = np.vstack(all_val_targets).astype(np.float32).flatten()
+                valid_mask_val = ~np.isnan(y_pred_val) & ~np.isnan(y_true_val)
+                y_pred_val_valid = y_pred_val[valid_mask_val]
+                y_true_val_valid = y_true_val[valid_mask_val]
+                if len(y_pred_val_valid) > 0:
+                    epoch_val_mae = mean_absolute_error(y_true_val_valid, y_pred_val_valid)
+                    epoch_val_r2 = r2_score(y_true_val_valid, y_pred_val_valid)
+        except Exception as metric_err:
+             logger.warning(f"Epoch {epoch+1} - 计算验证 MAE/R2 时出错: {metric_err}")
+
+        history['val_mae'].append(epoch_val_mae)
+        history['val_r2'].append(epoch_val_r2)
+        # --- End Calculation --- 
+
+        # <<< Updated Logging with MAE/R2 >>>
+        logger.info(f"Epoch {epoch+1}/{num_epochs} | Train Loss: {epoch_train_loss:.6f} | Val Loss: {epoch_val_loss:.6f} | Val MAE: {epoch_val_mae:.4f} | Val R2: {epoch_val_r2:.4f} | LR: {optimizer.param_groups[0]['lr']:.6e} | Time: {epoch_duration:.2f}s")
 
         # --- 更新学习率和早停逻辑 (基于Val Loss) ---
         if scheduler:
@@ -674,7 +709,8 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
     # <<< 结束最终 R² 计算 >>>
 
     # 修改返回值：返回加载了最佳权重的模型、最佳验证损失(来自检查点或训练过程)和最终验证 R²
-    return model, best_val_loss_from_ckpt, final_val_r2
+    # <<< MODIFIED: Return history dict >>>
+    return model, best_val_loss_from_ckpt, final_val_r2, history
 
 # =============== 3. 评估相关 ===============
 def evaluate_model(model, data_loader, device, loss_fn):
