@@ -141,13 +141,27 @@ model_config = {
     'model_dir': 'models',
     'input_size': None,  # 设为None，表示模型将自动适应输入大小
     'model_type': 'SpectralResCNN_GCN',  # 使用新的GCN模型
-    'model_params': {
-        'cnn_channels': 64,
-        'res_blocks': 3,
-        'gru_hidden': 64,
-        'gru_bidirectional': True,
-        'gcn_layers': 2,      # GCN层数
-        'fusion_channels': 64
+    #'model_params': {
+    #    'cnn_channels': 64,
+    #    'res_blocks': 3,
+    #    'gru_hidden': 64,
+    #    'gru_bidirectional': True,
+    #    'gcn_layers': 2,      # GCN层数
+    #    'fusion_channels': 64
+    'architecture_params': {            # model_params
+        'initial_channels': 64,         # (保持或根据需要调整)
+        'initial_kernel_size': 7,       # (保持或根据需要调整)
+        'initial_dropout': 0.1,         # <<< 降低初始 Dropout 率 >>>
+        'num_res_blocks': 3,            # (保持或根据需要调整)
+        'res_channels': 64,             # (保持或根据需要调整)
+        'res_kernel_size': 3,           # (保持或根据需要调整)
+        'res_dropout': 0.0,             # <<< 保持残差块间 Dropout 为 0 (或尝试 0.1) >>>
+        'gru_hidden_size': 64,          # (如果使用 GRU)
+        'gru_num_layers': 1,            # (如果使用 GRU)
+        'gru_dropout': 0.0,             # (如果使用 GRU 且层数>1)
+        'fc_hidden_layers': [256, 64],  # (保持或根据需要调整)
+        'fc_dropout': [0.25, 0.15],     # <<< 大幅降低 FC Dropout 率 >>>
+        'use_adaptive_pooling': True
     },
     'resample_dim': 3000,              # 光谱重采样维度
     'denoise': True,                   # 是否去噪
@@ -174,7 +188,7 @@ model_config = {
 training_config = {
     'batch_size': 32,
     'lr': 0.0005,            # 可能需要调整学习率适应新模型
-    'weight_decay': 1e-4,
+    'weight_decay': 5e-4,               # <<< 增大 Weight Decay >>>
     'force_new_model': True,
     'num_epochs': 100,
     'early_stopping_patience': 20,
@@ -190,13 +204,20 @@ training_config = {
         'use_xla_compilation': True,  # 是否使用XLA编译加速
         'use_dynamic_shapes': False,  # 是否使用动态形状（某些操作在TPU上需要固定形状）
     },
-    'scheduler': 'cosine',  # 调度器类型
+    'scheduler': 'reduce_lr_on_plateau', #'cosine',  # 调度器类型
     'scheduler_params': {
-        'T_0': 5,          # 初始周期长度
-        'T_mult': 1,       # 周期倍增因子
-        'eta_min': 5e-6    # 最小学习率
+        # --- CosineAnnealing 的参数 (注释掉或删除) ---
+        #'T_0': 5,          # 初始周期长度
+        #'T_mult': 1,       # 周期倍增因子
+        #'eta_min': 5e-6    # 最小学习率
+        # --- ReduceLROnPlateau 的参数 ---
+        'mode': 'min',                  # 监控 val_loss (最小值)
+        'factor': 0.3,                  # <<< 学习率衰减因子 (e.g., 0.2, 0.3, 0.5) >>>
+        'patience': 5,                  # <<< 容忍多少个 epoch val_loss 不下降 >>>
+        'verbose': True,                # 打印学习率变化信息
+        'min_lr': 1e-7                  # <<< 最小学习率 >>>
     },
-    'lr_min': 1e-6  # 最小学习率
+    'lr_min': 1e-7                      # (保持或与 scheduler_params['min_lr'] 一致)
 }
 
 # 超参数调优配置
@@ -204,7 +225,7 @@ tuning_config = {
     # 传统网格搜索参数 (作为备选)
     'param_grid': {
         'learning_rate': [5e-5, 1e-4, 5e-4, 0.001],
-        'batch_size': [32, 64, 128],
+        'batch_size': [32, 64],
         'weight_decay': [1e-6, 1e-5, 1e-4],
         'use_gru': [True, False],
         # 'use_gcn': [True, False] # Removed as GCN is no longer used
@@ -225,9 +246,9 @@ tuning_config = {
         'stage1': {                    # 第一阶段广泛搜索
             'lr': [1e-5, 5e-5, 1e-4, 5e-4, 1e-3],
             'weight_decay': [1e-6, 5e-6, 1e-5, 5e-5, 1e-4],
-            'batch_size': [16, 32, 64, 128],
-            'dropout_rate': [0.2, 0.3, 0.4, 0.5, 0.6],
-            'patience': [10, 15, 20],
+            'batch_size': [32, 64],
+            'dropout_rate': [0.1, 0.2, 0.3, 0.4, 0.5],
+            'patience': [20],
         },
         'stage2_range': {             # 第二阶段精细调整范围 (相对于第一阶段最佳值)
             'lr': [0.5, 2.0],         # 学习率范围系数 [最佳值*0.5, 最佳值*2.0]
