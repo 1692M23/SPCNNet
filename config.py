@@ -113,7 +113,7 @@ data_config = {
     'normalize': True,
     'standardize': True,
     'remove_outliers': True,
-    'outlier_threshold': 3.0,  # 标准差的倍数
+    'outlier_threshold': 0.25,  # 标准差的倍数,3→0.65
     'wavelength_range': None,  # 设为None，表示使用最大公有波长范围
     'resample_dim': 3000,              # 光谱重采样维度
     'denoise': True,                   # 是否去噪
