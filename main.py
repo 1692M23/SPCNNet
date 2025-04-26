@@ -1901,24 +1901,38 @@ def main():
                      final_use_gcn = getattr(config, 'use_gcn', True)
                      logger.info(f"[Main Loop] 调用 process_element 前确认配置: use_gru={final_use_gru}, use_gcn={final_use_gcn}")
                      
-                     # <<< 添加架构参数传递 >>>
-                     arch_params = {}
-                     if best_params: # 假设 best_params 包含已调优的架构参数
-                         # 从 best_params 提取架构相关的键值对
+                     # --- 修改：先从 config 加载基础架构参数 ---
+                     base_arch_params = config.model_config.get('architecture_params', {})
+                     logger.info(f"[Main Loop] 从 config 加载基础架构参数: {base_arch_params}")
+
+                     # --- 然后，如果 best_params 存在，用它来覆盖或更新 ---
+                     final_arch_params = base_arch_params.copy() # Start with base config
+                     if best_params:
+                         logger.info(f"[Main Loop] 找到 best_params，尝试用其更新架构参数: {best_params}")
                          arch_keys = ['initial_channels', 'initial_kernel_size', 'initial_dropout',
                                       'num_res_blocks', 'res_channels', 'res_kernel_size', 'res_dropout',
                                       'gru_hidden_size', 'gru_num_layers', 'gru_dropout',
                                       'fc_hidden_layers', 'fc_dropout', 'use_adaptive_pooling']
+                         update_count = 0
                          for key in arch_keys:
                              if key in best_params:
-                                 arch_params[key] = best_params[key]
-                         if arch_params:
-                              logger.info(f"[Main Loop] 检测到架构参数，传递给 process_element: {arch_params}")
-                     # <<< 结束架构参数传递 >>>
-                     
-                     process_element(element, 
-                                     config=config, # 直接传递config对象
-                                     architecture_params=arch_params # 传递架构参数字典
+                                 # 检查值是否真的改变，避免不必要的日志
+                                 if final_arch_params.get(key) != best_params[key]:
+                                     logger.info(f"  > 更新 {key} 从 {final_arch_params.get(key)} 为 {best_params[key]}")
+                                     final_arch_params[key] = best_params[key]
+                                     update_count += 1
+                         if update_count == 0:
+                              logger.info("  > best_params 未导致架构参数实际更新。")
+
+                     if final_arch_params != base_arch_params:
+                         logger.info(f"[Main Loop] 最终传递给 process_element 的架构参数: {final_arch_params}")
+                     else:
+                         logger.info("[Main Loop] 使用来自 config 的基础架构参数。")
+                     # --- 结束修改 ---
+
+                     process_element(element,
+                                     config=config,
+                                     architecture_params=final_arch_params # <<< 传递最终合并后的参数 >>>
                                      )
                  except Exception as process_err:
                      logger.error(f"在调用 process_element 处理元素 {element} 时出错: {str(process_err)}")
