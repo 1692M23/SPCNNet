@@ -206,16 +206,16 @@ training_config = {
     },
     'scheduler': 'reduce_lr_on_plateau', #'cosine',  # 调度器类型
     'scheduler_params': {
-        # --- CosineAnnealing 的参数 (注释掉或删除) ---
-        #'T_0': 5,          # 初始周期长度
-        #'T_mult': 1,       # 周期倍增因子
-        #'eta_min': 5e-6    # 最小学习率
+        # --- CosineAnnealing 的参数 ---
+        'T_0': 25,          # 初始周期长度，5
+        'T_mult': 1,       # 周期倍增因子
+        'eta_min': 5e-6    # 最小学习率
         # --- ReduceLROnPlateau 的参数 ---
-        'mode': 'min',                  # 监控 val_loss (最小值)
-        'factor': 0.3,                  # <<< 学习率衰减因子 (e.g., 0.2, 0.3, 0.5) >>>
-        'patience': 5,                  # <<< 容忍多少个 epoch val_loss 不下降 >>>
-        'verbose': True,                # 打印学习率变化信息
-        'min_lr': 1e-7                  # <<< 最小学习率 >>>
+        #'mode': 'min',                  # 监控 val_loss (最小值)
+        #'factor': 0.3,                  # <<< 学习率衰减因子 (e.g., 0.2, 0.3, 0.5) >>>
+        #'patience': 5,                  # <<< 容忍多少个 epoch val_loss 不下降 >>>
+        #'verbose': True,                # 打印学习率变化信息
+        #'min_lr': 1e-7                  # <<< 最小学习率 >>>
     },
     'lr_min': 1e-7                      # (保持或与 scheduler_params['min_lr'] 一致)
 }
