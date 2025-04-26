@@ -459,8 +459,31 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
     else:
         logger.warning(f"不支持的学习率调度器类型: {scheduler_type}，将不使用调度器。")
     
-    # 损失函数
-    criterion = nn.MSELoss()
+    # --- 修改损失函数初始化逻辑 ---
+    loss_type = train_cfg.get('loss_function', 'MSE') # 默认使用 MSE
+    loss_params = train_cfg.get('loss_params', {})   # 获取损失函数参数
+
+    logger.info(f"使用损失函数: {loss_type}，参数: {loss_params}")
+
+    if loss_type == 'WeightedMSE':
+        # 从 loss_params 获取参数，如果不存在则使用默认值
+        threshold = loss_params.get('threshold', 0.2)
+        high_weight = loss_params.get('high_weight', 2.0)
+        criterion = WeightedMSELoss(threshold=threshold, high_weight=high_weight)
+        logger.info(f"  WeightedMSELoss - threshold: {threshold}, high_weight: {high_weight}")
+    elif loss_type == 'Huber':
+        # 从 loss_params 获取 delta 参数
+        delta = loss_params.get('delta', 1.0) # HuberLoss 默认 delta=1.0
+        criterion = nn.HuberLoss(delta=delta)
+        logger.info(f"  HuberLoss - delta: {delta}")
+    elif loss_type == 'MAE':
+        criterion = nn.L1Loss()
+    elif loss_type == 'MSE':
+        criterion = nn.MSELoss()
+    else:
+        logger.warning(f"未知的损失函数类型: {loss_type}，将使用默认的 MSELoss。")
+        criterion = nn.MSELoss()
+    # --- 结束修改 ---
     
     # 混合精度训练 (如果设备支持)
     scaler = None

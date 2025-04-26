@@ -217,7 +217,16 @@ training_config = {
         #'verbose': True,                # 打印学习率变化信息
         #'min_lr': 1e-7                  # <<< 最小学习率 >>>
     },
-    'lr_min': 1e-7                      # (保持或与 scheduler_params['min_lr'] 一致)
+    'lr_min': 1e-7,                      # (保持或与 scheduler_params['min_lr'] 一致)
+
+    # --- 添加损失函数配置 ---
+    'loss_function': 'WeightedMSE',   # 指定损失函数类型 ('MSE', 'WeightedMSE', 'Huber', etc.)
+    'loss_params': {                # 损失函数的参数
+        'threshold': 0.3,           # WeightedMSELoss 的 threshold
+        'high_weight': 3.0          # WeightedMSELoss 的 high_weight
+        # 如果使用 Huber, 可以添加 'delta': 0.1 等
+    }
+    # --- 结束添加 ---
 }
 
 # 超参数调优配置
