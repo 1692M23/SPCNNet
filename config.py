@@ -188,7 +188,7 @@ model_config = {
 training_config = {
     'batch_size': 32,
     'lr': 0.0005,            # 可能需要调整学习率适应新模型
-    'weight_decay': 2e-4,               # <<< 增大 Weight Decay，5e-4 >>>
+    'weight_decay': 5e-4,               # <<< 增大 Weight Decay，5e-4 >>>
     'force_new_model': True,
     'num_epochs': 100,
     'early_stopping_patience': 20,
@@ -204,18 +204,18 @@ training_config = {
         'use_xla_compilation': True,  # 是否使用XLA编译加速
         'use_dynamic_shapes': False,  # 是否使用动态形状（某些操作在TPU上需要固定形状）
     },
-    'scheduler': 'cosine', #'reduce_lr_on_plateau',  # 调度器类型
+    'scheduler': 'reduce_lr_on_plateau', #'cosine',  # 调度器类型
     'scheduler_params': {
         # --- CosineAnnealing 的参数 ---
-        'T_0': 30,          # 初始周期长度，(5)，25
-        'T_mult': 1,       # 周期倍增因子
-        'eta_min': 1e-7    # 最小学习率,5e-6
+        #'T_0': 30,          # 初始周期长度，(5)，25
+        #'T_mult': 1,       # 周期倍增因子
+        #'eta_min': 1e-7    # 最小学习率,5e-6
         # --- ReduceLROnPlateau 的参数 ---
-        #'mode': 'min',                  # 监控 val_loss (最小值)
-        #'factor': 0.3,                  # <<< 学习率衰减因子 (e.g., 0.2, 0.3, 0.5) >>>
-        #'patience': 5,                  # <<< 容忍多少个 epoch val_loss 不下降 >>>
-        #'verbose': True,                # 打印学习率变化信息
-        #'min_lr': 1e-7                  # <<< 最小学习率 >>>
+        'mode': 'min',                  # 监控 val_loss (最小值)
+        'factor': 0.3,                  # <<< 学习率衰减因子 (e.g., 0.2, 0.3, 0.5) >>>
+        'patience': 5,                  # <<< 容忍多少个 epoch val_loss 不下降 >>>
+        'verbose': True,                # 打印学习率变化信息
+        'min_lr': 1e-7                  # <<< 最小学习率 >>>
     },
     'lr_min': 1e-7,                      # (保持或与 scheduler_params['min_lr'] 一致)
 
