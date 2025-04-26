@@ -188,7 +188,7 @@ model_config = {
 training_config = {
     'batch_size': 32,
     'lr': 0.0005,            # 可能需要调整学习率适应新模型
-    'weight_decay': 5e-4,               # <<< 增大 Weight Decay >>>
+    'weight_decay': 2e-4,               # <<< 增大 Weight Decay，5e-4 >>>
     'force_new_model': True,
     'num_epochs': 100,
     'early_stopping_patience': 20,
@@ -207,9 +207,9 @@ training_config = {
     'scheduler': 'reduce_lr_on_plateau', #'cosine',  # 调度器类型
     'scheduler_params': {
         # --- CosineAnnealing 的参数 ---
-        'T_0': 25,          # 初始周期长度，5
+        'T_0': 30,          # 初始周期长度，(5)，25
         'T_mult': 1,       # 周期倍增因子
-        'eta_min': 5e-6    # 最小学习率
+        'eta_min': 1e-7    # 最小学习率,5e-6
         # --- ReduceLROnPlateau 的参数 ---
         #'mode': 'min',                  # 监控 val_loss (最小值)
         #'factor': 0.3,                  # <<< 学习率衰减因子 (e.g., 0.2, 0.3, 0.5) >>>
@@ -220,12 +220,14 @@ training_config = {
     'lr_min': 1e-7,                      # (保持或与 scheduler_params['min_lr'] 一致)
 
     # --- 添加损失函数配置 ---
-    'loss_function': 'WeightedMSE',   # 指定损失函数类型 ('MSE', 'WeightedMSE', 'Huber', etc.)
-    'loss_params': {                # 损失函数的参数，若使用mse，则写{}（空）
-        'threshold': 0.3,           # WeightedMSELoss 的 threshold
-        'high_weight': 3.0          # WeightedMSELoss 的 high_weight
+    'loss_function': 'MSE',   # 指定损失函数类型 ('MSE', 'WeightedMSE', 'Huber', etc.)
+    'loss_params': {}  
+    #'loss_function': 'WeightedMSE',   # 指定损失函数类型 ('MSE', 'WeightedMSE', 'Huber', etc.)
+    #'loss_params': {                # 损失函数的参数，若使用mse，则写{}（空）
+    #    'threshold': 0.3,           # WeightedMSELoss 的 threshold
+    #    'high_weight': 3.0          # WeightedMSELoss 的 high_weight
         # 如果使用 Huber, 可以添加 'delta': 0.1 等
-    }
+    #}
     # --- 结束添加 ---
 }
 
