@@ -113,7 +113,7 @@ data_config = {
     'normalize': True,
     'standardize': True,
     'remove_outliers': True,
-    'outlier_threshold': 0.25,  # 标准差的倍数,3→0.65
+    'outlier_threshold': 3.0,  # 标准差的倍数,3→0.65
     'wavelength_range': None,  # 设为None，表示使用最大公有波长范围
     'resample_dim': 3000,              # 光谱重采样维度
     'denoise': True,                   # 是否去噪
@@ -221,7 +221,7 @@ training_config = {
 
     # --- 添加损失函数配置 ---
     'loss_function': 'WeightedMSE',   # 指定损失函数类型 ('MSE', 'WeightedMSE', 'Huber', etc.)
-    'loss_params': {                # 损失函数的参数
+    'loss_params': {                # 损失函数的参数，若使用mse，则写{}（空）
         'threshold': 0.3,           # WeightedMSELoss 的 threshold
         'high_weight': 3.0          # WeightedMSELoss 的 high_weight
         # 如果使用 Huber, 可以添加 'delta': 0.1 等
