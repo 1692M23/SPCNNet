@@ -204,7 +204,7 @@ training_config = {
         'use_xla_compilation': True,  # 是否使用XLA编译加速
         'use_dynamic_shapes': False,  # 是否使用动态形状（某些操作在TPU上需要固定形状）
     },
-    'scheduler': 'reduce_lr_on_plateau', #'cosine',  # 调度器类型
+    'scheduler': 'cosine', #'reduce_lr_on_plateau',  # 调度器类型
     'scheduler_params': {
         # --- CosineAnnealing 的参数 ---
         'T_0': 30,          # 初始周期长度，(5)，25
