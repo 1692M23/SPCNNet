@@ -132,9 +132,11 @@ class ResidualBlock(nn.Module):
         super(ResidualBlock, self).__init__()
         padding = kernel_size // 2 # 自动计算 padding 保持尺寸
         self.conv1 = nn.Conv1d(channels, channels, kernel_size=kernel_size, padding=padding)
-        self.bn1 = nn.BatchNorm1d(channels)
+        # <<< Add momentum=0.5 to BatchNorm1d >>>
+        self.bn1 = nn.BatchNorm1d(channels, momentum=0.5)
         self.conv2 = nn.Conv1d(channels, channels, kernel_size=kernel_size, padding=padding)
-        self.bn2 = nn.BatchNorm1d(channels)
+        # <<< Add momentum=0.5 to BatchNorm1d >>>
+        self.bn2 = nn.BatchNorm1d(channels, momentum=0.5)
         
     def forward(self, x):
         identity = x
@@ -179,7 +181,8 @@ class SpectralResCNN_GCN(nn.Module):
         # --- 初始特征提取层 (参数化) ---
         self.feature_extractor = nn.Sequential(
             nn.Conv1d(1, initial_channels, kernel_size=initial_kernel_size, padding=initial_kernel_size//2),
-            nn.BatchNorm1d(initial_channels),
+            # <<< Add momentum=0.5 to BatchNorm1d >>>
+            nn.BatchNorm1d(initial_channels, momentum=0.5),
             nn.ReLU(),
             nn.Dropout(initial_dropout),
             nn.MaxPool1d(2)
@@ -211,7 +214,8 @@ class SpectralResCNN_GCN(nn.Module):
         fusion_output_channels = 64 # 暂时固定
         self.fusion = nn.Sequential(
             nn.Conv1d(fusion_input_size, fusion_output_channels, kernel_size=1),
-            nn.BatchNorm1d(fusion_output_channels),
+            # <<< Add momentum=0.5 to BatchNorm1d >>>
+            nn.BatchNorm1d(fusion_output_channels, momentum=0.5),
             nn.ReLU()
         )
         
