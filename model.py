@@ -783,9 +783,28 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
         try:
             # 确保 evaluate_model 使用正确的损失函数
             loss_type = config.training_config.get('loss_function', 'MSE')
-            if loss_type == 'MSE': final_criterion = nn.MSELoss()
-            elif loss_type == 'MAE': final_criterion = nn.L1Loss()
-            else: final_criterion = nn.MSELoss()
+            loss_params = config.training_config.get('loss_params', {})
+            
+            # <<< FIX: Add handling for Huber and WeightedMSE Loss >>>
+            if loss_type == 'MSE': 
+                final_criterion = nn.MSELoss()
+                logger.info("最终评估使用: MSELoss")
+            elif loss_type == 'MAE': 
+                final_criterion = nn.L1Loss()
+                logger.info("最终评估使用: MAELoss (L1Loss)")
+            elif loss_type == 'Huber':
+                delta = loss_params.get('delta', 1.0)
+                final_criterion = nn.HuberLoss(delta=delta)
+                logger.info(f"最终评估使用: HuberLoss (delta={delta})")
+            elif loss_type == 'WeightedMSE': # Assuming WeightedMSELoss class is defined
+                threshold = loss_params.get('threshold', 0.2)
+                high_weight = loss_params.get('high_weight', 2.0)
+                final_criterion = WeightedMSELoss(threshold=threshold, high_weight=high_weight)
+                logger.info(f"最终评估使用: WeightedMSELoss (thresh={threshold}, weight={high_weight})")
+            else: 
+                logger.warning(f"未知的损失函数类型 '{loss_type}' 用于最终评估，将默认使用 MSELoss。")
+                final_criterion = nn.MSELoss()
+            # <<< END FIX >>>
             
             final_val_loss, final_val_metrics, _, _ = evaluate_model(model, val_loader, device, final_criterion)
             final_val_r2 = final_val_metrics.get('r2', np.nan)
