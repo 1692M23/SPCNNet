@@ -212,12 +212,12 @@ model_config = {
 training_config = {
     'batch_size': 32,
     'lr': 0.0005,            # 可能需要调整学习率适应新模型
-    'optimizer_type': 'Adam',  # Options: 'AdamW', 'Adam', 'RMSprop' (ensure wd is appropriate)
-    'weight_decay': 1e-7,      # Default WD suitable for AdamW
+    'optimizer_type': 'AdamW',  # Options: 'AdamW', 'Adam', 'RMSprop' (ensure wd is appropriate)
+    'weight_decay': 5e-4,      # Default WD suitable for AdamW
     'force_new_model': True,
     'num_epochs': 100,
     'early_stopping_patience': 20,
-    'gradient_clip_val': 1.0, # 添加梯度裁剪阈值，降低或可限制尖峰
+    'gradient_clip_val': 0.5, # 添加梯度裁剪阈值，降低或可限制尖峰，1
     'device': device_config['device'],  # 使用检测到的设备
     'device_type': device_config['device_type'],  # 设备类型（'cpu', 'cuda', 或 'tpu'）
     'multi_device': device_config['multi_device'],  # 是否有多个设备可用
