@@ -223,12 +223,8 @@ training_config = {
     'num_devices': device_config['num_devices'],  # 设备数量
     'elements': ['C_FE', 'MG_FE', 'CA_FE'],
     'resume_training': True,
-    'loss_function': 'WeightedMSE',
-    'loss_params': {
-        'threshold': 0.2,      # Threshold to define 'high' values
-        'high_weight': 2.5     # Weight multiplier for high values
-        # 'delta': 1.0         # Parameter for HuberLoss (if used)
-    },
+    'loss_function': 'MSE',
+    'loss_params': {},
     # TPU特定配置
     'tpu_config': {
         'use_xla_compilation': True,  # 是否使用XLA编译加速
@@ -243,7 +239,7 @@ training_config = {
         # --- ReduceLROnPlateau 的参数 ---
         'mode': 'min',                  # 监控 val_loss (最小值)
         'factor': 0.3,                  # <<< 学习率衰减因子 (e.g., 0.2, 0.3, 0.5) >>>
-        'patience': 7,                  # <<< 容忍多少个 epoch val_loss 不下降 >>>,大可能平滑早期
+        'patience': 10,                 # Increase patience slightly
         'verbose': True,                # 打印学习率变化信息
         'min_lr': 1e-7                  # <<< 最小学习率 >>>
     },
