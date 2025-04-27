@@ -265,9 +265,9 @@ def train_and_evaluate_model(model, train_loader, val_loader, test_loader, eleme
         elif loss_type == 'MAE': # Example for MAE
              loss_fn = torch.nn.L1Loss()
         else:
-             logger.warning(f"未知的损失函数类型 '{loss_type}'，将默认使用 MSELoss。")
+             logger.warning(f"未知的损失函数类型 '{loss_type}' 用于测试集评估，将默认使用 MSELoss。")
              loss_fn = torch.nn.MSELoss()
-        logger.info(f"在最终评估中使用损失函数: {loss_type}")
+        logger.info(f"在最终（测试集）评估中使用损失函数: {loss_type}")
         # <<< End define loss_fn >>>
 
         # 训练完成后，使用 test_loader 评估最佳模型
