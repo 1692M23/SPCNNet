@@ -213,7 +213,7 @@ training_config = {
     'batch_size': 32,
     'lr': 0.0005,            # 可能需要调整学习率适应新模型
     'optimizer_type': 'Adam',  # Options: 'AdamW', 'Adam', 'RMSprop' (ensure wd is appropriate)
-    'weight_decay': 5e-4,      # Default WD suitable for AdamW
+    'weight_decay': 1e-7,      # Default WD suitable for AdamW
     'force_new_model': True,
     'num_epochs': 100,
     'early_stopping_patience': 20,
