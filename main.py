@@ -260,14 +260,20 @@ def train_and_evaluate_model(model, train_loader, val_loader, test_loader, eleme
         # Assuming MSELoss is the appropriate loss function here, same as used in train?
         # Need to get loss_type from config if it varies
         loss_type = config.training_config.get('loss_function', 'MSE')
-        if loss_type == 'MSE':
+        actual_loss_used = loss_type # Track the actual loss function being used
+        
+        if loss_type.upper() == 'MSE': # Use upper() for case-insensitivity
              loss_fn = torch.nn.MSELoss()
-        elif loss_type == 'MAE': # Example for MAE
+        elif loss_type.upper() == 'MAE': # Use upper() for case-insensitivity
              loss_fn = torch.nn.L1Loss()
+        elif loss_type.upper() == 'HUBER': # Add Huber loss support
+             loss_fn = torch.nn.HuberLoss() # Instantiate HuberLoss
         else:
              logger.warning(f"未知的损失函数类型 '{loss_type}' 用于测试集评估，将默认使用 MSELoss。")
              loss_fn = torch.nn.MSELoss()
-        logger.info(f"在最终（测试集）评估中使用损失函数: {loss_type}")
+             actual_loss_used = 'MSE' # Update the actual loss used tracker
+        
+        logger.info(f"在最终（测试集）评估中使用损失函数: {actual_loss_used}") # Log the actual loss used
         # <<< End define loss_fn >>>
 
         # 训练完成后，使用 test_loader 评估最佳模型

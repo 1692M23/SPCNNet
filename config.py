@@ -184,7 +184,7 @@ model_config = {
         'gru_num_layers': 1,            # (如果使用 GRU)
         'gru_dropout': 0.0,             # (如果使用 GRU 且层数>1)
         'fc_hidden_layers': [256, 64],  # (保持或根据需要调整)
-        'fc_dropout': [0.4, 0.3],     # <<< 大幅降低 FC Dropout 率 >>>
+        'fc_dropout': [0.25, 0.15],     # <<< 大幅降低 FC Dropout 率 >>>
         'use_adaptive_pooling': True
     },
     'resample_dim': 3000,              # 光谱重采样维度
