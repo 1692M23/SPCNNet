@@ -239,7 +239,7 @@ training_config = {
         # --- ReduceLROnPlateau 的参数 ---
         'mode': 'min',                  # 监控 val_loss (最小值)
         'factor': 0.3,                  # <<< 学习率衰减因子 (e.g., 0.2, 0.3, 0.5) >>>
-        'patience': 10,                 # Increase patience slightly
+        'patience': 7,                 # Increase patience slightly
         'verbose': True,                # 打印学习率变化信息
         'min_lr': 1e-7                  # <<< 最小学习率 >>>
     },
