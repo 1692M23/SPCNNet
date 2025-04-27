@@ -435,8 +435,26 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
         model = model.to(device)
         logger.info(f"模型已移动到设备: {device}")
     
-    # 初始化优化器
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    # <<< Initialize Optimizer based on Config >>>
+    optimizer_type = train_cfg.get('optimizer_type', 'AdamW').lower()
+    # Note: lr and weight_decay are read earlier from train_cfg
+    if optimizer_type == 'adamw':
+        optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        logger.info(f"使用 AdamW 优化器 (lr={lr}, weight_decay={weight_decay})")
+    elif optimizer_type == 'adam':
+        # Adam handles weight decay differently internally, config wd should be ~0
+        if weight_decay > 1e-5:
+             logger.warning(f"Adam 优化器通常与 weight_decay=0 或极小值配合使用，当前设置为 {weight_decay}")
+        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+        logger.info(f"使用 Adam 优化器 (lr={lr}, weight_decay={weight_decay})")
+    # Add other optimizers like RMSprop if needed
+    # elif optimizer_type == 'rmsprop':
+    #     optimizer = optim.RMSprop(model.parameters(), lr=lr, weight_decay=weight_decay)
+    #     logger.info(f"使用 RMSprop 优化器 (lr={lr}, weight_decay={weight_decay})")
+    else:
+        logger.warning(f"未知的优化器类型: {optimizer_type}，将默认使用 AdamW。")
+        optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    # <<< End Optimizer Initialization >>>
     
     # 初始化学习率调度器
     scheduler = None
