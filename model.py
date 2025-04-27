@@ -870,12 +870,18 @@ def evaluate_model(model, data_loader, device, loss_fn):
             metrics['rmse'] = np.sqrt(metrics['mse'])
             metrics['mae'] = mean_absolute_error(y_true_valid, y_pred_valid)
             metrics['r2'] = r2_score(y_true_valid, y_pred_valid)
+            # <<< Add dex calculation (standard deviation of residuals) >>>
+            residuals = y_true_valid - y_pred_valid
+            metrics['dex'] = np.std(residuals)
+            # <<< End dex calculation >>>
         except Exception as e:
             logger.error(f"计算评估指标时出错: {e}")
             metrics = {k: np.nan for k in ['mse', 'rmse', 'mae', 'r2']}
+            metrics['dex'] = np.nan # Ensure dex is also NaN on error
     else:
          logger.warning("评估中没有有效的预测值/目标值，无法计算指标。")
          metrics = {k: np.nan for k in ['mse', 'rmse', 'mae', 'r2']}
+         metrics['dex'] = np.nan # Ensure dex is NaN
 
     return avg_loss, metrics, y_pred, y_true # Return original y_pred/y_true for potential full analysis
 

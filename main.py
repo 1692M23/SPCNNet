@@ -673,6 +673,36 @@ def process_element(element, config, architecture_params={}):
         model, train_loader, val_loader, test_loader, element, device, config, augment_fn=augment_fn
     )
     
+    # <<< Add saving test metrics to JSON >>>
+    if best_model is not None and test_metrics:
+        try:
+            import json
+            # Ensure output directory exists
+            results_dir = config.output_config.get('results_dir', 'results')
+            element_eval_dir = os.path.join(results_dir, 'evaluation', element)
+            os.makedirs(element_eval_dir, exist_ok=True)
+            
+            metrics_file_path = os.path.join(element_eval_dir, f'{element}_test_metrics.json')
+            
+            # Convert numpy types for JSON serialization
+            serializable_metrics = {}
+            for k, v in test_metrics.items():
+                if isinstance(v, (np.number, np.bool_)):
+                     # Handle potential precision issues for floats
+                    serializable_metrics[k] = float(f'{v:.6g}') if isinstance(v, np.floating) else float(v)
+                elif isinstance(v, np.ndarray):
+                    serializable_metrics[k] = v.tolist() # Convert numpy arrays if any
+                else:
+                    serializable_metrics[k] = v # Keep other types as is
+
+            with open(metrics_file_path, 'w') as f:
+                json.dump(serializable_metrics, f, indent=4)
+            logger.info(f"最终测试指标已保存到: {metrics_file_path}")
+            
+        except Exception as save_err:
+            logger.error(f"保存元素 {element} 的测试指标文件时出错: {save_err}")
+    # <<< End saving test metrics >>>
+
     # 训练完成，清除中断恢复状态
     state_manager.save_state(2, config.training_config.get('num_epochs', 100), val_loss, 0, 
                             stage1_completed=True, training_completed=True)
@@ -1929,8 +1959,8 @@ def main():
                      else:
                          logger.info("[Main Loop] 使用来自 config 的基础架构参数。")
                      # --- 结束修改 ---
-
-                     process_element(element,
+                     
+                     process_element(element, 
                                      config=config,
                                      architecture_params=final_arch_params # <<< 传递最终合并后的参数 >>>
                                      )
