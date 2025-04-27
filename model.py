@@ -530,8 +530,44 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
 
     # ------------------- 训练循环 -------------------
     logger.info(f"开始训练 {element}，共 {num_epochs} 个 epochs")
+    
+    # <<< Get Warm-up Parameters from Config >>>
+    warmup_enabled = config.warmup_config.get('enabled', False) # Default to False if not found
+    warmup_epochs = config.warmup_config.get('epochs', 5)
+    warmup_start_factor = config.warmup_config.get('start_factor', 0.1)
+    
+    initial_lr = optimizer.param_groups[0]['lr'] # Get the initial LR from optimizer
+    warmup_start_lr = initial_lr * warmup_start_factor
+    
+    if warmup_enabled:
+        logger.info(f"启用学习率 Warm-up: {warmup_epochs} epochs, 从 {warmup_start_lr:.2e} 到 {initial_lr:.2e}")
+    # <<< End Get Warm-up Parameters >>>
+    
     for epoch in range(start_epoch, num_epochs):
         epoch_start_time = time.time()
+
+        # <<< Adjust LR for Warm-up Phase (If Enabled) >>>
+        current_lr = optimizer.param_groups[0]['lr'] # Get current LR before potential update
+        if warmup_enabled and epoch < warmup_epochs:
+            # Linear warm-up
+            # Avoid division by zero if warmup_epochs is 0 or 1
+            if warmup_epochs > 0:
+                lr = warmup_start_lr + (initial_lr - warmup_start_lr) * (epoch / warmup_epochs)
+            else:
+                lr = initial_lr # Should not happen if warmup_enabled is true and epochs > 0
+                
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr
+            current_lr = lr # Update current_lr for logging
+            # logger.info(f"Warm-up Epoch {epoch+1}/{warmup_epochs}, LR set to {lr:.6e}") # Log less verbosely
+        elif warmup_enabled and epoch == warmup_epochs:
+            # Ensure LR is set back to the initial value after warm-up before scheduler takes over
+            logger.info(f"Warm-up 结束，恢复初始学习率: {initial_lr:.6e}")
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = initial_lr
+            current_lr = initial_lr
+        # else: LR is controlled by the scheduler (or remains initial_lr if no scheduler step happens)
+        # <<< End Adjust LR for Warm-up Phase >>>
         
         # --- 训练阶段 ---
         model.train()
@@ -581,7 +617,9 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
         
         epoch_train_loss = running_train_loss / len(train_loader)
         history['train_loss'].append(epoch_train_loss)
-        history['lr'].append(optimizer.param_groups[0]['lr'])
+        # <<< Use current_lr for history logging >>>
+        history['lr'].append(current_lr)
+        # <<< End Use current_lr >>>
 
         # --- 验证阶段 ---
         model.eval()
@@ -640,15 +678,20 @@ def train(model, train_loader, val_loader, config, device=None, element=None, st
         history['val_r2'].append(epoch_val_r2)
         # --- End Calculation --- 
 
-        # <<< Updated Logging with MAE/R2 >>>
-        logger.info(f"Epoch {epoch+1}/{num_epochs} | Train Loss: {epoch_train_loss:.6f} | Val Loss: {epoch_val_loss:.6f} | Val MAE: {epoch_val_mae:.4f} | Val R2: {epoch_val_r2:.4f} | LR: {optimizer.param_groups[0]['lr']:.6e} | Time: {epoch_duration:.2f}s")
+        # <<< Updated Logging with MAE/R2 and correct LR >>>
+        logger.info(f"Epoch {epoch+1}/{num_epochs} | Train Loss: {epoch_train_loss:.6f} | Val Loss: {epoch_val_loss:.6f} | Val MAE: {epoch_val_mae:.4f} | Val R2: {epoch_val_r2:.4f} | LR: {current_lr:.6e} | Time: {epoch_duration:.2f}s")
 
         # --- 更新学习率和早停逻辑 (基于Val Loss) ---
-        if scheduler:
-            if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
-                scheduler.step(epoch_val_loss)
-            else:
-                scheduler.step()
+        # <<< Scheduler step should happen AFTER warm-up phase (If Enabled) >>>
+        if (not warmup_enabled or epoch >= warmup_epochs) and scheduler:
+             if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                 scheduler.step(epoch_val_loss)
+             else:
+                 # Ensure other schedulers are also stepped only after warm-up
+                 # CosineAnnealingWarmRestarts step depends on the epoch number relative to T_0 etc.
+                 # This might need adjustment if using Cosine scheduler with warm-up
+                 scheduler.step()
+        # <<< End Scheduler Step Logic >>>
         
         if epoch_val_loss < best_val_loss:
             best_val_loss = epoch_val_loss

@@ -63,9 +63,33 @@ def get_device_config():
             
             # 检测TPU数量
             if HAS_XMP and hasattr(xmp, 'xla_world_size'):
-                device_config['num_devices'] = xmp.xla_world_size()
-                device_config['multi_device'] = device_config['num_devices'] > 1
-            
+                # Check if running in a distributed setting
+                try:
+                    world_size = xm.xrt_world_size()
+                    if world_size > 1:
+                        device_config['num_devices'] = world_size
+                        device_config['multi_device'] = True
+                        logger.info(f"TPU: Detected world size {world_size}")
+                    else:
+                        # Attempt to get device count if not in multiprocessing spawn
+                        try:
+                             all_devices = xm.get_xla_supported_devices(dev_type='TPU')
+                             if all_devices:
+                                 device_config['num_devices'] = len(all_devices)
+                                 logger.info(f"TPU: Found {len(all_devices)} devices via get_xla_supported_devices")
+                             else:
+                                 logger.info("TPU: xm.xrt_world_size() <= 1 and get_xla_supported_devices found no devices, assuming 1 TPU core.")
+                                 device_config['num_devices'] = 1
+                        except Exception as device_count_err:
+                             logger.warning(f"TPU: Error getting device count: {device_count_err}, assuming 1 TPU core.")
+                             device_config['num_devices'] = 1
+                except Exception as world_size_err:
+                    logger.warning(f"TPU: Error getting world size: {world_size_err}, assuming 1 TPU core.")
+                    device_config['num_devices'] = 1
+            else:
+                 logger.info("TPU: Not using XMP or xla_world_size unavailable, assuming 1 TPU core.")
+                 device_config['num_devices'] = 1
+
             logger.info(f"成功初始化TPU设备: {device}")
             return device_config
         except Exception as e:
@@ -219,6 +243,14 @@ training_config = {
     },
     'lr_min': 1e-7                      # (保持或与 scheduler_params['min_lr'] 一致)
 }
+
+# <<< Add Warm-up specific config >>>
+warmup_config = {
+    'enabled': True,        # Set to True to enable warm-up globally
+    'epochs': 5,            # Number of warm-up epochs
+    'start_factor': 0.1     # Start LR = initial_lr * start_factor
+}
+# <<< End Warm-up specific config >>>
 
 # 超参数调优配置
 tuning_config = {
@@ -480,6 +512,7 @@ CONFIG = {
     'data_config': data_config,
     'model_config': model_config,
     'training_config': training_config,
+    'warmup_config': warmup_config,
     'tuning_config': tuning_config,
     'evaluation_config': evaluation_config,
     'prediction_config': prediction_config,
