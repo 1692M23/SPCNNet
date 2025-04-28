@@ -676,6 +676,62 @@ class TrainingStateManager:
             os.remove(self.checkpoint_file)
         return True
 
+# +++ 将 visualize_simple_predictions 函数定义移到这里 (process_element 之前) +++
+def visualize_simple_predictions(element, targets, predictions, output_dir):
+    """Generates a simple scatter plot of predictions vs targets."""
+    logger = logging.getLogger('plot_simple') # <--- Use a specific logger
+    logger.info(f"[{element}] Generating simple prediction vs target plot...")
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Ensure targets and predictions are numpy arrays
+    if isinstance(targets, torch.Tensor):
+        targets = targets.cpu().numpy()
+    if isinstance(predictions, torch.Tensor):
+        predictions = predictions.cpu().numpy()
+        
+    targets = np.asarray(targets).flatten()
+    predictions = np.asarray(predictions).flatten()
+
+    valid_mask = np.isfinite(targets) & np.isfinite(predictions)
+    if np.sum(valid_mask) < 2:
+        logger.warning(f"[{element}] Insufficient valid data for simple scatter plot.")
+        return
+
+    targets_valid = targets[valid_mask]
+    predictions_valid = predictions[valid_mask]
+
+    try:
+        plt.figure(figsize=(8, 8))
+        # Scatter plot
+        plt.scatter(targets_valid, predictions_valid, alpha=0.5, label='Predictions')
+        # Diagonal line (y=x)
+        min_val = min(np.min(targets_valid), np.min(predictions_valid))
+        max_val = max(np.max(targets_valid), np.max(predictions_valid))
+        plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Ideal (y=x)')
+        
+        # Calculate metrics for title
+        mae = mean_absolute_error(targets_valid, predictions_valid)
+        r2 = r2_score(targets_valid, predictions_valid)
+        bias = np.mean(predictions_valid - targets_valid)
+        
+        plt.title(f'{element} - Predicted vs. True Abundances\nMAE: {mae:.4f} | R²: {r2:.4f} | Bias: {bias:.4f}')
+        plt.xlabel(f'True [{element}] Abundance')
+        plt.ylabel(f'Predicted [{element}] Abundance')
+        plt.legend()
+        plt.grid(True)
+        plt.axis('equal') # Ensure equal aspect ratio
+        plt.tight_layout()
+        
+        plot_path = os.path.join(output_dir, f'{element}_prediction_vs_target_scatter.png')
+        plt.savefig(plot_path)
+        plt.close()
+        logger.info(f"[{element}] Simple prediction vs target plot saved to: {plot_path}")
+
+    except Exception as e:
+        logger.error(f"[{element}] Error generating simple scatter plot: {e}", exc_info=True)
+        plt.close()
+# +++ 结束移动 +++
+
 # --- 修改 process_element 函数 --- 
 def process_element(element, config, architecture_params={}):
     # ... (保留函数开始部分：获取日志、配置、加载数据、创建模型、加载器等) ...
@@ -742,15 +798,15 @@ def process_element(element, config, architecture_params={}):
         
         # 2. 评估结果可视化 (使用返回的原始预测和目标)
         if original_predictions.size > 0 and original_targets.size > 0:
-            # --- 修改调用点，使用新的 visualize_simple_predictions --- 
             logger.info(f"调用 visualize_simple_predictions 进行标准评估可视化...")
-            visualize_simple_predictions( # <--- 调用新函数
+            # <<< 调用点现在应该可以找到函数定义了 >>>
+            visualize_simple_predictions( 
                 element=element,
-                targets=original_targets, # 直接传递数组
-                predictions=original_predictions, # 直接传递数组
+                targets=original_targets, 
+                predictions=original_predictions,
                 output_dir=element_plot_dir
             )
-            # --- 结束修改调用点 ---
+            # <<< 结束调用点 >>>
         else: logger.warning(f"[{element}] 缺少原始预测或目标数据，无法绘制评估结果图表。")
             
     except NameError as ne:
@@ -1757,6 +1813,5 @@ def predict_and_analyze_new_data(element, config, predict_data_path):
 if __name__ == '__main__':
     setup_logging()
     args = parse_args()
-    # --- 确保函数定义在调用之前 --- 
-    # (函数定义现在应该在 main 之前了)
+    # --- 函数定义现在都在 main 之前了 --- 
     main(args)
