@@ -1226,6 +1226,98 @@ def determine_device(requested_device):
              logger.info("未指定设备或无法识别，默认使用 CPU")
              return torch.device('cpu')
 
+def parse_args():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(description='恒星光谱丰度预测模型')
+    
+    # 基本参数
+    parser.add_argument('--seed', type=int, default=42, help='随机种子，用于结果复现')
+    parser.add_argument('--mode', type=str, choices=['train', 'tune', 'test', 'predict', 'all', 'show_results', 'analyze', 'preprocess', 'predict_new'], # 添加 predict_new 模式
+                       default='train', help='运行模式')
+    parser.add_argument('--data_path', type=str, default=None,
+                       help='数据文件路径，可以是.npz格式的预处理数据或CSV格式的原始数据')
+    parser.add_argument('--train_data_path', type=str, default=None,
+                       help='训练数据文件路径，优先级高于data_path')
+    parser.add_argument('--val_data_path', type=str, default=None,
+                       help='验证数据文件路径，优先级高于data_path')
+    parser.add_argument('--test_data_path', type=str, default=None,
+                       help='测试数据文件路径，优先级高于data_path')
+    # +++ 添加新参数 +++
+    parser.add_argument('--predict_data_path', type=str, default=None,
+                       help='要进行预测的新数据集路径 (只包含光谱)')
+    # +++ 结束添加 +++
+    
+    # 元素参数
+    parser.add_argument('--elements', nargs='+', default=None,
+                       help='要处理的元素列表')
+    parser.add_argument('--element', type=str, default=None,
+                       help='要处理的单个元素，与--elements互斥')
+    
+    # 训练参数
+    parser.add_argument('--batch_size', type=int, default=None,
+                       help='批次大小')
+    parser.add_argument('--learning_rate', type=float, default=None,
+                       help='学习率')
+    parser.add_argument('--epochs', type=int, default=None,
+                       help='训练轮数')
+    parser.add_argument('--early_stopping', type=int, default=None,
+                       help='早停轮数')
+    parser.add_argument('--device', type=str, default=None,
+                       help='计算设备，可选值：cpu, cuda, tpu')
+    
+    # 超参数调优参数
+    parser.add_argument('--batch_size_hyperopt', type=int, default=None,
+                       help='超参数调优时的批次大小')
+    parser.add_argument('--batches_per_round', type=int, default=None,
+                       help='每轮评估的批次数')
+    parser.add_argument('--tune_hyperparams', action='store_true',
+                       help='是否进行超参数调优')
+    
+    # 结果和分析参数
+    parser.add_argument('--result_type', type=str,
+                       choices=['training', 'evaluation', 'prediction', 'analysis'],
+                       default='training', help='结果类型')
+    parser.add_argument('--perform_analysis', action='store_true',
+                       help='进行模型分析')
+    parser.add_argument('--analysis_type', type=str,
+                       choices=['feature_importance', 'residual_analysis', 'both'],
+                       default='both', help='分析类型')
+    parser.add_argument('--analysis_batch_size', type=int, default=None,
+                       help='分析时的批次大小')
+    parser.add_argument('--save_batch_results', action='store_true',
+                       help='是否保存每个批次的结果')
+    
+    # 预处理参数
+    parser.add_argument('--use_preprocessor', action='store_true',
+                       help='使用preprocessdata7预处理数据')
+    parser.add_argument('--csv_files', nargs='+', default=None,
+                     help='preprocessdata7使用的CSV数据文件列表')
+    parser.add_argument('--fits_dir', type=str, default='fits',
+                       help='preprocessdata7使用的FITS文件目录')
+    parser.add_argument('--output_dir', type=str, default='processed_data',
+                      help='preprocessdata7处理后的输出目录')
+    parser.add_argument('--log_step', type=float, default=0.0001,
+                      help='preprocessdata7使用的对数步长')
+    parser.add_argument('--n_splits', type=int, default=5,
+                      help='preprocessdata7使用的交叉验证折数')
+    parser.add_argument('--compute_common_range', action='store_true',
+                      help='preprocessdata7是否计算共同波长范围')
+    parser.add_argument('--weight_decay', type=float, default=1e-4,
+                     help='权重衰减系数')
+    parser.add_argument('--force_new_model', action='store_true',
+                     help='强制使用新模型')
+    # 添加GRU和GCN控制参数
+    parser.add_argument('--use_gru', action='store_true',
+                     help='使用双向GRU网络')
+    parser.add_argument('--no_gru', action='store_true',
+                     help='不使用双向GRU网络')
+    parser.add_argument('--use_gcn', action='store_true',
+                     help='使用图卷积网络')
+    parser.add_argument('--no_gcn', action='store_true',
+                     help='不使用图卷积网络')
+    
+    return parser.parse_args()
+
 def main(args): # <--- 接收 args
     """程序主入口函数"""
     # 解析命令行参数 - 不再需要，已在外部调用
