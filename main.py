@@ -17,6 +17,7 @@ from sklearn.model_selection import ParameterGrid
 import pandas as pd
 import glob
 import traceback
+import json # <--- 添加 json 导入
 from torchvision import transforms
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from scipy.stats import pearsonr
@@ -236,6 +237,15 @@ def visualize_mc_uncertainty(element, mean_predictions, uncertainties, targets, 
     logger.info(f"开始为元素 {element} 生成 MC Dropout 不确定性可视化图表...")
     os.makedirs(output_dir, exist_ok=True)
 
+    # --- 添加字体设置 --- 
+    try:
+        plt.rcParams['font.sans-serif'] = ['SimHei'] # 指定默认字体为 SimHei
+        plt.rcParams['axes.unicode_minus'] = False   # 解决保存图像是负号'-'显示为方块的问题
+        logger.info("尝试设置字体为 SimHei 以支持中文显示。")
+    except Exception as font_err:
+        logger.warning(f"设置 SimHei 字体失败，中文可能无法正常显示: {font_err}")
+    # --- 结束字体设置 --- 
+
     # 确保输入长度一致
     min_len = min(len(mean_predictions), len(uncertainties), len(targets))
     if min_len == 0:
@@ -244,7 +254,7 @@ def visualize_mc_uncertainty(element, mean_predictions, uncertainties, targets, 
     mean_predictions = mean_predictions[:min_len]
     uncertainties = uncertainties[:min_len]
     targets = targets[:min_len]
-
+        
     # 计算绝对误差
     abs_errors = np.abs(targets - mean_predictions)
 
@@ -258,7 +268,7 @@ def visualize_mc_uncertainty(element, mean_predictions, uncertainties, targets, 
 
     # 1. 绘制 不确定性 vs 绝对误差 散点图
     try:
-        plt.style.use('seaborn-v0_8-whitegrid')
+        # plt.style.use('seaborn-v0_8-whitegrid') # 可以保留或更改样式
         plt.figure(figsize=(10, 6))
         plt.scatter(uncertainties_valid, abs_errors_valid, alpha=0.4, label='样本点')
 
@@ -270,12 +280,13 @@ def visualize_mc_uncertainty(element, mean_predictions, uncertainties, targets, 
 
         # 计算皮尔逊相关系数
         correlation, p_value = pearsonr(uncertainties_valid, abs_errors_valid)
-        plt.title(f'{element} - MC Dropout 不确定性 vs. 绝对误差\n相关系数: {correlation:.3f} (p={p_value:.3g})')
+        # 使用 f-string 格式化标题，确保中文正确显示
+        plt.title(f'{element} - MC Dropout 不确定性 vs. 绝对误差\n相关系数: {correlation:.3f} (p={p_value:.3g})') 
 
         plt.xlabel('预测不确定性 (标准差)')
         plt.ylabel('绝对误差 (|真实值 - 平均预测值|)')
         plt.legend()
-        plt.grid(True)
+        # plt.grid(True) # <--- 移除网格
         scatter_plot_path = os.path.join(output_dir, f'{element}_mc_uncertainty_vs_error_scatter.png')
         plt.savefig(scatter_plot_path)
         plt.close()
@@ -292,6 +303,7 @@ def visualize_mc_uncertainty(element, mean_predictions, uncertainties, targets, 
         # 确保 bin_labels 的长度与实际生成的 bin 数量一致
         actual_num_bins = len(np.unique(uncertainty_bins))
         if actual_num_bins == 0: raise ValueError("分箱后无有效区间")
+        # 使用 f-string 格式化标签，尝试修复中文
         bin_labels = [f'{i*100/actual_num_bins:.0f}-{(i+1)*100/actual_num_bins:.0f}%' for i in range(actual_num_bins)]
 
         # 准备箱线图数据 (使用清理后的误差数据)
@@ -321,10 +333,11 @@ def visualize_mc_uncertainty(element, mean_predictions, uncertainties, targets, 
             median.set_color('black')
             median.set_linewidth(2)
 
+        # 使用 f-string 格式化标题
         plt.title(f'{element} - 不同不确定性区间的绝对误差分布')
         plt.xlabel('预测不确定性百分位区间')
         plt.ylabel('绝对误差')
-        plt.grid(True, axis='y')
+        # plt.grid(True, axis='y') # <--- 移除网格
         boxplot_path = os.path.join(output_dir, f'{element}_mc_error_boxplot_by_uncertainty.png')
         plt.savefig(boxplot_path)
         plt.close()
@@ -337,6 +350,11 @@ def visualize_mc_uncertainty(element, mean_predictions, uncertainties, targets, 
     except Exception as e:
         logger.error(f"绘制误差箱线图失败: {e}", exc_info=True)
         plt.close()
+
+    # --- 恢复默认字体设置 (可选，如果希望不影响其他绘图) ---
+    # plt.rcdefaults()
+    # logger.info("恢复 matplotlib 默认字体设置。")
+    # --- 结束恢复设置 ---
 
     logger.info(f"元素 {element} 的 MC Dropout 不确定性可视化完成。")
 
