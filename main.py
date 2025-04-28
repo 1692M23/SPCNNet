@@ -23,7 +23,7 @@ from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from scipy.stats import pearsonr
 import seaborn as sns
 from model import load_trained_model, predict, SpectralResCNN_GCN, predict_with_mc_dropout # <--- 移动导入到顶部
-from utils import set_seed 
+from utils import set_seed, determine_device 
 
 # 导入自定义模块
 import config
@@ -1599,19 +1599,21 @@ def plot_distribution_comparison(element, new_predictions, reference_labels, out
 
 # +++ 新增处理函数: 预测和分析新数据 +++
 def predict_and_analyze_new_data(element, config, predict_data_path):
-    """Loads model, predicts on new data (spectra only), and generates distribution plots."""
+    """Loads model, predicts on new data, generates distribution plots, prioritizing best_model."""
     logger = logging.getLogger('predict_new')
     logger.info(f"[{element}] Starting prediction and analysis for new data: {predict_data_path}")
     
-    device = determine_device(config.training_config.get('device')) # Ensure determine_device is available
+    device = determine_device(config.training_config.get('device')) 
+    model_dir = config.model_config.get('model_dir', 'models')
     output_base_dir = config.output_config.get('plots_dir', 'plots')
     analysis_plot_dir = os.path.join(output_base_dir, 'prediction_analysis', element)
     os.makedirs(analysis_plot_dir, exist_ok=True)
 
-    # 1. 加载训练好的模型
+    # 1. 加载训练好的模型 (优先 best_model.pth)
     logger.info(f"[{element}] Loading trained model...")
     use_gru = getattr(config, 'use_gru', True)
     architecture_params = config.model_config.get('architecture_params', {})
+    # ... (加载 best_params 文件并更新 architecture_params 的逻辑保持不变) ...
     best_params_file = os.path.join(config.output_config['results_dir'], 'hyperopt', element, 'best_params.json')
     if os.path.exists(best_params_file):
         try:
@@ -1623,30 +1625,56 @@ def predict_and_analyze_new_data(element, config, predict_data_path):
                      if key in best_params: architecture_params[key] = best_params[key]
         except Exception as e:
             logger.warning(f"[{element}] Failed to load or apply best params from {best_params_file}: {e}")
-    
+
     # --- 确保使用正确的模型类 --- 
     model_type = config.model_config.get('model_type', 'SpectralResCNN_GCN') 
     if model_type == 'SpectralResCNN_GCN': 
         model = SpectralResCNN_GCN(device=device, use_gru=use_gru, **architecture_params)
     else: 
-        # 需要添加其他模型类型的加载逻辑，或者抛出错误
         logger.error(f"Unsupported model type '{model_type}' for loading in predict_and_analyze.")
         return
-    # --- 结束模型类检查 --- 
 
-    # --- 修改: 调用 TrainingStateManager 的 load_checkpoint --- 
-    state_manager = TrainingStateManager(element=element, model_dir=config.model_config.get('model_dir', 'models'))
-    checkpoint = state_manager.load_checkpoint(model, device=device)
-    # --- 结束修改 --- 
+    # --- 修改加载逻辑: 优先 best_model.pth --- 
+    best_model_path = os.path.join(model_dir, f'{element}_best_model.pth')
+    checkpoint_path = os.path.join(model_dir, f'{element}_checkpoint.pth') # 使用训练时保存的检查点文件名
+    loaded_successfully = False
 
-    if checkpoint is None:
-         logger.error(f"[{element}] Failed to load checkpoint for prediction via StateManager. Cannot proceed.")
+    if os.path.exists(best_model_path):
+        logger.info(f"[{element}] Attempting to load best model: {best_model_path}")
+        try:
+            # load_trained_model_core (或直接 torch.load) 应该处理状态字典
+            checkpoint = torch.load(best_model_path, map_location=device)
+            if 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'])
+                logger.info(f"[{element}] Best model state loaded successfully from {best_model_path} (Epoch {checkpoint.get('epoch', 'N/A')})")
+                loaded_successfully = True
+            else:
+                logger.warning(f"[{element}] Best model file {best_model_path} does not contain 'model_state_dict'.")
+        except Exception as e:
+            logger.warning(f"[{element}] Failed to load best model from {best_model_path}: {e}")
+    
+    if not loaded_successfully and os.path.exists(checkpoint_path):
+        logger.warning(f"[{element}] Best model not found or failed to load. Attempting to load checkpoint: {checkpoint_path}")
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            if 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'])
+                logger.info(f"[{element}] Checkpoint model state loaded successfully from {checkpoint_path} (Epoch {checkpoint.get('epoch', 'N/A')})")
+                loaded_successfully = True
+            else:
+                logger.warning(f"[{element}] Checkpoint file {checkpoint_path} does not contain 'model_state_dict'.")
+        except Exception as e:
+            logger.warning(f"[{element}] Failed to load checkpoint model from {checkpoint_path}: {e}")
+
+    if not loaded_successfully:
+         logger.error(f"[{element}] Failed to load model weights from both best model and checkpoint. Cannot proceed with prediction.")
          return
+    # --- 结束加载逻辑修改 --- 
+
     model.to(device)
     model.eval()
-    logger.info(f"[{element}] Model loaded successfully via StateManager.")
 
-    # 2. 加载新的预测数据 (仅光谱 X)
+    # ... (加载新数据 X_pred 的逻辑不变) ...
     logger.info(f"[{element}] Loading new prediction data (spectra only) from: {predict_data_path}")
     try:
         data = np.load(predict_data_path, allow_pickle=True)
@@ -1655,41 +1683,37 @@ def predict_and_analyze_new_data(element, config, predict_data_path):
         elif 'X' in data:
             X_pred = data['X']
         else:
-            # 尝试加载第一个数组作为光谱数据
             keys = list(data.keys())
             logger.warning(f"Cannot find 'spectra' or 'X' key in {predict_data_path}. Attempting to use the first key '{keys[0]}' as spectra.")
             if keys: X_pred = data[keys[0]]
             else: raise ValueError("No data found in the prediction file.")
-            
-        # 确保 X_pred 是 numpy 数组
         if not isinstance(X_pred, np.ndarray):
             raise TypeError(f"Loaded prediction spectra data is not a numpy array (type: {type(X_pred)}). Check the .npz file structure.")
-            
         logger.info(f"[{element}] Loaded {len(X_pred)} spectra for prediction.")
     except Exception as e:
         logger.error(f"[{element}] Failed to load prediction data: {e}")
         logger.error(traceback.format_exc())
         return
 
-    # 3. 创建预测数据加载器
+    # ... (创建 pred_loader 的逻辑不变) ...
     try:
-        pred_loader = create_data_loaders(X_pred, np.zeros(len(X_pred)), # 标签是虚拟的
+        pred_loader = create_data_loaders(X_pred, np.zeros(len(X_pred)), 
                                           batch_size=config.training_config.get('batch_size', 128), 
                                           shuffle=False)
     except Exception as e:
          logger.error(f"[{element}] Failed to create prediction DataLoader: {e}")
          logger.error(traceback.format_exc())
          return
-         
-    # 4. 执行预测
+
+    # ... (执行预测的逻辑不变) ...
     logger.info(f"[{element}] Predicting abundances for new data...")
     all_predictions = []
     try:
         with torch.no_grad():
-            for batch_spectra, _ in pred_loader: # 忽略虚拟标签
+            for batch_spectra, _ in pred_loader: 
                 batch_spectra = batch_spectra.to(device)
                 batch_spectra, _, _ = handle_nan_values(batch_spectra, replacement_strategy='mean', name="预测输入") 
-                with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
+                with torch.cuda.amp.autocast(enabled=(str(device) == 'cuda')): # Use string comparison
                      outputs = model(batch_spectra)
                 outputs, _, _ = handle_nan_values(outputs, replacement_strategy='zero', name="预测输出")
                 all_predictions.append(outputs.cpu().numpy())
@@ -1697,19 +1721,12 @@ def predict_and_analyze_new_data(element, config, predict_data_path):
          logger.error(f"[{element}] Error during prediction loop: {pred_err}")
          logger.error(traceback.format_exc())
          return
-         
-    if not all_predictions:
-        logger.error(f"[{element}] Prediction failed or produced no results.")
-        return
-    try:
-        new_predictions = np.vstack(all_predictions).flatten()
-    except ValueError as stack_err:
-         logger.error(f"[{element}] Error stacking prediction results (check output dimensions?): {stack_err}")
-         logger.error(f"Prediction list content (first element shape): {all_predictions[0].shape if all_predictions else 'Empty'}")
-         return
+    if not all_predictions: logger.error(f"[{element}] Prediction failed or produced no results."); return
+    try: new_predictions = np.vstack(all_predictions).flatten()
+    except ValueError as stack_err: logger.error(f"[{element}] Error stacking prediction results: {stack_err}"); return
     logger.info(f"[{element}] Prediction complete. Generated {len(new_predictions)} predictions.")
 
-    # 5. 加载参考真实标签 (Train + Val + Test)
+    # ... (加载参考标签 reference_labels 的逻辑不变) ...
     logger.info(f"[{element}] Loading reference true labels from Train/Val/Test sets...")
     reference_labels = []
     data_dir = config.data_config.get('processed_data_dir', 'processed_data')
@@ -1721,40 +1738,33 @@ def predict_and_analyze_new_data(element, config, predict_data_path):
                 if y is not None:
                     if len(y.shape) > 1 and y.shape[1] > 1:
                         if elements_info and isinstance(elements_info, dict) and element in elements_info:
-                            # Use dict key access for element index
                             element_key_list = list(elements_info.keys())
                             if element in element_key_list:
                                  element_idx = element_key_list.index(element)
                                  reference_labels.append(y[:, element_idx])
                             else:
                                  logger.warning(f"Element '{element}' not found in keys of elements_info dict in {phase}_dataset.npz. Keys: {element_key_list}")
-                                 reference_labels.append(y[:, 0]) # Fallback to first column
+                                 reference_labels.append(y[:, 0]) 
                         else:
                              logger.warning(f"Cannot determine column for {element} in {phase} labels (no/invalid elements_info), using first column.")
                              reference_labels.append(y[:, 0])
                     else:
                         reference_labels.append(y.flatten())
-            else:
-                logger.warning(f"Reference data file not found: {data_path}")
-                
-        if not reference_labels:
-            logger.error(f"[{element}] Could not load any reference labels.")
-            return
+            else: logger.warning(f"Reference data file not found: {data_path}")
+        if not reference_labels: logger.error(f"[{element}] Could not load any reference labels."); return
         reference_labels = np.concatenate(reference_labels)
         logger.info(f"[{element}] Loaded {len(reference_labels)} reference labels.")
-        
     except Exception as e:
-        logger.error(f"[{element}] Failed to load reference labels: {e}")
-        logger.error(traceback.format_exc())
-        return
+        logger.error(f"[{element}] Failed to load reference labels: {e}"); logger.error(traceback.format_exc()); return
 
-    # 6. 调用绘图函数
+    # ... (调用绘图函数的逻辑不变) ...
     plot_prediction_distribution(element, new_predictions, analysis_plot_dir)
     plot_distribution_comparison(element, new_predictions, reference_labels, analysis_plot_dir)
-
     logger.info(f"[{element}] Prediction analysis plots generated in: {analysis_plot_dir}")
 
 if __name__ == '__main__':
     setup_logging()
-    args = parse_args() # 解析参数放前面
-    main(args) # 将 args 传递给 main 函数
+    args = parse_args()
+    # --- 确保函数定义在调用之前 --- 
+    # (函数定义现在应该在 main 之前了)
+    main(args)

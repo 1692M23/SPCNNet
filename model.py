@@ -1696,6 +1696,15 @@ def predict_with_mc_dropout(model, data_loader, device, mc_samples=50):
                - targets (np.ndarray): True target values from the data loader.
     """
     logger.info(f"开始使用 MC Dropout 进行预测，采样次数: {mc_samples}")
+    
+    # <<< 确保 device 是 torch.device 对象或使用字符串比较 >>>
+    # 方法1：转换为 torch.device (如果尚未转换)
+    # if isinstance(device, str):
+    #     device = torch.device(device)
+    # 方法2：直接使用字符串比较 (更简单)
+    amp_enabled = (str(device) == 'cuda') # <-- 修改这里
+    logger.info(f"MC Dropout - AMP enabled: {amp_enabled}")
+    
     model.to(device)
     
     # 1. Enable Dropout layers
@@ -1717,8 +1726,10 @@ def predict_with_mc_dropout(model, data_loader, device, mc_samples=50):
                 inputs, targets_batch = inputs.to(device), targets_batch.to(device)
                 inputs, _, _ = handle_nan_values(inputs, replacement_strategy='mean', name="MC 输入")
                 
-                with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
+                # <<< 使用前面计算的 amp_enabled >>>
+                with torch.cuda.amp.autocast(enabled=amp_enabled):
                     outputs = model(inputs)
+                # <<< 结束修改 >>>
                 outputs, _, _ = handle_nan_values(outputs, replacement_strategy='zero', name="MC 输出")
 
                 batch_predictions.append(outputs.cpu().numpy())
