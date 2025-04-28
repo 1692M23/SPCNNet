@@ -258,23 +258,23 @@ def visualize_mc_uncertainty(element, mean_predictions, uncertainties, targets, 
     # 1. Plot Uncertainty vs. Absolute Error Scatter Plot
     try:
         plt.figure(figsize=(10, 6))
-        plt.scatter(uncertainties_valid, abs_errors_valid, alpha=0.4, label='Samples') # English Label
+        plt.scatter(uncertainties_valid, abs_errors_valid, alpha=0.4, label='Samples')
 
         # Add trend line
         z = np.polyfit(uncertainties_valid, abs_errors_valid, 1)
         p = np.poly1d(z)
         sorted_uncertainties = np.sort(uncertainties_valid)
-        plt.plot(sorted_uncertainties, p(sorted_uncertainties), "r--", label=f'Trend (y={z[0]:.2f}x+{z[1]:.2f})') # English Label
+        plt.plot(sorted_uncertainties, p(sorted_uncertainties), "r--", label=f'Trend (y={z[0]:.2f}x+{z[1]:.2f})')
 
         # Calculate Pearson correlation
         correlation, p_value = pearsonr(uncertainties_valid, abs_errors_valid)
         # English Title
         plt.title(f'{element} - MC Dropout Uncertainty vs. Absolute Error\nCorrelation: {correlation:.3f} (p={p_value:.3g})') 
 
-        plt.xlabel('Prediction Uncertainty (Std Dev)') # English Label
-        plt.ylabel('Absolute Error (|True - Mean Prediction|)') # English Label
+        plt.xlabel('Prediction Uncertainty (Std Dev)')
+        plt.ylabel('Absolute Error (|True - Mean Prediction|)')
         plt.legend()
-        # plt.grid(True) # Grid removed
+        plt.grid(False) # <--- Explicitly disable grid
         scatter_plot_path = os.path.join(output_dir, f'{element}_mc_uncertainty_vs_error_scatter.png')
         plt.savefig(scatter_plot_path)
         plt.close()
@@ -319,7 +319,7 @@ def visualize_mc_uncertainty(element, mean_predictions, uncertainties, targets, 
         plt.title(f'{element} - Absolute Error Distribution by Uncertainty Quantile')
         plt.xlabel('Prediction Uncertainty Percentile Range')
         plt.ylabel('Absolute Error')
-        # plt.grid(True, axis='y') # Grid removed
+        plt.grid(False) # <--- Explicitly disable grid
         boxplot_path = os.path.join(output_dir, f'{element}_mc_error_boxplot_by_uncertainty.png')
         plt.savefig(boxplot_path)
         plt.close()
@@ -1949,24 +1949,28 @@ def visualize_simple_predictions(element, targets, predictions, output_dir):
     mae = mean_absolute_error(targets_valid, predictions_valid)
     r2 = r2_score(targets_valid, predictions_valid)
 
+    # Plot scatter plot
     plt.figure(figsize=(8, 8))
-    plt.scatter(targets_valid, predictions_valid, alpha=0.3, label='Predictions') # English Label
+    # --- Change color to black --- 
+    plt.scatter(targets_valid, predictions_valid, alpha=0.3, label='Predictions', color='black') 
+    # --- End change ---
 
+    # Plot y=x line
     min_val = min(np.min(targets_valid), np.min(predictions_valid))
     max_val = max(np.max(targets_valid), np.max(predictions_valid))
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Ideal (y=x)') # English Label
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Ideal (y=x)')
 
+    # Add metrics text
     metrics_text = f'RMSE: {rmse:.4f}\nMAE: {mae:.4f}\nR²: {r2:.4f}'
     plt.text(0.05, 0.95, metrics_text, transform=plt.gca().transAxes,
              verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
-    # English Title and Labels
-    plt.title(f'{element} - Target vs. Prediction (Original)') 
+    plt.title(f'{element} - Target vs. Prediction (Original)')
     plt.xlabel('True Target Value')
     plt.ylabel('Model Prediction Value')
     plt.legend()
-    plt.axis('equal') 
-    # plt.grid(False) # Grid removed
+    plt.axis('equal')
+    plt.grid(False) # <--- Explicitly disable grid
     plt.tight_layout()
 
     plot_path = os.path.join(output_dir, f'{element}_target_vs_prediction_simple.png')
