@@ -224,8 +224,8 @@ training_config = {
     'num_devices': device_config['num_devices'],  # 设备数量
     'elements': ['C_FE', 'MG_FE', 'CA_FE'],
     'resume_training': True,
-    'loss_function': 'MSE',
-    'loss_params': {},
+    'loss_function': 'Huber',
+    'loss_params': {'delta': 1.0},
     # TPU特定配置
     'tpu_config': {
         'use_xla_compilation': True,  # 是否使用XLA编译加速
