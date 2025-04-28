@@ -24,7 +24,7 @@ from scipy.stats import pearsonr
 # 导入自定义模块
 import config
 from model import SpectralResCNN_GCN, SpectralResCNNEnsemble, train, evaluate_model, load_trained_model, save_model, load_checkpoint, handle_nan_values
-from evaluation import evaluate_all_elements, plot_predictions_vs_true, plot_metrics_comparison, visualize_evaluation_results
+from evaluation import evaluate_all_elements, plot_predictions_vs_true, plot_metrics_comparison
 from utils import CacheManager, ProgressManager, ask_clear_cache, setup_analysis_directories, set_seed
 from multi_element_processor import MultiElementProcessor
 from fits_cache import FITSCache
@@ -707,22 +707,22 @@ def process_element(element, config, architecture_params={}):
         
         # 2. 评估结果可视化 (使用返回的原始预测和目标)
         if original_predictions.size > 0 and original_targets.size > 0:
-            # 确保 visualize_evaluation_results 定义存在且可调用
-            # 可能需要导入: from evaluation import visualize_evaluation_results
-            visualize_evaluation_results(
-                element=element,
-                targets=original_targets,
-                predictions=original_predictions,
-                output_dir=element_plot_dir,
-                prefix='original_' # 明确这是原始结果
+            # 使用 plot_predictions_vs_true 替换 visualize_evaluation_results
+            logger.info(f"调用 plot_predictions_vs_true 进行标准评估可视化...")
+            plot_predictions_vs_true( # <--- RENAMED HERE
+                elements=[element], # Assuming it takes a list of elements
+                # targets=original_targets, # Checking function signature, might not need these directly if it reloads results
+                # predictions=original_predictions, 
+                plot_dir=element_plot_dir, # Pass the specific plot directory
+                # prefix='original_' # Prefix might not be supported, plot_predictions_vs_true likely uses standard naming
             )
         else: logger.warning(f"[{element}] 缺少原始预测或目标数据，无法绘制评估结果图表。")
             
     except NameError as ne:
          if 'visualize_training_progress' in str(ne):
               logger.error("函数 visualize_training_progress 未定义或未导入!")
-         elif 'visualize_evaluation_results' in str(ne):
-              logger.error("函数 visualize_evaluation_results 未定义或未导入!")
+         elif 'plot_predictions_vs_true' in str(ne): # <--- UPDATED NAME HERE
+              logger.error("函数 plot_predictions_vs_true 未定义或未导入!")
          else: logger.error(f"标准可视化时发生 NameError: {ne}")
     except Exception as viz_err:
          logger.error(f"生成标准可视化时出错: {viz_err}", exc_info=True)
