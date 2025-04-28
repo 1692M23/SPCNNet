@@ -343,15 +343,34 @@ def train_and_evaluate_model(model, train_loader, val_loader, test_loader, eleme
     """
     logger = logging.getLogger('train_eval')
     try:
+        # +++ 将 device 字符串转换为 torch.device 对象 +++
+        if isinstance(device, str):
+            logger.info(f"[{element}] Converting device string '{device}' to torch.device object.")
+            try:
+                # 尝试直接用字符串创建，如果失败用 determine_device (确保它可用)
+                device = torch.device(device)
+            except Exception as e_conv:
+                logger.warning(f"[{element}] Failed to create torch.device directly: {e_conv}. Trying determine_device.")
+                # 假设 determine_device 在全局可用或已导入
+                try: 
+                    device = determine_device(device) 
+                except NameError:
+                    logger.error("determine_device function not found, falling back to CPU.")
+                    device = torch.device('cpu')
+        elif not isinstance(device, torch.device):
+             logger.warning(f"[{element}] Received unexpected type for device: {type(device)}. Defaulting to CPU.")
+             device = torch.device('cpu')
+        # +++ 结束转换 +++
+
         # 1. 训练模型
-        logger.info(f"[{element}] 开始训练...")
+        logger.info(f"[{element}] 开始训练 (使用设备: {device})...") # Log the actual device object type
         # 假设 train 返回: model(最佳状态), best_val_loss, final_val_r2, history
         model, best_val_loss_from_train, final_val_r2_from_train, history = train(
             model=model,
             train_loader=train_loader,
             val_loader=val_loader,
             element=element,
-            device=device,
+            device=device, # <--- 传递转换后的 torch.device 对象
             config=config,
             augment_fn=augment_fn
         )
@@ -1510,6 +1529,227 @@ def main(args): # <--- 接收 args
          pass 
 
     logger.info("脚本执行完毕。")
+
+# +++ 新增绘图函数 1: 预测值分布 +++
+def plot_prediction_distribution(element, predictions, output_dir):
+    """Plots the distribution of new predictions (KDE)."""
+    logger = logging.getLogger('plot_dist')
+    logger.info(f"[{element}] Plotting distribution of new predictions...")
+    os.makedirs(output_dir, exist_ok=True)
+
+    valid_predictions = predictions[np.isfinite(predictions)]
+    if len(valid_predictions) == 0:
+        logger.warning(f"[{element}] No finite predictions to plot distribution.")
+        return
+
+    plt.figure(figsize=(10, 6))
+    sns.kdeplot(valid_predictions, fill=True, color='skyblue')
+    
+    mean_pred = np.mean(valid_predictions)
+    median_pred = np.median(valid_predictions)
+    std_pred = np.std(valid_predictions)
+    
+    stats_text = f'Mean: {mean_pred:.3f}\nMedian: {median_pred:.3f}\nStd Dev: {std_pred:.3f}'
+    plt.text(0.05, 0.95, stats_text, transform=plt.gca().transAxes,
+             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+    plt.title(f'{element} - Distribution of Predicted Abundances (New Data)')
+    plt.xlabel(f'Predicted [{element}] Abundance')
+    plt.ylabel('Density')
+    plt.grid(False)
+    plt.tight_layout()
+    
+    plot_path = os.path.join(output_dir, f'{element}_new_prediction_distribution.png')
+    plt.savefig(plot_path)
+    plt.close()
+    logger.info(f"[{element}] New prediction distribution plot saved to: {plot_path}")
+
+# +++ 新增绘图函数 2: 分布对比 +++
+def plot_distribution_comparison(element, new_predictions, reference_labels, output_dir):
+    """Compares the distribution of new predictions and reference true labels."""
+    logger = logging.getLogger('plot_compare')
+    logger.info(f"[{element}] Plotting comparison of prediction distribution vs reference labels...")
+    os.makedirs(output_dir, exist_ok=True)
+
+    valid_new_predictions = new_predictions[np.isfinite(new_predictions)]
+    valid_reference_labels = reference_labels[np.isfinite(reference_labels)]
+
+    if len(valid_new_predictions) == 0 or len(valid_reference_labels) == 0:
+        logger.warning(f"[{element}] No finite data for distribution comparison plot.")
+        return
+
+    plt.figure(figsize=(10, 6))
+    sns.kdeplot(valid_reference_labels, fill=True, color='coral', label='Reference True Labels (Train/Val/Test)', alpha=0.5)
+    sns.kdeplot(valid_new_predictions, fill=True, color='skyblue', label='New Predictions', alpha=0.5)
+
+    plt.title(f'{element} - Distribution Comparison: New Predictions vs. Reference Labels')
+    plt.xlabel(f'[{element}] Abundance')
+    plt.ylabel('Density')
+    plt.legend()
+    plt.grid(False)
+    plt.tight_layout()
+
+    plot_path = os.path.join(output_dir, f'{element}_prediction_vs_reference_distribution.png')
+    plt.savefig(plot_path)
+    plt.close()
+    logger.info(f"[{element}] Distribution comparison plot saved to: {plot_path}")
+
+# +++ 新增处理函数: 预测和分析新数据 +++
+def predict_and_analyze_new_data(element, config, predict_data_path):
+    """Loads model, predicts on new data (spectra only), and generates distribution plots."""
+    logger = logging.getLogger('predict_new')
+    logger.info(f"[{element}] Starting prediction and analysis for new data: {predict_data_path}")
+    
+    device = determine_device(config.training_config.get('device')) # Ensure determine_device is available
+    output_base_dir = config.output_config.get('plots_dir', 'plots')
+    analysis_plot_dir = os.path.join(output_base_dir, 'prediction_analysis', element)
+    os.makedirs(analysis_plot_dir, exist_ok=True)
+
+    # 1. 加载训练好的模型
+    logger.info(f"[{element}] Loading trained model...")
+    use_gru = getattr(config, 'use_gru', True)
+    architecture_params = config.model_config.get('architecture_params', {})
+    best_params_file = os.path.join(config.output_config['results_dir'], 'hyperopt', element, 'best_params.json')
+    if os.path.exists(best_params_file):
+        try:
+            with open(best_params_file, 'r') as f: best_params = json.load(f)
+            if best_params:
+                logger.info(f"[{element}] Found best params, overriding architecture params from file: {best_params_file}")
+                arch_keys = [k for k in best_params if k in architecture_params or k in ['gru_hidden_size', 'num_res_blocks']] 
+                for key in arch_keys:
+                     if key in best_params: architecture_params[key] = best_params[key]
+        except Exception as e:
+            logger.warning(f"[{element}] Failed to load or apply best params from {best_params_file}: {e}")
+    
+    # --- 确保使用正确的模型类 --- 
+    model_type = config.model_config.get('model_type', 'SpectralResCNN_GCN') 
+    if model_type == 'SpectralResCNN_GCN': 
+        model = SpectralResCNN_GCN(device=device, use_gru=use_gru, **architecture_params)
+    else: 
+        # 需要添加其他模型类型的加载逻辑，或者抛出错误
+        logger.error(f"Unsupported model type '{model_type}' for loading in predict_and_analyze.")
+        return
+    # --- 结束模型类检查 --- 
+
+    # --- 修改: 调用 TrainingStateManager 的 load_checkpoint --- 
+    state_manager = TrainingStateManager(element=element, model_dir=config.model_config.get('model_dir', 'models'))
+    checkpoint = state_manager.load_checkpoint(model, device=device)
+    # --- 结束修改 --- 
+
+    if checkpoint is None:
+         logger.error(f"[{element}] Failed to load checkpoint for prediction via StateManager. Cannot proceed.")
+         return
+    model.to(device)
+    model.eval()
+    logger.info(f"[{element}] Model loaded successfully via StateManager.")
+
+    # 2. 加载新的预测数据 (仅光谱 X)
+    logger.info(f"[{element}] Loading new prediction data (spectra only) from: {predict_data_path}")
+    try:
+        data = np.load(predict_data_path, allow_pickle=True)
+        if 'spectra' in data:
+            X_pred = data['spectra']
+        elif 'X' in data:
+            X_pred = data['X']
+        else:
+            # 尝试加载第一个数组作为光谱数据
+            keys = list(data.keys())
+            logger.warning(f"Cannot find 'spectra' or 'X' key in {predict_data_path}. Attempting to use the first key '{keys[0]}' as spectra.")
+            if keys: X_pred = data[keys[0]]
+            else: raise ValueError("No data found in the prediction file.")
+            
+        # 确保 X_pred 是 numpy 数组
+        if not isinstance(X_pred, np.ndarray):
+            raise TypeError(f"Loaded prediction spectra data is not a numpy array (type: {type(X_pred)}). Check the .npz file structure.")
+            
+        logger.info(f"[{element}] Loaded {len(X_pred)} spectra for prediction.")
+    except Exception as e:
+        logger.error(f"[{element}] Failed to load prediction data: {e}")
+        logger.error(traceback.format_exc())
+        return
+
+    # 3. 创建预测数据加载器
+    try:
+        pred_loader = create_data_loaders(X_pred, np.zeros(len(X_pred)), # 标签是虚拟的
+                                          batch_size=config.training_config.get('batch_size', 128), 
+                                          shuffle=False)
+    except Exception as e:
+         logger.error(f"[{element}] Failed to create prediction DataLoader: {e}")
+         logger.error(traceback.format_exc())
+         return
+         
+    # 4. 执行预测
+    logger.info(f"[{element}] Predicting abundances for new data...")
+    all_predictions = []
+    try:
+        with torch.no_grad():
+            for batch_spectra, _ in pred_loader: # 忽略虚拟标签
+                batch_spectra = batch_spectra.to(device)
+                batch_spectra, _, _ = handle_nan_values(batch_spectra, replacement_strategy='mean', name="预测输入") 
+                with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
+                     outputs = model(batch_spectra)
+                outputs, _, _ = handle_nan_values(outputs, replacement_strategy='zero', name="预测输出")
+                all_predictions.append(outputs.cpu().numpy())
+    except Exception as pred_err:
+         logger.error(f"[{element}] Error during prediction loop: {pred_err}")
+         logger.error(traceback.format_exc())
+         return
+         
+    if not all_predictions:
+        logger.error(f"[{element}] Prediction failed or produced no results.")
+        return
+    try:
+        new_predictions = np.vstack(all_predictions).flatten()
+    except ValueError as stack_err:
+         logger.error(f"[{element}] Error stacking prediction results (check output dimensions?): {stack_err}")
+         logger.error(f"Prediction list content (first element shape): {all_predictions[0].shape if all_predictions else 'Empty'}")
+         return
+    logger.info(f"[{element}] Prediction complete. Generated {len(new_predictions)} predictions.")
+
+    # 5. 加载参考真实标签 (Train + Val + Test)
+    logger.info(f"[{element}] Loading reference true labels from Train/Val/Test sets...")
+    reference_labels = []
+    data_dir = config.data_config.get('processed_data_dir', 'processed_data')
+    try:
+        for phase in ['train', 'val', 'test']:
+            data_path = os.path.join(data_dir, f'{phase}_dataset.npz')
+            if os.path.exists(data_path):
+                _, y, elements_info = load_data(data_path, element)
+                if y is not None:
+                    if len(y.shape) > 1 and y.shape[1] > 1:
+                        if elements_info and isinstance(elements_info, dict) and element in elements_info:
+                            # Use dict key access for element index
+                            element_key_list = list(elements_info.keys())
+                            if element in element_key_list:
+                                 element_idx = element_key_list.index(element)
+                                 reference_labels.append(y[:, element_idx])
+                            else:
+                                 logger.warning(f"Element '{element}' not found in keys of elements_info dict in {phase}_dataset.npz. Keys: {element_key_list}")
+                                 reference_labels.append(y[:, 0]) # Fallback to first column
+                        else:
+                             logger.warning(f"Cannot determine column for {element} in {phase} labels (no/invalid elements_info), using first column.")
+                             reference_labels.append(y[:, 0])
+                    else:
+                        reference_labels.append(y.flatten())
+            else:
+                logger.warning(f"Reference data file not found: {data_path}")
+                
+        if not reference_labels:
+            logger.error(f"[{element}] Could not load any reference labels.")
+            return
+        reference_labels = np.concatenate(reference_labels)
+        logger.info(f"[{element}] Loaded {len(reference_labels)} reference labels.")
+        
+    except Exception as e:
+        logger.error(f"[{element}] Failed to load reference labels: {e}")
+        logger.error(traceback.format_exc())
+        return
+
+    # 6. 调用绘图函数
+    plot_prediction_distribution(element, new_predictions, analysis_plot_dir)
+    plot_distribution_comparison(element, new_predictions, reference_labels, analysis_plot_dir)
+
+    logger.info(f"[{element}] Prediction analysis plots generated in: {analysis_plot_dir}")
 
 if __name__ == '__main__':
     setup_logging()
