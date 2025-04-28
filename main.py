@@ -17,10 +17,7 @@ from sklearn.model_selection import ParameterGrid
 import pandas as pd
 import glob
 import traceback
-import json # <--- 添加 json 导入
 from torchvision import transforms
-from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
-from scipy.stats import pearsonr
 
 # 导入自定义模块
 import config
@@ -223,171 +220,78 @@ def calculate_dataset_stats(data_loader):
     else:
         return 0.0
 
-def visualize_mc_uncertainty(element, mean_predictions, uncertainties, targets, output_dir):
-    """
-    Visualize MC Dropout uncertainty analysis results.
-    """
-    logger.info(f"Generating MC Dropout uncertainty plots for element {element}...")
-    os.makedirs(output_dir, exist_ok=True)
-
-    # --- Remove Font Settings --- 
-    # plt.rcParams['font.sans-serif'] = ['SimHei'] 
-    # plt.rcParams['axes.unicode_minus'] = False   
-    # --- End Font Settings --- 
-
-    # Ensure consistent input lengths
-    min_len = min(len(mean_predictions), len(uncertainties), len(targets))
-    if min_len == 0:
-        logger.warning(f"MC Dropout input data is empty (element: {element}), skipping visualization.")
-        return
-    mean_predictions = mean_predictions[:min_len]
-    uncertainties = uncertainties[:min_len]
-    targets = targets[:min_len]
-        
-    # Calculate absolute errors
-    abs_errors = np.abs(targets - mean_predictions)
-
-    # Clean potential NaN/Inf values
-    valid_mask = np.isfinite(uncertainties) & np.isfinite(abs_errors)
-    if np.sum(valid_mask) < 2: 
-        logger.warning(f"Insufficient valid data after cleaning NaN/Inf for MC Dropout (element: {element}), skipping visualization.")
-        return
-    uncertainties_valid = uncertainties[valid_mask]
-    abs_errors_valid = abs_errors[valid_mask]
-
-    # 1. Plot Uncertainty vs. Absolute Error Scatter Plot
-    try:
-        plt.figure(figsize=(10, 6))
-        plt.scatter(uncertainties_valid, abs_errors_valid, alpha=0.4, label='Samples')
-
-        # Add trend line
-        z = np.polyfit(uncertainties_valid, abs_errors_valid, 1)
-        p = np.poly1d(z)
-        sorted_uncertainties = np.sort(uncertainties_valid)
-        plt.plot(sorted_uncertainties, p(sorted_uncertainties), "r--", label=f'Trend (y={z[0]:.2f}x+{z[1]:.2f})')
-
-        # Calculate Pearson correlation
-        correlation, p_value = pearsonr(uncertainties_valid, abs_errors_valid)
-        # English Title
-        plt.title(f'{element} - MC Dropout Uncertainty vs. Absolute Error\nCorrelation: {correlation:.3f} (p={p_value:.3g})') 
-
-        plt.xlabel('Prediction Uncertainty (Std Dev)')
-        plt.ylabel('Absolute Error (|True - Mean Prediction|)')
-        plt.legend()
-        plt.grid(False) # <--- Explicitly disable grid
-        scatter_plot_path = os.path.join(output_dir, f'{element}_mc_uncertainty_vs_error_scatter.png')
-        plt.savefig(scatter_plot_path)
-        plt.close()
-        logger.info(f"Uncertainty vs. Error scatter plot saved: {scatter_plot_path}")
-    except Exception as e:
-        logger.error(f"Error plotting MC Dropout scatter plot: {e}", exc_info=True)
-        plt.close() 
-
-    # 2. Plot Error Box Plot by Uncertainty Bins
-    try:
-        num_bins = 4
-        uncertainty_bins = pd.qcut(uncertainties_valid, q=num_bins, labels=False, duplicates='drop')
-        actual_num_bins = len(np.unique(uncertainty_bins))
-        if actual_num_bins == 0: raise ValueError("No valid bins after qcut")
-        # English Labels for bins
-        bin_labels = [f'{i*100/actual_num_bins:.0f}-{(i+1)*100/actual_num_bins:.0f}%' for i in range(actual_num_bins)]
-
-        error_data_in_bins = []
-        actual_bin_labels = []
-        unique_bins = sorted(np.unique(uncertainty_bins))
-        for i, bin_idx in enumerate(unique_bins):
-             mask = (uncertainty_bins == bin_idx)
-             if np.sum(mask) > 0:
-                 error_data_in_bins.append(abs_errors_valid[mask])
-                 actual_bin_labels.append(bin_labels[i])
-
-        if not error_data_in_bins:
-            raise ValueError("Could not create data for uncertainty bins")
-
-        plt.figure(figsize=(10, 6))
-        box = plt.boxplot(error_data_in_bins, labels=actual_bin_labels, patch_artist=True, showfliers=True)
-
-        colors = plt.cm.viridis(np.linspace(0, 1, len(error_data_in_bins)))
-        for patch, color in zip(box['boxes'], colors):
-            patch.set_facecolor(color)
-            patch.set_alpha(0.7)
-        for median in box['medians']:
-            median.set_color('black')
-            median.set_linewidth(2)
-
-        # English Title and Labels
-        plt.title(f'{element} - Absolute Error Distribution by Uncertainty Quantile')
-        plt.xlabel('Prediction Uncertainty Percentile Range')
-        plt.ylabel('Absolute Error')
-        plt.grid(False) # <--- Explicitly disable grid
-        boxplot_path = os.path.join(output_dir, f'{element}_mc_error_boxplot_by_uncertainty.png')
-        plt.savefig(boxplot_path)
-        plt.close()
-        logger.info(f"Error box plot by uncertainty bins saved: {boxplot_path}")
-
-    except ValueError as ve:
-        logger.warning(f"Could not create error box plot for {element} (maybe too few points or distribution issue): {ve}")
-        plt.close()
-    except Exception as e:
-        logger.error(f"Error plotting error box plot: {e}", exc_info=True)
-        plt.close()
-
-    logger.info(f"MC Dropout uncertainty visualization finished for {element}.")
-
 def train_and_evaluate_model(model, train_loader, val_loader, test_loader, element, device, config, augment_fn=None):
     """
-    训练和评估模型 (恢复到原始状态，仅训练和标准评估)
+    训练和评估模型
     """
-    logger = logging.getLogger('train_eval')
     try:
-        # 1. 训练模型
-        logger.info(f"[{element}] 开始训练...")
-        # 假设 train 返回: model(最佳状态), best_val_loss, final_val_r2, history
-        model, best_val_loss_from_train, final_val_r2_from_train, history = train(
+        import json
+        device = config.training_config['device']
+        
+        # 创建训练状态目录
+        os.makedirs('models/training_states', exist_ok=True)
+        state_file = f'models/training_states/training_state_{element}.json'
+        
+        # 如果存在训练状态文件，加载它
+        if os.path.exists(state_file):
+            with open(state_file, 'r') as f:
+                state = json.load(f)
+                start_epoch = state.get('epoch', 0)
+                best_val_loss = state.get('best_val_loss', float('inf'))
+                logger.info(f"从训练状态文件加载：epoch={start_epoch}, best_val_loss={best_val_loss}")
+        else:
+            start_epoch = 0
+            best_val_loss = float('inf')
+            logger.info("未找到训练状态文件，从头开始训练")
+        
+        # 训练模型
+        best_model, val_loss, val_r2, history = train(
             model=model,
             train_loader=train_loader,
             val_loader=val_loader,
             element=element,
             device=device,
             config=config,
-            augment_fn=augment_fn
+            augment_fn=augment_fn,
+            start_epoch=start_epoch
         )
-        logger.info(f"[{element}] 训练完成。最佳验证损失: {best_val_loss_from_train:.6f}, 最终验证 R²: {final_val_r2_from_train:.4f}")
-        model.eval() # 确保模型处于评估模式
 
-        # 2. 标准测试集评估
-        logger.info(f"[{element}] 开始标准测试集评估...")
-        loss_type = config.training_config.get('loss_function', 'MSE'); actual_loss_used = loss_type
-        loss_params = config.training_config.get('loss_params', {})
-        if loss_type.upper() == 'MSE': loss_fn = torch.nn.MSELoss()
-        elif loss_type.upper() == 'MAE': loss_fn = torch.nn.L1Loss()
-        elif loss_type.upper() == 'HUBER': delta = loss_params.get('delta', 1.0); loss_fn = torch.nn.HuberLoss(delta=delta)
-        else: loss_fn = torch.nn.MSELoss(); actual_loss_used = 'MSE'
-        logger.info(f"[{element}] 测试评估使用损失函数: {actual_loss_used}")
+        # <<< Define loss_fn before calling evaluate_model >>>
+        # Assuming MSELoss is the appropriate loss function here, same as used in train?
+        # Need to get loss_type from config if it varies
+        loss_type = config.training_config.get('loss_function', 'MSE')
+        actual_loss_used = loss_type # Track the actual loss function being used
         
-        # 执行评估，获取指标、预测和目标
-        avg_loss, metrics, predictions, targets = evaluate_model(model, test_loader, device, loss_fn)
-        logger.info(f"[{element}] 测试指标: {metrics}")
+        if loss_type.upper() == 'MSE': # Use upper() for case-insensitivity
+             loss_fn = torch.nn.MSELoss()
+        elif loss_type.upper() == 'MAE': # Use upper() for case-insensitivity
+             loss_fn = torch.nn.L1Loss()
+        elif loss_type.upper() == 'HUBER': # Add Huber loss support
+             loss_fn = torch.nn.HuberLoss() # Instantiate HuberLoss
+        else:
+             logger.warning(f"未知的损失函数类型 '{loss_type}' 用于测试集评估，将默认使用 MSELoss。")
+             loss_fn = torch.nn.MSELoss()
+             actual_loss_used = 'MSE' # Update the actual loss used tracker
         
-        # 保存测试指标 (可选，但通常有用)
-        try:
-            results_dir = config.output_config.get('results_dir', 'results'); element_eval_dir = os.path.join(results_dir, 'evaluation', element); os.makedirs(element_eval_dir, exist_ok=True)
-            metrics_file_path = os.path.join(element_eval_dir, f'{element}_test_metrics.json') # Use a standard name
-            serializable_metrics = {k: (float(f'{v:.6g}') if isinstance(v, np.floating) else float(v)) if isinstance(v, (np.number, np.bool_)) else v for k, v in metrics.items()}
-            with open(metrics_file_path, 'w') as f: json.dump(serializable_metrics, f, indent=4)
-            logger.info(f"[{element}] 测试指标已保存到: {metrics_file_path}")
-        except Exception as save_err: logger.error(f"[{element}] 保存测试指标时出错: {save_err}")
+        logger.info(f"在最终（测试集）评估中使用损失函数: {actual_loss_used}") # Log the actual loss used
+        # <<< End define loss_fn >>>
 
-        # 3. 返回 process_element 需要的值
-        # 假设 process_element 需要这些来进行后续可视化
-        logger.info(f"[{element}] train_and_evaluate_model 即将返回。")
-        return model, history, predictions, targets, metrics
+        # 训练完成后，使用 test_loader 评估最佳模型
+        if best_model is not None:
+            logger.info(f"使用测试集评估元素 {element} 的最佳模型")
+            # <<< Pass loss_fn to evaluate_model >>>
+            _, test_metrics, _, _ = evaluate_model(best_model, test_loader, device, loss_fn)
+            logger.info(f"元素 {element} 的测试指标: {test_metrics}")
+        else:
+            logger.warning(f"元素 {element} 未能训练出有效模型，无法进行测试评估")
+            test_metrics = {'mse': float('nan'), 'mae': float('nan'), 'r2': float('nan')} # 或者其他表示失败的值
 
+        return best_model, val_loss, test_metrics, history
+        
     except Exception as e:
-        logger.error(f"[{element}] 在 train_and_evaluate_model 中发生严重错误: {str(e)}")
+        logger.error(f"训练元素 {element} 时出错: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
-        # 返回 None 或空值表示失败
-        return None, {}, np.array([]), np.array([]), {'rmse': np.nan, 'mae': np.nan, 'r2': np.nan, 'mse': np.nan}
+        raise # Re-raise the exception after logging
 
 def hyperparameter_tuning(element, train_loader, val_loader, config):
     """
@@ -635,140 +539,418 @@ class TrainingStateManager:
             os.remove(self.checkpoint_file)
         return True
 
-# --- 修改 process_element 函数 --- 
+# --- 修改 process_element 函数签名以接收 architecture_params ---
 def process_element(element, config, architecture_params={}):
-    # ... (保留函数开始部分：获取日志、配置、加载数据、创建模型、加载器等) ...
+    # 在函数开始处添加
     logger = logging.getLogger('process_element')
-    # ... (配置获取和日志记录) ...
-    use_gru = getattr(config, 'use_gru', True); use_gcn = False # GCN is removed
-    device = config.training_config['device']
-    state_manager = TrainingStateManager(element=element, model_dir=config.model_config.get('model_dir', 'models'))
+    logger.info(f"正在处理元素: {element}")
+    
+    # 从更新后的 config 或 命令行参数 获取 use_gru, use_gcn
+    # 注意: GCN已被移除, use_gcn 始终为 False
+    use_gru = getattr(config, 'use_gru', True)  
+    use_gcn = False # GCN is removed from the model
+    
+    # 获取模型输入大小 (如果模型需要)
+    # input_size = config.model_config.get('input_size') # 如果需要显式传递
+    
+    logger.info(f"模型配置: 使用GRU={use_gru}")
+    if architecture_params:
+         logger.info(f"使用架构参数: {architecture_params}")
+    else:
+         logger.info("使用默认模型架构")
+     
+    # 检查GPU可用性
+    if config.training_config['device'].type == 'cuda':
+        logger.info("GPU可用，使用GPU")
+    else:
+        logger.info("GPU不可用，使用CPU")
+    
+    # 创建训练状态管理器
+    state_manager = TrainingStateManager(
+        element=element, 
+        model_dir=config.model_config.get('model_dir', 'models')
+    )
+    
+    # 配置设备
+    if config.training_config['device'].type == 'cuda':
+        device = torch.device('cuda')
+        logger.info(f"使用GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        device = torch.device('cpu')
+        logger.info("使用CPU")
+    
+    # 设置配置中的设备
+    config.training_config['device'] = device
+    
+    # 将GRU和GCN使用设置添加到配置中
+    config.use_gru = use_gru
+    config.use_gcn = use_gcn
     
     # 加载数据
-    # ... (加载 X_train, y_train, X_val, y_val, X_test, y_test) ...
-    train_path = os.path.join('processed_data', 'train_dataset.npz'); X_train, y_train, _ = load_data(train_path, element)
-    val_path = os.path.join('processed_data', 'val_dataset.npz'); X_val, y_val, _ = load_data(val_path, element)
-    test_path = os.path.join('processed_data', 'test_dataset.npz'); X_test, y_test, _ = load_data(test_path, element)
+    logger.info(f"加载元素 {element} 的数据")
+    train_path = os.path.join('processed_data', 'train_dataset.npz')
+    val_path = os.path.join('processed_data', 'val_dataset.npz')
+    test_path = os.path.join('processed_data', 'test_dataset.npz')
+    
+    X_train, y_train, _ = load_data(train_path, element)
+    X_val, y_val, _ = load_data(val_path, element)
+    X_test, y_test, _ = load_data(test_path, element)
+    
+    # 获取实际输入大小
+    actual_input_size = X_train.shape[1] if len(X_train.shape) == 2 else X_train.shape[2]
+    if config.model_config.get('input_size') is None:
+        config.model_config['input_size'] = actual_input_size
+        logger.info(f"使用实际输入大小: {config.model_config['input_size']}")
     
     # 创建模型
-    # ... (创建模型实例 model) ...
-    model_type = config.model_config.get('model_type', 'SpectralResCNN_GCN'); 
-    if model_type == 'SpectralResCNN_GCN': model = SpectralResCNN_GCN(device=device, use_gru=use_gru, **architecture_params)
-    else: raise ValueError(f"未知的模型类型: {model_type}")
+    # 使用配置中的模型类型，如果未指定则默认为 'SpectralResCNN_GCN'
+    model_type = config.model_config.get('model_type', 'SpectralResCNN_GCN')
+    
+    logger.info(f"为元素 {element} 创建 {model_type} 模型，输入大小: {config.model_config['input_size']}")
+    
+    if model_type == 'SpectralResCNN_GCN':
+        model = SpectralResCNN_GCN(
+            device=device, 
+            use_gru=use_gru, 
+            # use_gcn=use_gcn
+            **architecture_params # 使用字典解包传递架构参数
+        )
+    elif model_type == 'SpectralResCNN':
+        model = SpectralResCNN(input_size=config.model_config['input_size'])
+    elif model_type == 'SpectralResCNNEnsemble':
+        model = SpectralResCNNEnsemble(input_size=config.model_config['input_size'])
+    else:
+        logger.error(f"未知的模型类型: {model_type}")
+        raise ValueError(f"未知的模型类型: {model_type}")
     
     # 创建数据加载器
-    # ... (创建 train_loader, val_loader, test_loader) ...
     batch_size = config.training_config.get('batch_size', 32)
+    logger.info(f"创建数据加载器，批量大小: {batch_size}")
+    
     train_loader = create_data_loaders(X_train, y_train, batch_size=batch_size)
     val_loader = create_data_loaders(X_val, y_val, batch_size=batch_size, shuffle=False)
     test_loader = create_data_loaders(X_test, y_test, batch_size=batch_size, shuffle=False)
-    augment_fn = None # ... (增强逻辑) ...
+    
+    # 确定数据增强函数
+    augment_fn = None
     if config.data_config.get('augmentation_enabled', False):
         noise_level = config.data_config.get('augmentation_params', {}).get('noise_level', 0.01)
+        # 修改 lambda 表达式以匹配新的 add_noise 签名
         augment_fn = lambda data: add_noise(data, noise_level)
         logger.info(f"数据增强已启用，噪声水平: {noise_level}")
 
-    # 恢复训练状态
-    # ... (state_manager.load_state() 和 checkpoint 加载逻辑) ...
+    # 检查是否存在训练状态
     state = state_manager.load_state()
     if state and not state.get('training_completed', False):
-        # ... (创建 optimizer, scheduler, 加载 checkpoint) ...
-        pass
-
-    # --- 调用 train_and_evaluate_model --- 
-    logger.info(f"开始调用 train_and_evaluate_model 处理 {element}")
-    # 假设它返回: model, history, original_predictions, original_targets, original_metrics
-    returned_model, training_history, original_predictions, original_targets, original_metrics = train_and_evaluate_model(
+        logger.info(f"发现未完成的训练状态，准备从中断点恢复")
+        
+        # 创建优化器和调度器以便加载检查点
+        optimizer = torch.optim.Adam(model.parameters(), 
+                                    lr=config.training_config.get('lr', 0.001),
+                                    weight_decay=config.training_config.get('weight_decay', 1e-4))
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
+        
+        # 加载检查点
+        checkpoint = state_manager.load_checkpoint(model, optimizer, scheduler, device)
+        if checkpoint:
+            logger.info("成功恢复模型状态，将从中断点继续训练")
+        else:
+            logger.warning("无法恢复模型状态，将从头开始训练")
+    
+    # 训练和评估模型
+    logger.info(f"开始训练 {element} 模型")
+    
+    # 如果为TPU，添加特殊数据加载器处理
+    if str(device).startswith('xla'):
+        try:
+            if HAS_PARALLEL_LOADER:
+                logger.info("使用TPU并行数据加载器")
+                # 用TPU特定的数据加载器包装原始加载器
+                train_loader = pl.MpDeviceLoader(train_loader, device)
+                val_loader = pl.MpDeviceLoader(val_loader, device)
+                test_loader = pl.MpDeviceLoader(test_loader, device)
+            else:
+                logger.warning("无法使用TPU并行数据加载器，使用标准加载器")
+        except ImportError:
+            logger.warning("无法使用TPU并行数据加载器，使用标准加载器")
+    
+    # 进行训练和评估
+    best_model, val_loss, test_metrics, training_history = train_and_evaluate_model(
         model, train_loader, val_loader, test_loader, element, device, config, augment_fn=augment_fn
     )
+    
+    # <<< Add saving test metrics to JSON >>>
+    if best_model is not None and test_metrics:
+        try:
+            import json
+            # Ensure output directory exists
+            results_dir = config.output_config.get('results_dir', 'results')
+            element_eval_dir = os.path.join(results_dir, 'evaluation', element)
+            os.makedirs(element_eval_dir, exist_ok=True)
+            
+            metrics_file_path = os.path.join(element_eval_dir, f'{element}_test_metrics.json')
+            
+            # Convert numpy types for JSON serialization
+            serializable_metrics = {}
+            for k, v in test_metrics.items():
+                if isinstance(v, (np.number, np.bool_)):
+                     # Handle potential precision issues for floats
+                    serializable_metrics[k] = float(f'{v:.6g}') if isinstance(v, np.floating) else float(v)
+                elif isinstance(v, np.ndarray):
+                    serializable_metrics[k] = v.tolist() # Convert numpy arrays if any
+                else:
+                    serializable_metrics[k] = v # Keep other types as is
 
-    if returned_model is None: # 检查 train_and_evaluate_model 是否成功
-        logger.error(f"元素 {element} 的 train_and_evaluate_model 执行失败，跳过后续处理。")
-        return None, None # 或者适合的错误返回值
-    else:
-        model = returned_model # 使用返回的最佳模型
+            with open(metrics_file_path, 'w') as f:
+                json.dump(serializable_metrics, f, indent=4)
+            logger.info(f"最终测试指标已保存到: {metrics_file_path}")
+            
+        except Exception as save_err:
+            logger.error(f"保存元素 {element} 的测试指标文件时出错: {save_err}")
+    # <<< End saving test metrics >>>
 
-    # --- 标准可视化 (现在在这里进行) --- 
-    logger.info(f"为 {element} 生成标准可视化图表")
-    plots_dir = config.output_config.get('plots_dir', 'plots')
-    element_plot_dir = os.path.join(plots_dir, 'evaluation', element)
-    os.makedirs(element_plot_dir, exist_ok=True)
+    # 训练完成，清除中断恢复状态
+    state_manager.save_state(2, config.training_config.get('num_epochs', 100), val_loss, 0, 
+                            stage1_completed=True, training_completed=True)
+    
+    logger.info(f"元素 {element} 的处理完成")
+    logger.info(f"验证损失: {val_loss:.6f}")
+    logger.info(f"测试指标: {test_metrics}")
+    logger.info(f"R² Score (Test): {test_metrics.get('r2', 'N/A')}") # Explicitly log R²
+    
+    # --- 开始添加可视化代码 ---
     try:
-        # 1. 训练过程可视化
+        # 需要重新获取测试集的预测值和真实值
+        logger.info(f"为 {element} 生成可视化图表")
+        # <<< Ensure model is on the correct device before inference >>>
+        model = model.to(device) 
+        model.eval() # 确保模型在评估模式
+        all_outputs = []
+        all_targets = []
+        
+        # <<< Define element_plot_dir HERE >>>
+        plots_dir = config.output_config.get('plots_dir', 'plots') # Get top-level plots directory
+        element_plot_dir = os.path.join(plots_dir, 'evaluation', element) # Define element-specific plot directory
+        os.makedirs(element_plot_dir, exist_ok=True) # Ensure the directory exists
+        # <<< End define element_plot_dir >>>
+        
+        with torch.no_grad():
+            for inputs, targets in test_loader:
+                inputs, targets = inputs.to(device), targets.to(device)
+                 # 处理输入数据中的NaN值 (如果需要)
+                inputs, _, _ = handle_nan_values(inputs, replacement_strategy='mean', name="绘图输入数据")
+                
+                # <<< Re-apply AUTOCAST HERE for visualization inference >>>
+                with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
+                     outputs = model(inputs)
+                # <<< END AUTOCAST >>>
+
+                # 处理输出中的NaN值 (如果需要)
+                outputs, _, _ = handle_nan_values(outputs, replacement_strategy='zero', name="绘图模型输出")
+
+                # 移动到 CPU 并转换为 numpy
+                if str(device).startswith('xla'):
+                     # Ensure tensor operations are complete before moving for TPU
+                     xm.mark_step()
+                     # Use synchronous send for simplicity during visualization/debugging
+                     cpu_outputs = outputs.cpu().numpy()
+                     cpu_targets = targets.cpu().numpy()
+                else:
+                    cpu_outputs = outputs.cpu().numpy()
+                    cpu_targets = targets.cpu().numpy()
+                
+                all_outputs.append(cpu_outputs)
+                all_targets.append(cpu_targets)
+
+        if all_outputs and all_targets:
+            y_pred = np.vstack(all_outputs).flatten()
+            y_true = np.vstack(all_targets).flatten()
+
+            # 清理 NaN 值以防万一
+            valid_mask = ~np.isnan(y_pred) & ~np.isnan(y_true)
+            y_pred = y_pred[valid_mask]
+            y_true = y_true[valid_mask]
+
+            if len(y_pred) > 0:
+                # 绘制散点图: 预测值 vs 真实值
+                plt.figure(figsize=(10, 6))
+                # Use valid data for plotting
+                plt.scatter(y_true, y_pred, alpha=0.5, color='black') # Change color to black
+                # 添加 y=x 对角线作为参考
+                # Calculate limits based on valid data
+                min_val = min(np.min(y_true), np.min(y_pred)) if len(y_true)>0 else 0
+                max_val = max(np.max(y_true), np.max(y_pred)) if len(y_true)>0 else 1
+                plt.plot([min_val, max_val], [min_val, max_val], 'r--') # Change color to red
+                plt.title(f'Prediction vs True for {element}')
+                plt.xlabel('True Values')
+                plt.ylabel('Predicted Values')
+                # plt.legend() # Removed legend as only one line
+                # plt.grid(True, alpha=0.3) # Remove grid
+                # Use defined element_plot_dir
+                scatter_path = os.path.join(element_plot_dir, f'{element}_scatter_pred_true.png') 
+                plt.savefig(scatter_path)
+                plt.close()
+                logger.info(f"散点图已保存至: {scatter_path}")
+
+                # 绘制残差图: 残差 vs 真实值 (Original)
+                residuals = y_true - y_pred
+                plt.figure(figsize=(10, 6))
+                plt.scatter(y_true, residuals, alpha=0.5)
+                plt.axhline(0, color='red', linestyle='--')
+                plt.title(f'Residuals vs True for {element}')
+                plt.xlabel('True Values')
+                plt.ylabel('Residuals (True - Predicted)')
+                # plt.legend() # Removed legend
+                # plt.grid(True, alpha=0.3) # Remove grid
+                # Use defined element_plot_dir
+                residual_true_path = os.path.join(element_plot_dir, f'{element}_residuals_vs_true.png') 
+                plt.savefig(residual_true_path)
+                plt.close()
+                logger.info(f"残差图 (vs True) 已保存至: {residual_true_path}")
+
+                # --- 添加残差图: 残差 vs 预测值 --- 
+                plt.figure(figsize=(10, 6))
+                plt.scatter(y_pred, residuals, alpha=0.5, color='blue') # Use blue color
+                plt.axhline(0, color='red', linestyle='--')
+                plt.title(f'Residuals vs Predicted for {element}')
+                plt.xlabel('Predicted Values')
+                plt.ylabel('Residuals (True - Predicted)')
+                # plt.grid(True, alpha=0.3) # Remove grid
+                residual_pred_path = os.path.join(element_plot_dir, f'{element}_residuals_vs_pred.png')
+                plt.savefig(residual_pred_path)
+                plt.close()
+                logger.info(f"残差图 (vs Predicted) 已保存至: {residual_pred_path}")
+                # --- 结束添加残差图 ---
+                
+                # 绘制残差分布直方图 (多颜色版本)
+                hist_colors = ['orange', 'blue', 'green']
+                mean_residual = np.mean(residuals)
+                std_residual = np.std(residuals)
+                
+                for color in hist_colors:
+                    plt.figure(figsize=(10, 6))
+                    # 使用 density=True 来绘制频率密度而不是频数
+                    n, bins, patches = plt.hist(residuals, bins=30, alpha=0.7, density=True, color=color, label=f'{color.capitalize()} Histogram')
+                    
+                    # --- 添加 KDE 曲线 --- 
+                    try:
+                        from scipy.stats import gaussian_kde
+                        kde = gaussian_kde(residuals)
+                        x_range = np.linspace(bins[0], bins[-1], 500)
+                        kde_y = kde(x_range)
+                        plt.plot(x_range, kde_y, color='black', linestyle='-', linewidth=1.5, label='KDE')
+                    except ImportError:
+                        logger.warning("Scipy 未安装，无法绘制 KDE 曲线。请运行 'pip install scipy'")
+                    except Exception as kde_err:
+                        logger.warning(f"绘制 KDE 曲线时出错: {kde_err}")
+                    # --- 结束添加 KDE --- 
+
+                    # 添加均值和标准差信息
+                    plt.axvline(mean_residual, color='red', linestyle='--', label=f'Mean: {mean_residual:.4f}')
+                    plt.axvline(0, color='black', linestyle='-', label='Zero Error') # Change zero line color to black
+                    plt.title(f'Residual Distribution for {element} (Mean: {mean_residual:.4f}, Std: {std_residual:.4f})')
+                    plt.xlabel('Residual Value')
+                    plt.ylabel('Density') # Y-axis is Density now
+                    plt.legend()
+                    # plt.grid(True, alpha=0.3) # Remove grid
+                    # Use defined element_plot_dir and add color to filename
+                    hist_path = os.path.join(element_plot_dir, f'{element}_residuals_hist_{color}.png') 
+                    plt.savefig(hist_path)
+                    plt.close()
+                    logger.info(f"残差直方图 ({color}) 已保存至: {hist_path}")
+
+                # --- 添加箱线图 --- 
+                plt.figure(figsize=(8, 6))
+                plt.boxplot(residuals, vert=True, patch_artist=True, showmeans=True)
+                plt.title(f'Residual Box Plot for {element}')
+                plt.ylabel('Residual Value')
+                plt.xticks([1], ['Residuals']) # Label the x-axis category
+                # plt.grid(axis='y', linestyle='--', alpha=0.7) # Optionally add horizontal grid
+                boxplot_path = os.path.join(element_plot_dir, f'{element}_residuals_boxplot.png')
+                plt.savefig(boxplot_path)
+                plt.close()
+                logger.info(f"残差箱线图已保存至: {boxplot_path}")
+                # --- 结束添加箱线图 --- 
+
+                # --- 添加误差棒图 (方案四：按预测值分箱) --- 
+                try:
+                    num_bins = 10 # 可以调整分箱数量
+                    # --- Ensure bin_edges are float64 --- 
+                    pred_min = np.min(y_pred).astype(np.float64) # Convert min to float64
+                    pred_max = np.max(y_pred).astype(np.float64) # Convert max to float64
+                    # 创建预测值的分箱边界, specify dtype=float64
+                    bin_edges = np.linspace(pred_min, pred_max, num_bins + 1, dtype=np.float64)
+                    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                    
+                    # 计算每个箱子内残差的均值和标准差
+                    bin_means = np.zeros(num_bins)
+                    bin_stds = np.zeros(num_bins)
+                    bin_counts = np.zeros(num_bins, dtype=int)
+                    
+                    # 使用 pandas 更方便地进行分箱计算
+                    # --- Convert y_pred to float32 before creating DataFrame --- 
+                    df_temp = pd.DataFrame({'y_pred': y_pred.astype(np.float32), 'residuals': residuals})
+                    df_temp['bin'] = pd.cut(df_temp['y_pred'], bins=bin_edges, include_lowest=True, labels=False)
+                    
+                    grouped = df_temp.groupby('bin')['residuals']
+                    bin_means = grouped.mean().fillna(0) # Fill NaN if a bin is empty
+                    bin_stds = grouped.std().fillna(0)  # Fill NaN if a bin is empty
+                    bin_counts = grouped.count()
+                    
+                    # --- Reindex to ensure arrays have size num_bins --- 
+                    full_index = pd.RangeIndex(num_bins) # Index from 0 to num_bins-1
+                    bin_means = bin_means.reindex(full_index, fill_value=0)
+                    bin_stds = bin_stds.reindex(full_index, fill_value=0)
+                    bin_counts = bin_counts.reindex(full_index, fill_value=0)
+                    # --- End Reindex --- 
+
+                    # 仅绘制包含数据的箱子
+                    valid_bins_mask = bin_counts > 0
+                    valid_bin_centers = bin_centers[valid_bins_mask]
+                    valid_bin_means = bin_means[valid_bins_mask]
+                    valid_bin_stds = bin_stds[valid_bins_mask]
+
+                    if len(valid_bin_centers) > 0:
+                        plt.figure(figsize=(12, 7))
+                        plt.errorbar(valid_bin_centers, valid_bin_means, yerr=valid_bin_stds, 
+                                     fmt='o', # 点标记
+                                     capsize=5, # 误差棒末端帽子的大小
+                                     linestyle='-', # 连接点的线
+                                     label='Mean Residual ± Std Dev')
+                        plt.axhline(0, color='red', linestyle='--', label='Zero Error')
+                        plt.title(f'Mean Residual vs. Binned Predicted Value for {element}')
+                        plt.xlabel('Predicted Value Bins')
+                        plt.ylabel('Mean Residual in Bin')
+                        plt.legend()
+                        # plt.grid(True, linestyle='--', alpha=0.5)
+                        errorbar_path = os.path.join(element_plot_dir, f'{element}_residuals_errorbar_vs_pred_bins.png')
+                        plt.savefig(errorbar_path)
+                        plt.close()
+                        logger.info(f"残差误差棒图 (按预测值分箱) 已保存至: {errorbar_path}")
+                    else:
+                         logger.warning(f"元素 {element} 没有足够的有效分箱数据，无法生成误差棒图。")
+
+                except Exception as e:
+                    logger.error(f"绘制误差棒图时出错: {e}")
+                    logger.error(traceback.format_exc())
+                # --- 结束添加误差棒图 --- 
+
+            else:
+                 logger.warning(f"元素 {element} 没有有效的预测数据，无法生成可视化图表。")
+
+        # <<< Plot training progress using the history >>> 
         if training_history:
              visualize_training_progress(element, training_history, element_plot_dir)
-        else: logger.warning(f"[{element}] 缺少训练历史，无法绘制训练过程图表。")
-        
-        # 2. 评估结果可视化 (使用返回的原始预测和目标)
-        if original_predictions.size > 0 and original_targets.size > 0:
-            # --- 修改调用点，使用新的 visualize_simple_predictions --- 
-            logger.info(f"调用 visualize_simple_predictions 进行标准评估可视化...")
-            visualize_simple_predictions( # <--- 调用新函数
-                element=element,
-                targets=original_targets, # 直接传递数组
-                predictions=original_predictions, # 直接传递数组
-                output_dir=element_plot_dir
-            )
-            # --- 结束修改调用点 ---
-        else: logger.warning(f"[{element}] 缺少原始预测或目标数据，无法绘制评估结果图表。")
-            
-    except NameError as ne:
-         if 'visualize_training_progress' in str(ne):
-              logger.error("函数 visualize_training_progress 未定义或未导入!")
-         elif 'visualize_simple_predictions' in str(ne): # <--- 更新检查的函数名
-              logger.error("函数 visualize_simple_predictions 未定义或未导入!")
-         else: logger.error(f"标准可视化时发生 NameError: {ne}")
-    except Exception as viz_err:
-         logger.error(f"生成标准可视化时出错: {viz_err}", exc_info=True)
 
-    # --- MC Dropout 评估和可视化 (新添加的部分) --- 
-    logger.info(f"为 {element} 进行 MC Dropout 不确定性评估...")
-    try:
-        from model import predict_with_mc_dropout # 从 model.py 导入
-        mc_samples = config.training_config.get('mc_samples', 50)
-        
-        # 使用返回的最佳模型进行 MC 预测
-        mc_mean_predictions, mc_uncertainties, mc_targets = predict_with_mc_dropout(
-            model=model, # 使用从 train_and_evaluate_model 返回的最佳模型
-            data_loader=test_loader, 
-            device=device,
-            mc_samples=mc_samples
-        )
-        
-        # 计算 MC 指标 (可选)
-        mc_rmse = np.sqrt(mean_squared_error(mc_targets, mc_mean_predictions))
-        mc_mae = mean_absolute_error(mc_targets, mc_mean_predictions)
-        mc_r2 = r2_score(mc_targets, mc_mean_predictions)
-        logger.info(f"[{element}] MC Dropout 评估 (基于平均预测): RMSE={mc_rmse:.6f}, MAE={mc_mae:.6f}, R²={mc_r2:.6f}")
-        logger.info(f"[{element}] MC Dropout 不确定性统计: Mean={np.mean(mc_uncertainties):.6f}, Median={np.median(mc_uncertainties):.6f}, Std={np.std(mc_uncertainties):.6f}")
-        
-        # 调用 MC 可视化函数 (假设已在 main.py 定义)
-        visualize_mc_uncertainty(
-            element=element,
-            mean_predictions=mc_mean_predictions,
-            uncertainties=mc_uncertainties,
-            targets=mc_targets, # 使用 MC 预测返回的目标值
-            output_dir=element_plot_dir # 复用之前的绘图目录
-        )
-    except ImportError:
-         logger.error(f"[{element}] 无法从 model.py 导入 predict_with_mc_dropout，跳过 MC Dropout。")
     except NameError as ne:
-         if 'visualize_mc_uncertainty' in str(ne):
-              logger.error(f"[{element}] 函数 visualize_mc_uncertainty 未定义，跳过 MC 可视化。")
-         else: logger.error(f"[{element}] MC Dropout 过程中发生 NameError: {ne}")
-    except Exception as mc_err:
-         logger.error(f"[{element}] 执行 MC Dropout 时出错: {mc_err}", exc_info=True)
+        logger.error(f"生成可视化图表时变量未定义: {ne}") # Specific logging for NameError
+        logger.error(traceback.format_exc())
+    except Exception as plot_err:
+        logger.error(f"为 {element} 生成可视化图表时出错: {plot_err}")
+        logger.error(traceback.format_exc())
+    # --- 结束可视化代码 ---
 
-    # --- 处理完成 --- 
-    # 训练完成，标记状态 (如果需要)
-    state_manager.save_state(2, config.training_config.get('num_epochs', 100), 
-                            original_metrics.get('loss', np.nan), # 使用原始评估损失？或最佳验证损失？
-                            0, stage1_completed=True, training_completed=True)
-    logger.info(f"元素 {element} 的处理完成")
-    logger.info(f"最终测试指标 (原始): {original_metrics}")
-    
-    # 返回模型和原始指标给 main 函数 (如果需要)
-    return model, original_metrics
+    return best_model, val_loss, test_metrics
 
 def process_multiple_elements(csv_file, fits_dir, element_columns=None, 
                              test_size=0.2, val_size=0.1, batch_size=32, 
@@ -1832,155 +2014,6 @@ def main():
     # Remove the old redundant blocks at the end
     # if args.mode == 'test' or args.mode == 'all': ... (DELETE this block)
 
-def calculate_calibration_map(model, val_loader, device, num_bins=10):
-    """
-    计算基于验证集预测值分箱的平均残差，用于后续校准。
-    """
-    logger.info(f"开始计算校准映射 (基于验证集预测值分箱，bins={num_bins})")
-    model.eval()
-    all_val_preds = []
-    all_val_targets = []
-    
-    with torch.no_grad():
-        for inputs, targets in val_loader:
-            inputs, targets = inputs.to(device), targets.to(device)
-            inputs, _, _ = handle_nan_values(inputs, replacement_strategy='mean', name="校准输入数据")
-            with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
-                outputs = model(inputs)
-            outputs, _, _ = handle_nan_values(outputs, replacement_strategy='zero', name="校准模型输出")
-            all_val_preds.append(outputs.cpu().numpy())
-            all_val_targets.append(targets.cpu().numpy())
-    
-    if not all_val_preds or not all_val_targets:
-        logger.warning("验证集预测为空，无法计算校准映射。")
-        return {}, None
-    
-    val_preds = np.vstack(all_val_preds).flatten()
-    val_targets = np.vstack(all_val_targets).flatten()
-    
-    valid_mask = ~np.isnan(val_preds) & ~np.isnan(val_targets)
-    val_preds = val_preds[valid_mask]
-    val_targets = val_targets[valid_mask]
-    
-    if len(val_preds) == 0:
-        logger.warning("验证集无有效数据，无法计算校准映射。")
-        return {}, None
-    
-    residuals = val_targets - val_preds
-    pred_min = np.min(val_preds).astype(np.float64)
-    pred_max = np.max(val_preds).astype(np.float64)
-    epsilon = 1e-9
-    bin_edges = np.linspace(pred_min - epsilon, pred_max + epsilon, num_bins + 1, dtype=np.float64)
-    
-    df_val = pd.DataFrame({'y_pred': val_preds.astype(np.float32), 'residuals': residuals})
-    df_val['bin_index'] = pd.cut(df_val['y_pred'], bins=bin_edges, include_lowest=True, labels=False)
-    mean_residuals_per_bin = df_val.groupby('bin_index')['residuals'].mean()
-    calibration_map = mean_residuals_per_bin.to_dict()
-    
-    for i in range(num_bins):
-        if i not in calibration_map:
-            calibration_map[i] = 0.0
-            logger.debug(f"校准映射中 bin {i} 无数据，填充平均残差为 0.0")
-    
-    logger.info(f"校准映射计算完成。映射: {calibration_map}")
-    return calibration_map, bin_edges
-
-def apply_calibration(predictions, calibration_map, bin_edges):
-    """
-    将计算好的校准映射应用于新的预测。
-    """
-    if not calibration_map or bin_edges is None:
-        logger.warning("校准映射无效，返回原始预测值。")
-        return predictions
-        
-    predictions = np.array(predictions)
-    corrected_predictions = predictions.copy()
-    bin_indices = pd.cut(predictions, bins=bin_edges, include_lowest=True, labels=False, right=True)
-    
-    nan_indices = pd.isna(bin_indices)
-    if nan_indices.any():
-        num_nan = nan_indices.sum()
-        logger.warning(f"{num_nan} 个预测值超出校准范围 [{bin_edges[0]:.4f}, {bin_edges[-1]:.4f}]，这些值将不会被校准。")
-    
-    for i in range(len(predictions)):
-        bin_idx = bin_indices[i]
-        if pd.isna(bin_idx):
-            continue
-        
-        bin_idx = int(bin_idx)
-        if bin_idx in calibration_map:
-            correction = calibration_map[bin_idx]
-            corrected_predictions[i] = predictions[i] - correction
-        else:
-            logger.warning(f"未找到 bin 索引 {bin_idx} 的校准值 (来自预测值 {predictions[i]:.4f})，跳过校准。")
-    
-    logger.info("预测值校准应用完成。")
-    return corrected_predictions
-
-# +++ 新增简化的可视化函数 +++
-def visualize_simple_predictions(element, targets, predictions, output_dir):
-    """
-    Simplified visualization function, directly plots target vs. prediction scatter.
-    """
-    logger = logging.getLogger('visualize_simple')
-    logger.info(f"[{element}] Generating simplified Target vs. Prediction plot...")
-    os.makedirs(output_dir, exist_ok=True)
-
-    # --- Remove Font Settings ---
-    # try:
-    #     plt.rcParams['font.sans-serif'] = ['SimHei']
-    #     plt.rcParams['axes.unicode_minus'] = False
-    # except Exception:
-    #     logger.warning("Failed to set SimHei font.")
-    # --- End Font Settings ---
-        
-    if targets.size == 0 or predictions.size == 0 or targets.size != predictions.size:
-        logger.warning(f"[{element}] Targets or predictions are empty or have mismatched lengths, cannot plot.")
-        return
-
-    valid_mask = np.isfinite(targets) & np.isfinite(predictions)
-    targets_valid = targets[valid_mask]
-    predictions_valid = predictions[valid_mask]
-    if len(targets_valid) < 2:
-        logger.warning(f"[{element}] Insufficient valid data after cleaning, cannot plot.")
-        return
-
-    rmse = np.sqrt(mean_squared_error(targets_valid, predictions_valid))
-    mae = mean_absolute_error(targets_valid, predictions_valid)
-    r2 = r2_score(targets_valid, predictions_valid)
-
-    # Plot scatter plot
-    plt.figure(figsize=(8, 8))
-    # --- Change color to black --- 
-    plt.scatter(targets_valid, predictions_valid, alpha=0.3, label='Predictions', color='black') 
-    # --- End change ---
-
-    # Plot y=x line
-    min_val = min(np.min(targets_valid), np.min(predictions_valid))
-    max_val = max(np.max(targets_valid), np.max(predictions_valid))
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Ideal (y=x)')
-
-    # Add metrics text
-    metrics_text = f'RMSE: {rmse:.4f}\nMAE: {mae:.4f}\nR²: {r2:.4f}'
-    plt.text(0.05, 0.95, metrics_text, transform=plt.gca().transAxes,
-             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-
-    plt.title(f'{element} - Target vs. Prediction (Original)')
-    plt.xlabel('True Target Value')
-    plt.ylabel('Model Prediction Value')
-    plt.legend()
-    plt.axis('equal')
-    plt.grid(False) # <--- Explicitly disable grid
-    plt.tight_layout()
-
-    plot_path = os.path.join(output_dir, f'{element}_target_vs_prediction_simple.png')
-    plt.savefig(plot_path)
-    plt.close()
-    logger.info(f"[{element}] Simplified Target vs. Prediction plot saved to: {plot_path}")
-    
-    # 恢复默认字体设置 (可选)
-    # plt.rcdefaults()
-# +++ 结束新增函数 +++
 
 if __name__ == '__main__':
     setup_logging() # 在程序入口处调用日志设置
