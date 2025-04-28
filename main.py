@@ -225,102 +225,84 @@ def calculate_dataset_stats(data_loader):
 
 def visualize_mc_uncertainty(element, mean_predictions, uncertainties, targets, output_dir):
     """
-    可视化 MC Dropout 的不确定性分析结果。
-
-    参数:
-        element (str): 元素名称。
-        mean_predictions (np.ndarray): MC Dropout 预测的平均值。
-        uncertainties (np.ndarray): MC Dropout 预测的标准差 (不确定性)。
-        targets (np.ndarray): 真实标签。
-        output_dir (str): 保存图表的目录。
+    Visualize MC Dropout uncertainty analysis results.
     """
-    logger.info(f"开始为元素 {element} 生成 MC Dropout 不确定性可视化图表...")
+    logger.info(f"Generating MC Dropout uncertainty plots for element {element}...")
     os.makedirs(output_dir, exist_ok=True)
 
-    # --- 添加字体设置 --- 
-    try:
-        plt.rcParams['font.sans-serif'] = ['SimHei'] # 指定默认字体为 SimHei
-        plt.rcParams['axes.unicode_minus'] = False   # 解决保存图像是负号'-'显示为方块的问题
-        logger.info("尝试设置字体为 SimHei 以支持中文显示。")
-    except Exception as font_err:
-        logger.warning(f"设置 SimHei 字体失败，中文可能无法正常显示: {font_err}")
-    # --- 结束字体设置 --- 
+    # --- Remove Font Settings --- 
+    # plt.rcParams['font.sans-serif'] = ['SimHei'] 
+    # plt.rcParams['axes.unicode_minus'] = False   
+    # --- End Font Settings --- 
 
-    # 确保输入长度一致
+    # Ensure consistent input lengths
     min_len = min(len(mean_predictions), len(uncertainties), len(targets))
     if min_len == 0:
-        logger.warning(f"MC Dropout 输入数据为空 (元素: {element})，跳过可视化。")
+        logger.warning(f"MC Dropout input data is empty (element: {element}), skipping visualization.")
         return
     mean_predictions = mean_predictions[:min_len]
     uncertainties = uncertainties[:min_len]
     targets = targets[:min_len]
         
-    # 计算绝对误差
+    # Calculate absolute errors
     abs_errors = np.abs(targets - mean_predictions)
 
-    # 清理可能存在的 NaN/Inf
+    # Clean potential NaN/Inf values
     valid_mask = np.isfinite(uncertainties) & np.isfinite(abs_errors)
-    if np.sum(valid_mask) < 2: # 需要至少两个点来计算相关性或绘图
-        logger.warning(f"MC Dropout 清理 NaN/Inf 后有效数据不足 (元素: {element})，跳过可视化。")
+    if np.sum(valid_mask) < 2: 
+        logger.warning(f"Insufficient valid data after cleaning NaN/Inf for MC Dropout (element: {element}), skipping visualization.")
         return
     uncertainties_valid = uncertainties[valid_mask]
     abs_errors_valid = abs_errors[valid_mask]
 
-    # 1. 绘制 不确定性 vs 绝对误差 散点图
+    # 1. Plot Uncertainty vs. Absolute Error Scatter Plot
     try:
-        # plt.style.use('seaborn-v0_8-whitegrid') # 可以保留或更改样式
         plt.figure(figsize=(10, 6))
-        plt.scatter(uncertainties_valid, abs_errors_valid, alpha=0.4, label='样本点')
+        plt.scatter(uncertainties_valid, abs_errors_valid, alpha=0.4, label='Samples') # English Label
 
-        # 添加趋势线
+        # Add trend line
         z = np.polyfit(uncertainties_valid, abs_errors_valid, 1)
         p = np.poly1d(z)
         sorted_uncertainties = np.sort(uncertainties_valid)
-        plt.plot(sorted_uncertainties, p(sorted_uncertainties), "r--", label=f'趋势线 (y={z[0]:.2f}x+{z[1]:.2f})')
+        plt.plot(sorted_uncertainties, p(sorted_uncertainties), "r--", label=f'Trend (y={z[0]:.2f}x+{z[1]:.2f})') # English Label
 
-        # 计算皮尔逊相关系数
+        # Calculate Pearson correlation
         correlation, p_value = pearsonr(uncertainties_valid, abs_errors_valid)
-        # 使用 f-string 格式化标题，确保中文正确显示
-        plt.title(f'{element} - MC Dropout 不确定性 vs. 绝对误差\n相关系数: {correlation:.3f} (p={p_value:.3g})') 
+        # English Title
+        plt.title(f'{element} - MC Dropout Uncertainty vs. Absolute Error\nCorrelation: {correlation:.3f} (p={p_value:.3g})') 
 
-        plt.xlabel('预测不确定性 (标准差)')
-        plt.ylabel('绝对误差 (|真实值 - 平均预测值|)')
+        plt.xlabel('Prediction Uncertainty (Std Dev)') # English Label
+        plt.ylabel('Absolute Error (|True - Mean Prediction|)') # English Label
         plt.legend()
-        # plt.grid(True) # <--- 移除网格
+        # plt.grid(True) # Grid removed
         scatter_plot_path = os.path.join(output_dir, f'{element}_mc_uncertainty_vs_error_scatter.png')
         plt.savefig(scatter_plot_path)
         plt.close()
-        logger.info(f"不确定性 vs. 误差散点图已保存: {scatter_plot_path}")
+        logger.info(f"Uncertainty vs. Error scatter plot saved: {scatter_plot_path}")
     except Exception as e:
-        logger.error(f"绘制 MC Dropout 散点图时出错: {e}", exc_info=True)
-        plt.close() # 确保关闭图形
+        logger.error(f"Error plotting MC Dropout scatter plot: {e}", exc_info=True)
+        plt.close() 
 
-    # 2. 绘制 按不确定性分箱的误差箱线图
+    # 2. Plot Error Box Plot by Uncertainty Bins
     try:
         num_bins = 4
-        # 使用清理后的不确定性数据进行分箱
         uncertainty_bins = pd.qcut(uncertainties_valid, q=num_bins, labels=False, duplicates='drop')
-        # 确保 bin_labels 的长度与实际生成的 bin 数量一致
         actual_num_bins = len(np.unique(uncertainty_bins))
-        if actual_num_bins == 0: raise ValueError("分箱后无有效区间")
-        # 使用 f-string 格式化标签，尝试修复中文
+        if actual_num_bins == 0: raise ValueError("No valid bins after qcut")
+        # English Labels for bins
         bin_labels = [f'{i*100/actual_num_bins:.0f}-{(i+1)*100/actual_num_bins:.0f}%' for i in range(actual_num_bins)]
 
-        # 准备箱线图数据 (使用清理后的误差数据)
         error_data_in_bins = []
         actual_bin_labels = []
-        # 使用 unique bins 索引来迭代，防止因 duplicates='drop' 导致索引不连续
         unique_bins = sorted(np.unique(uncertainty_bins))
         for i, bin_idx in enumerate(unique_bins):
              mask = (uncertainty_bins == bin_idx)
-             # 确保我们从 abs_errors_valid 中获取数据
              if np.sum(mask) > 0:
                  error_data_in_bins.append(abs_errors_valid[mask])
-                 # 使用正确的标签索引
                  actual_bin_labels.append(bin_labels[i])
 
         if not error_data_in_bins:
-            raise ValueError("无法创建不确定性分箱数据")
+            raise ValueError("Could not create data for uncertainty bins")
 
         plt.figure(figsize=(10, 6))
         box = plt.boxplot(error_data_in_bins, labels=actual_bin_labels, patch_artist=True, showfliers=True)
@@ -333,30 +315,24 @@ def visualize_mc_uncertainty(element, mean_predictions, uncertainties, targets, 
             median.set_color('black')
             median.set_linewidth(2)
 
-        # 使用 f-string 格式化标题
-        plt.title(f'{element} - 不同不确定性区间的绝对误差分布')
-        plt.xlabel('预测不确定性百分位区间')
-        plt.ylabel('绝对误差')
-        # plt.grid(True, axis='y') # <--- 移除网格
+        # English Title and Labels
+        plt.title(f'{element} - Absolute Error Distribution by Uncertainty Quantile')
+        plt.xlabel('Prediction Uncertainty Percentile Range')
+        plt.ylabel('Absolute Error')
+        # plt.grid(True, axis='y') # Grid removed
         boxplot_path = os.path.join(output_dir, f'{element}_mc_error_boxplot_by_uncertainty.png')
         plt.savefig(boxplot_path)
         plt.close()
-        logger.info(f"误差箱线图 (按不确定性分箱) 已保存: {boxplot_path}")
+        logger.info(f"Error box plot by uncertainty bins saved: {boxplot_path}")
 
     except ValueError as ve:
-        # 特别处理 qcut 可能因数据点少或分布问题失败的情况
-        logger.warning(f"无法为 {element} 创建误差箱线图 (可能数据点太少或分布无法分箱): {ve}")
+        logger.warning(f"Could not create error box plot for {element} (maybe too few points or distribution issue): {ve}")
         plt.close()
     except Exception as e:
-        logger.error(f"绘制误差箱线图失败: {e}", exc_info=True)
+        logger.error(f"Error plotting error box plot: {e}", exc_info=True)
         plt.close()
 
-    # --- 恢复默认字体设置 (可选，如果希望不影响其他绘图) ---
-    # plt.rcdefaults()
-    # logger.info("恢复 matplotlib 默认字体设置。")
-    # --- 结束恢复设置 ---
-
-    logger.info(f"元素 {element} 的 MC Dropout 不确定性可视化完成。")
+    logger.info(f"MC Dropout uncertainty visualization finished for {element}.")
 
 def train_and_evaluate_model(model, train_loader, val_loader, test_loader, element, device, config, augment_fn=None):
     """
@@ -725,22 +701,22 @@ def process_element(element, config, architecture_params={}):
         
         # 2. 评估结果可视化 (使用返回的原始预测和目标)
         if original_predictions.size > 0 and original_targets.size > 0:
-            # 使用 plot_predictions_vs_true 替换 visualize_evaluation_results
-            logger.info(f"调用 plot_predictions_vs_true 进行标准评估可视化...")
-            plot_predictions_vs_true( # <--- RENAMED HERE
-                elements=[element], # Assuming it takes a list of elements
-                # targets=original_targets, # Checking function signature, might not need these directly if it reloads results
-                # predictions=original_predictions, 
-                plot_dir=element_plot_dir, # Pass the specific plot directory
-                # prefix='original_' # Prefix might not be supported, plot_predictions_vs_true likely uses standard naming
+            # --- 修改调用点，使用新的 visualize_simple_predictions --- 
+            logger.info(f"调用 visualize_simple_predictions 进行标准评估可视化...")
+            visualize_simple_predictions( # <--- 调用新函数
+                element=element,
+                targets=original_targets, # 直接传递数组
+                predictions=original_predictions, # 直接传递数组
+                output_dir=element_plot_dir
             )
+            # --- 结束修改调用点 ---
         else: logger.warning(f"[{element}] 缺少原始预测或目标数据，无法绘制评估结果图表。")
             
     except NameError as ne:
          if 'visualize_training_progress' in str(ne):
               logger.error("函数 visualize_training_progress 未定义或未导入!")
-         elif 'plot_predictions_vs_true' in str(ne): # <--- UPDATED NAME HERE
-              logger.error("函数 plot_predictions_vs_true 未定义或未导入!")
+         elif 'visualize_simple_predictions' in str(ne): # <--- 更新检查的函数名
+              logger.error("函数 visualize_simple_predictions 未定义或未导入!")
          else: logger.error(f"标准可视化时发生 NameError: {ne}")
     except Exception as viz_err:
          logger.error(f"生成标准可视化时出错: {viz_err}", exc_info=True)
@@ -1940,6 +1916,67 @@ def apply_calibration(predictions, calibration_map, bin_edges):
     
     logger.info("预测值校准应用完成。")
     return corrected_predictions
+
+# +++ 新增简化的可视化函数 +++
+def visualize_simple_predictions(element, targets, predictions, output_dir):
+    """
+    Simplified visualization function, directly plots target vs. prediction scatter.
+    """
+    logger = logging.getLogger('visualize_simple')
+    logger.info(f"[{element}] Generating simplified Target vs. Prediction plot...")
+    os.makedirs(output_dir, exist_ok=True)
+
+    # --- Remove Font Settings ---
+    # try:
+    #     plt.rcParams['font.sans-serif'] = ['SimHei']
+    #     plt.rcParams['axes.unicode_minus'] = False
+    # except Exception:
+    #     logger.warning("Failed to set SimHei font.")
+    # --- End Font Settings ---
+        
+    if targets.size == 0 or predictions.size == 0 or targets.size != predictions.size:
+        logger.warning(f"[{element}] Targets or predictions are empty or have mismatched lengths, cannot plot.")
+        return
+
+    valid_mask = np.isfinite(targets) & np.isfinite(predictions)
+    targets_valid = targets[valid_mask]
+    predictions_valid = predictions[valid_mask]
+    if len(targets_valid) < 2:
+        logger.warning(f"[{element}] Insufficient valid data after cleaning, cannot plot.")
+        return
+
+    rmse = np.sqrt(mean_squared_error(targets_valid, predictions_valid))
+    mae = mean_absolute_error(targets_valid, predictions_valid)
+    r2 = r2_score(targets_valid, predictions_valid)
+
+    plt.figure(figsize=(8, 8))
+    plt.scatter(targets_valid, predictions_valid, alpha=0.3, label='Predictions') # English Label
+
+    min_val = min(np.min(targets_valid), np.min(predictions_valid))
+    max_val = max(np.max(targets_valid), np.max(predictions_valid))
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Ideal (y=x)') # English Label
+
+    metrics_text = f'RMSE: {rmse:.4f}\nMAE: {mae:.4f}\nR²: {r2:.4f}'
+    plt.text(0.05, 0.95, metrics_text, transform=plt.gca().transAxes,
+             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+    # English Title and Labels
+    plt.title(f'{element} - Target vs. Prediction (Original)') 
+    plt.xlabel('True Target Value')
+    plt.ylabel('Model Prediction Value')
+    plt.legend()
+    plt.axis('equal') 
+    # plt.grid(False) # Grid removed
+    plt.tight_layout()
+
+    plot_path = os.path.join(output_dir, f'{element}_target_vs_prediction_simple.png')
+    plt.savefig(plot_path)
+    plt.close()
+    logger.info(f"[{element}] Simplified Target vs. Prediction plot saved to: {plot_path}")
+    
+    # 恢复默认字体设置 (可选)
+    # plt.rcdefaults()
+# +++ 结束新增函数 +++
 
 if __name__ == '__main__':
     setup_logging() # 在程序入口处调用日志设置
