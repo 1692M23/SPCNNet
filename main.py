@@ -22,8 +22,8 @@ from torchvision import transforms
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from scipy.stats import pearsonr
 import seaborn as sns
-from model import load_trained_model, predict, SpectralResCNN_GCN, predict_with_mc_dropout # <--- 移动导入到顶部
-from utils import set_seed, determine_device 
+from model import load_trained_model, predict, SpectralResCNN_GCN, predict_with_mc_dropout 
+from utils import set_seed 
 
 # 导入自定义模块
 import config
@@ -1236,14 +1236,6 @@ def determine_device(requested_device):
          if torch.cuda.is_available():
              logger.info("未指定设备或无法识别，默认使用 CUDA (可用)")
              return torch.device('cuda')
-         # elif HAS_XLA: # Optionally default to TPU if CUDA not available
-         #    try:
-         #        device = xm.xla_device()
-         #        logger.info(f"未指定设备或无法识别，默认使用 TPU (可用): {device}")
-         #        return device
-         #    except Exception:
-         #        logger.info("未指定设备或无法识别，CUDA/TPU均不可用，默认使用 CPU")
-         #        return torch.device('cpu')
          else:
              logger.info("未指定设备或无法识别，默认使用 CPU")
              return torch.device('cpu')
