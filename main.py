@@ -17,13 +17,13 @@ from sklearn.model_selection import ParameterGrid
 import pandas as pd
 import glob
 import traceback
-import json # <--- 添加 json 导入
+import json 
 from torchvision import transforms
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from scipy.stats import pearsonr
-import seaborn as sns # 导入 seaborn 用于绘图
-from model import load_trained_model, predict, SpectralResCNN_GCN # 确保导入必要模型和函数
-from utils import set_seed # 确保导入 set_seed
+import seaborn as sns
+from model import load_trained_model, predict, SpectralResCNN_GCN, predict_with_mc_dropout # <--- 移动导入到顶部
+from utils import set_seed 
 
 # 导入自定义模块
 import config
@@ -35,7 +35,7 @@ from fits_cache import FITSCache
 from hyperparameter_tuning_replacement import hyperparameter_tuning as run_grid_search_tuning
 from model_analysis import analyze_model_performance, show_batch_results, analyze_feature_importance, analyze_residuals
 
-# ============ 全局日志配置 ============
+# ============ 全局日志配置 ============ 
 def setup_logging():
     log_dir = 'logs'
     os.makedirs(log_dir, exist_ok=True)
@@ -389,27 +389,46 @@ def train_and_evaluate_model(model, train_loader, val_loader, test_loader, eleme
         
         # 执行评估，获取指标、预测和目标
         avg_loss, metrics, predictions, targets = evaluate_model(model, test_loader, device, loss_fn)
-        logger.info(f"[{element}] 测试指标: {metrics}")
         
-        # 保存测试指标 (可选，但通常有用)
+        # +++ 计算并添加系统性偏差 +++
+        if predictions.size > 0 and targets.size > 0 and predictions.size == targets.size:
+            valid_mask = np.isfinite(predictions) & np.isfinite(targets)
+            if np.sum(valid_mask) > 0:
+                 bias = np.mean(predictions[valid_mask] - targets[valid_mask])
+                 metrics['bias'] = bias # 添加到指标字典
+                 logger.info(f"[{element}] 计算的系统性偏差 (Mean Error): {bias:.6f}")
+            else:
+                 logger.warning(f"[{element}] 测试集评估后无有效数据计算偏差。")
+                 metrics['bias'] = np.nan
+        else:
+             logger.warning(f"[{element}] 测试集预测或目标为空或长度不匹配，无法计算偏差。")
+             metrics['bias'] = np.nan
+        # +++ 结束计算偏差 +++
+            
+        logger.info(f"[{element}] 测试指标: {metrics}") # 现在会包含 bias
+        
+        # 保存测试指标 (现在会自动包含 bias)
         try:
             results_dir = config.output_config.get('results_dir', 'results'); element_eval_dir = os.path.join(results_dir, 'evaluation', element); os.makedirs(element_eval_dir, exist_ok=True)
-            metrics_file_path = os.path.join(element_eval_dir, f'{element}_test_metrics.json') # Use a standard name
-            serializable_metrics = {k: (float(f'{v:.6g}') if isinstance(v, np.floating) else float(v)) if isinstance(v, (np.number, np.bool_)) else v for k, v in metrics.items()}
+            metrics_file_path = os.path.join(element_eval_dir, f'{element}_test_metrics.json')
+            # 确保 bias 也能被正确序列化
+            serializable_metrics = {k: (float(f'{v:.6g}') if isinstance(v, (np.floating, np.float64, np.float32)) else float(v)) if isinstance(v, (np.number, np.bool_)) else v for k, v in metrics.items()}
             with open(metrics_file_path, 'w') as f: json.dump(serializable_metrics, f, indent=4)
             logger.info(f"[{element}] 测试指标已保存到: {metrics_file_path}")
-        except Exception as save_err: logger.error(f"[{element}] 保存测试指标时出错: {save_err}")
+        except Exception as save_err: 
+            logger.error(f"[{element}] 保存测试指标时出错: {save_err}")
+            logger.error(traceback.format_exc()) # 添加 traceback 以便调试
 
-        # 3. 返回 process_element 需要的值
-        # 假设 process_element 需要这些来进行后续可视化
+        # 3. 返回 process_element 需要的值 (metrics 现在包含 bias)
         logger.info(f"[{element}] train_and_evaluate_model 即将返回。")
         return model, history, predictions, targets, metrics
 
     except Exception as e:
         logger.error(f"[{element}] 在 train_and_evaluate_model 中发生严重错误: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
-        # 返回 None 或空值表示失败
-        return None, {}, np.array([]), np.array([]), {'rmse': np.nan, 'mae': np.nan, 'r2': np.nan, 'mse': np.nan}
+        # 在返回的 metrics 中也添加 NaN bias
+        error_metrics = {'rmse': np.nan, 'mae': np.nan, 'r2': np.nan, 'mse': np.nan, 'bias': np.nan}
+        return None, {}, np.array([]), np.array([]), error_metrics
 
 def hyperparameter_tuning(element, train_loader, val_loader, config):
     """
@@ -746,36 +765,20 @@ def process_element(element, config, architecture_params={}):
     # --- MC Dropout 评估和可视化 (新添加的部分) --- 
     logger.info(f"为 {element} 进行 MC Dropout 不确定性评估...")
     try:
-        from model import predict_with_mc_dropout # 从 model.py 导入
+        # --- 移除内部导入，使用顶层导入 --- 
+        # from model import predict_with_mc_dropout 
         mc_samples = config.training_config.get('mc_samples', 50)
-        
-        # 使用返回的最佳模型进行 MC 预测
         mc_mean_predictions, mc_uncertainties, mc_targets = predict_with_mc_dropout(
-            model=model, # 使用从 train_and_evaluate_model 返回的最佳模型
+            model=model, 
             data_loader=test_loader, 
-            device=device,
+            device=device, # 确保这里的 device 是 torch.device 对象
             mc_samples=mc_samples
         )
-        
-        # 计算 MC 指标 (可选)
-        mc_rmse = np.sqrt(mean_squared_error(mc_targets, mc_mean_predictions))
-        mc_mae = mean_absolute_error(mc_targets, mc_mean_predictions)
-        mc_r2 = r2_score(mc_targets, mc_mean_predictions)
-        logger.info(f"[{element}] MC Dropout 评估 (基于平均预测): RMSE={mc_rmse:.6f}, MAE={mc_mae:.6f}, R²={mc_r2:.6f}")
-        logger.info(f"[{element}] MC Dropout 不确定性统计: Mean={np.mean(mc_uncertainties):.6f}, Median={np.median(mc_uncertainties):.6f}, Std={np.std(mc_uncertainties):.6f}")
-        
-        # 调用 MC 可视化函数 (假设已在 main.py 定义)
-        visualize_mc_uncertainty(
-            element=element,
-            mean_predictions=mc_mean_predictions,
-            uncertainties=mc_uncertainties,
-            targets=mc_targets, # 使用 MC 预测返回的目标值
-            output_dir=element_plot_dir # 复用之前的绘图目录
-        )
-    except ImportError:
-         logger.error(f"[{element}] 无法从 model.py 导入 predict_with_mc_dropout，跳过 MC Dropout。")
-    except NameError as ne:
-         if 'visualize_mc_uncertainty' in str(ne):
+        # ... (后续 MC 代码) ...
+    except NameError as ne: # <--- 修改：只捕获 NameError
+         if 'predict_with_mc_dropout' in str(ne):
+              logger.error(f"[{element}] 函数 predict_with_mc_dropout 未定义，跳过 MC Dropout。确保已在顶部导入。")
+         elif 'visualize_mc_uncertainty' in str(ne):
               logger.error(f"[{element}] 函数 visualize_mc_uncertainty 未定义，跳过 MC 可视化。")
          else: logger.error(f"[{element}] MC Dropout 过程中发生 NameError: {ne}")
     except Exception as mc_err:
