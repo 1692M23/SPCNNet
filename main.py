@@ -18,6 +18,8 @@ import pandas as pd
 import glob
 import traceback
 from torchvision import transforms
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+from scipy.stats import pearsonr
 
 # 导入自定义模块
 import config
@@ -219,6 +221,106 @@ def calculate_dataset_stats(data_loader):
         return total_sum / total_count
     else:
         return 0.0
+
+def visualize_mc_uncertainty(element, mean_predictions, uncertainties, targets, output_dir):
+    """
+    可视化 MC Dropout 的不确定性分析结果。
+
+    参数:
+        element (str): 元素名称。
+        mean_predictions (np.ndarray): MC Dropout 预测的平均值。
+        uncertainties (np.ndarray): MC Dropout 预测的标准差 (不确定性)。
+        targets (np.ndarray): 真实标签。
+        output_dir (str): 保存图表的目录。
+    """
+    logger.info(f"开始为元素 {element} 生成 MC Dropout 不确定性可视化图表...")
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 确保输入长度一致
+    min_len = min(len(mean_predictions), len(uncertainties), len(targets))
+    mean_predictions = mean_predictions[:min_len]
+    uncertainties = uncertainties[:min_len]
+    targets = targets[:min_len]
+
+    # 计算绝对误差
+    abs_errors = np.abs(targets - mean_predictions)
+
+    # 1. 绘制 不确定性 vs 绝对误差 散点图
+    plt.style.use('seaborn-v0_8-whitegrid') # 使用一种美观的样式
+    plt.figure(figsize=(10, 6))
+    plt.scatter(uncertainties, abs_errors, alpha=0.4, label='样本点')
+    
+    # 添加趋势线 (可选，如果点很多可能较慢且杂乱)
+    try:
+        # 移除 NaN 或 Inf 值以拟合趋势线
+        valid_mask = np.isfinite(uncertainties) & np.isfinite(abs_errors)
+        if np.sum(valid_mask) > 1:
+            z = np.polyfit(uncertainties[valid_mask], abs_errors[valid_mask], 1)
+            p = np.poly1d(z)
+            sorted_uncertainties = np.sort(uncertainties[valid_mask])
+            plt.plot(sorted_uncertainties, p(sorted_uncertainties), "r--", label=f'趋势线 (y={z[0]:.2f}x+{z[1]:.2f})')
+        
+        # 计算皮尔逊相关系数
+        correlation, p_value = pearsonr(uncertainties[valid_mask], abs_errors[valid_mask])
+        plt.title(f'{element} - MC Dropout 不确定性 vs. 绝对误差\n相关系数: {correlation:.3f} (p={p_value:.3g})')
+    except Exception as e:
+        logger.warning(f"无法计算或绘制趋势线/相关系数: {e}")
+        plt.title(f'{element} - MC Dropout 不确定性 vs. 绝对误差')
+
+    plt.xlabel('预测不确定性 (标准差)')
+    plt.ylabel('绝对误差 (|真实值 - 平均预测值|)')
+    plt.legend()
+    plt.grid(True)
+    scatter_plot_path = os.path.join(output_dir, f'{element}_mc_uncertainty_vs_error_scatter.png')
+    plt.savefig(scatter_plot_path)
+    plt.close()
+    logger.info(f"不确定性 vs. 误差散点图已保存: {scatter_plot_path}")
+
+    # 2. 绘制 按不确定性分箱的误差箱线图
+    # 使用 pandas qcut 进行分箱 (例如，按四分位数分成4箱)
+    try:
+        num_bins = 4
+        uncertainty_bins = pd.qcut(uncertainties, q=num_bins, labels=False, duplicates='drop')
+        bin_labels = [f'{i*100/num_bins:.0f}-{(i+1)*100/num_bins:.0f}%' for i in range(num_bins)]
+        
+        # 准备箱线图数据
+        error_data_in_bins = []
+        actual_bin_labels = []
+        for i in range(num_bins):
+             mask = (uncertainty_bins == i)
+             if np.sum(mask) > 0: # 确保箱内有数据
+                 error_data_in_bins.append(abs_errors[mask])
+                 actual_bin_labels.append(bin_labels[i])
+        
+        if not error_data_in_bins: # 如果没有有效数据
+            raise ValueError("无法创建不确定性分箱数据")
+
+        plt.figure(figsize=(10, 6))
+        # 使用 showfliers=False 可以隐藏离群点，使图形更清晰，或者保持默认显示它们
+        box = plt.boxplot(error_data_in_bins, labels=actual_bin_labels, patch_artist=True, showfliers=True)
+        
+        # 美化箱线图 (可选)
+        colors = plt.cm.viridis(np.linspace(0, 1, len(error_data_in_bins)))
+        for patch, color in zip(box['boxes'], colors):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.7)
+        for median in box['medians']:
+            median.set_color('black')
+            median.set_linewidth(2)
+        
+        plt.title(f'{element} - 不同不确定性区间的绝对误差分布')
+        plt.xlabel('预测不确定性百分位区间')
+        plt.ylabel('绝对误差')
+        plt.grid(True, axis='y') # 只显示y轴网格线
+        boxplot_path = os.path.join(output_dir, f'{element}_mc_error_boxplot_by_uncertainty.png')
+        plt.savefig(boxplot_path)
+        plt.close()
+        logger.info(f"误差箱线图 (按不确定性分箱) 已保存: {boxplot_path}")
+
+    except Exception as e:
+        logger.error(f"绘制误差箱线图失败: {e}")
+
+    logger.info(f"元素 {element} 的 MC Dropout 不确定性可视化完成。")
 
 def train_and_evaluate_model(model, train_loader, val_loader, test_loader, element, device, config, augment_fn=None):
     """
@@ -708,7 +810,7 @@ def process_element(element, config, architecture_params={}):
         except Exception as save_err:
             logger.error(f"保存元素 {element} 的测试指标文件时出错: {save_err}")
     # <<< End saving test metrics >>>
-
+    
     # 训练完成，清除中断恢复状态
     state_manager.save_state(2, config.training_config.get('num_epochs', 100), val_loss, 0, 
                             stage1_completed=True, training_completed=True)

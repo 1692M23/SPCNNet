@@ -184,7 +184,7 @@ model_config = {
         'gru_num_layers': 1,            # (如果使用 GRU)
         'gru_dropout': 0.0,             # (如果使用 GRU 且层数>1)
         'fc_hidden_layers': [256, 64],  # (保持或根据需要调整)
-        'fc_dropout': [0.6, 0.5],     # <<< 大幅降低 FC Dropout 率 >>>
+        'fc_dropout': [0.25, 0.15],     # <<< 大幅降低 FC Dropout 率 >>>
         'use_adaptive_pooling': True
     },
     'resample_dim': 3000,              # 光谱重采样维度
@@ -224,8 +224,8 @@ training_config = {
     'num_devices': device_config['num_devices'],  # 设备数量
     'elements': ['C_FE', 'MG_FE', 'CA_FE'],
     'resume_training': True,
-    'loss_function': 'Huber',
-    'loss_params': {'delta': 1.0},
+    'loss_function': 'MSE',
+    'loss_params': {},
     # TPU特定配置
     'tpu_config': {
         'use_xla_compilation': True,  # 是否使用XLA编译加速
