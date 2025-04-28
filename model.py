@@ -378,19 +378,17 @@ class SpectralResCNNEnsemble:
                     model_predictions.append(outputs.cpu().numpy())
             
             # 将模型的所有MC预测堆叠
-            model_predictions = np.stack(model_predictions, axis=0)
-            all_predictions.append(model_predictions)
+            model_predictions = np.stack(model_predictions, axis=0)  # [num_models, mc_samples, batch, 1]
+            
+            # 计算最终预测值（所有模型和样本的平均值）
+            predictions = np.mean(model_predictions, axis=(0, 1))
+            
+            # 计算预测不确定性（所有预测的标准差）
+            uncertainty = np.std(model_predictions, axis=(0, 1))
+            
+            all_predictions.append((predictions, uncertainty))
         
-        # 合并所有模型的预测结果
-        all_predictions = np.stack(all_predictions, axis=0)  # [num_models, mc_samples, batch, 1]
-        
-        # 计算最终预测值（所有模型和样本的平均值）
-        predictions = np.mean(all_predictions, axis=(0, 1))
-        
-        # 计算预测不确定性（所有预测的标准差）
-        uncertainty = np.std(all_predictions, axis=(0, 1))
-        
-        return predictions.squeeze(), uncertainty.squeeze()
+        return all_predictions
 
 # =============== 2. 训练相关 ===============
 def train(model, train_loader, val_loader, config, device=None, element=None, start_epoch=0, 
@@ -1679,3 +1677,91 @@ class WeightedMSELoss(nn.Module):
         weights = torch.ones_like(target)
         weights[target > self.threshold] = self.high_weight
         return torch.mean(weights * (pred - target) ** 2)
+
+# +++ 新增 MC Dropout 预测函数 +++
+def predict_with_mc_dropout(model, data_loader, device, mc_samples=50):
+    """
+    Performs prediction using Monte Carlo Dropout for uncertainty estimation.
+
+    Args:
+        model (torch.nn.Module): The trained model.
+        data_loader (DataLoader): DataLoader for the dataset to predict on.
+        device (torch.device): The device to perform computations on.
+        mc_samples (int): The number of Monte Carlo samples (forward passes).
+
+    Returns:
+        tuple: (mean_predictions, uncertainties, targets)
+               - mean_predictions (np.ndarray): Mean predictions over MC samples.
+               - uncertainties (np.ndarray): Standard deviation over MC samples (uncertainty).
+               - targets (np.ndarray): True target values from the data loader.
+    """
+    logger.info(f"开始使用 MC Dropout 进行预测，采样次数: {mc_samples}")
+    model.to(device)
+    
+    # 1. Enable Dropout layers
+    model.train() 
+    
+    all_mc_predictions = []
+    all_targets = []
+    first_batch = True
+
+    # 2. Perform multiple forward passes
+    with torch.no_grad(): # No need to track gradients during prediction
+        # Outer loop for MC samples
+        for i in tqdm(range(mc_samples), desc="MC Dropout Sampling", leave=False):
+            batch_predictions = []
+            batch_targets = [] # Collect targets only once
+            
+            # Inner loop through data loader
+            for inputs, targets_batch in data_loader:
+                inputs, targets_batch = inputs.to(device), targets_batch.to(device)
+                inputs, _, _ = handle_nan_values(inputs, replacement_strategy='mean', name="MC 输入")
+                
+                with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
+                    outputs = model(inputs)
+                outputs, _, _ = handle_nan_values(outputs, replacement_strategy='zero', name="MC 输出")
+
+                batch_predictions.append(outputs.cpu().numpy())
+                if i == 0: # Collect targets only in the first MC sample iteration
+                     batch_targets.append(targets_batch.cpu().numpy())
+            
+            # Concatenate predictions for this MC sample
+            try: 
+                sample_preds = np.vstack(batch_predictions).flatten()
+                all_mc_predictions.append(sample_preds)
+            except ValueError as e:
+                 logger.error(f"Error stacking results in MC sample {i} (check output dimensions?): {e}")
+                 # Optionally skip this sample or return error
+                 continue 
+                 
+            # Concatenate targets after the first MC sample iteration
+            if i == 0 and batch_targets:
+                 try:
+                     all_targets = np.vstack(batch_targets).flatten()
+                 except ValueError as e:
+                     logger.error(f"Error stacking targets (check target dimensions?): {e}")
+                     # Cannot proceed without targets
+                     model.eval() # Restore model state before returning
+                     return np.array([]), np.array([]), np.array([])
+
+    if not all_mc_predictions:
+        logger.error("MC Dropout failed to produce any predictions.")
+        model.eval()
+        return np.array([]), np.array([]), np.array([])
+        
+    # 3. Calculate statistics across MC samples
+    try:
+        all_mc_predictions_np = np.stack(all_mc_predictions, axis=0) # Shape: [mc_samples, num_samples]
+        mean_predictions = np.mean(all_mc_predictions_np, axis=0)
+        uncertainties = np.std(all_mc_predictions_np, axis=0)
+    except Exception as e:
+         logger.error(f"Error calculating mean/std across MC samples: {e}")
+         model.eval()
+         return np.array([]), np.array([]), np.array([])
+
+    # 4. Restore model to evaluation mode
+    model.eval() 
+
+    logger.info(f"MC Dropout 预测完成。平均预测值 shape: {mean_predictions.shape}, 不确定性 shape: {uncertainties.shape}")
+    return mean_predictions, uncertainties, all_targets
+# +++ 结束新增函数 +++
